@@ -512,6 +512,13 @@
 })();
 </script>
 <!-- ========== 启动失败兜底 结束 ========== -->  
+<style id="ios-focus-zoom-guard">
+  /* iOS Safari 在聚焦 font-size < 16px 的输入框时会自动放大页面，之后不还原，
+     表现就是「点一下搜索框，整个界面变大」。聚焦时提到 16px 可阻止这个缩放。 */
+  @media (max-width: 900px) {
+    input:focus, textarea:focus, select:focus { font-size: 16px !important; }
+  }
+</style>
 <!-- ========== 版本更新公告（每个版本只弹一次） ========== -->
 <div id="update-mask" style="display:none;position:fixed;inset:0;z-index:2147483500;background:rgba(0,0,0,.62);backdrop-filter:blur(14px);align-items:center;justify-content:center;padding:20px">
   <div style="width:100%;max-width:340px;background:#fff;border-radius:22px;padding:24px 22px 18px;box-shadow:0 24px 60px rgba(0,0,0,.35);text-align:center;color:#111">
