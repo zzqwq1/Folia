@@ -76,6 +76,9 @@ const MD5 = (() => {
 })();
 
 /** 桌面协议：把编码后的 query 和 UTF-8 body 一起签名。 */
+/** 供其它 provider 复用（酷狗 tracker 的 key 也用它）。 */
+export const md5Hex = MD5;
+
 const signQuery = (path: string, query: Record<string, string>, body = ''): string => {
     const encoded = new URLSearchParams(query).toString();
     let seed = `${SALT}${Array.from(encoded).filter(char => /[a-z0-9]/i.test(char)).sort().join('')}`;
