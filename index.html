@@ -304,7 +304,11 @@
   #donate-card{background:#fff;border-radius:18px;padding:20px 20px 16px;max-width:86vw;width:340px;
     text-align:center;animation:dp .24s ease;box-shadow:0 18px 60px rgba(0,0,0,.45)}
   #donate-card .donate-title{font-size:17px;font-weight:700;color:#1f1f1f;letter-spacing:.02em}
-  #donate-card img{width:min(62vw,240px);border-radius:10px;display:block;margin:14px auto 0}
+  #donate-card img{width:min(62vw,240px);border-radius:10px;display:block;margin:0 auto 6px}
+  #donate-card .donate-row{display:flex;gap:14px;justify-content:center;margin-top:14px}
+  #donate-card .donate-col{flex:1;max-width:150px}
+  #donate-card .donate-col img{width:100%}
+  #donate-card .donate-col .q-label{font-size:12px;color:#555}
   #donate-card p{margin:10px 0 0;font-size:13px;color:#666;line-height:1.5}
   #donate-card p.hint{font-size:12px;color:#9a9a9a;margin-top:4px}
   #donate-close{margin-top:14px;border:0;background:#f2f3f5;color:#333;font-size:14px;
@@ -315,7 +319,16 @@
 <div id="donate-mask">
   <div id="donate-card">
     <div class="donate-title">给 Ex 赞赏</div>
-    <img src="/appreciate-qr.jpg" alt="赞赏码">
+    <div class="donate-row">
+      <div class="donate-col">
+        <img src="/appreciate-qr.jpg" alt="赞赏码">
+        <div class="q-label">赞赏码</div>
+      </div>
+      <div class="donate-col">
+        <img src="/qq-group-qr.png" alt="QQ 群二维码">
+        <div class="q-label">QQ 群：1131099078</div>
+      </div>
+    </div>
     <p>如果 Folia 帮到你了，可以请我喝杯咖啡 ❤️</p>
     <p class="hint">长按二维码可保存到相册</p>
     <button id="donate-close">关闭</button>
