@@ -81,24 +81,29 @@ export const handleKugou = async (request: Request, url: URL): Promise<Response>
         if (!/^[a-f0-9]{32}$/i.test(hash)) return json({ status: 0, error: 'hash is required' }, 400);
         const quality = (url.searchParams.get('quality') || 'high').toLowerCase();
         // hq / sq / 128 对应不同 br 参数；取不到时退回 hq。
-        const br = quality === 'lossless' ? 'sq' : quality === 'standard' ? '128' : 'hq';
-        const key = md5Hex(hash + 'kgcloudv2');
-        const target = `${TRACKER_URL}?key=${key}&hash=${hash}&br=${br}&appid=1005&pid=2&cmd=25&behavior=play`;
-        let response: Response;
-        try {
-            response = await fetch(target, {
-                headers: { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36' },
-            });
-        } catch (error) {
-            return json({ status: 0, error: `kugou tracker unreachable: ${String(error)}` }, 502);
+        // 不同音质可用性不一样（code 2 = 该音质拿不到）。按 128 → hq → sq 依次尝试，
+        // 哪个能返回直链就用哪个，避免「换一首歌就播不了」。
+        const attempts = quality === 'lossless' ? ['sq', 'hq', '128']
+            : quality === 'standard' ? ['128', 'hq']
+            : ['hq', '128', 'sq'];
+        let playUrl = '';
+        let lastCode: unknown = '';
+        for (const br of attempts) {
+            const key = md5Hex(hash + 'kgcloudv2');
+            const target = ${TRACKER_URL}?key=&hash=&br=&appid=1005&pid=2&cmd=25&behavior=play;
+            try {
+                const response = await fetch(target, {
+                    headers: { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36' },
+                });
+                const payload: any = await response.json().catch(() => null);
+                lastCode = payload?.error ?? payload?.status ?? '';
+                const urls: string[] = Array.isArray(payload?.url) ? payload.url : payload?.url ? [payload.url] : [];
+                const found = urls.find((item: string) => /^https?:\/\//.test(item));
+                if (found) { playUrl = found.replace(/^http:\/\//, 'https://'); break; }
+            } catch { /* 换下一个音质 */ }
         }
-        const payload: any = await response.json().catch(() => null);
-        const urls: string[] = Array.isArray(payload?.url) ? payload.url : payload?.url ? [payload.url] : [];
-        const rawUrl = urls.find((item: string) => /^https?:\/\//.test(item)) || '';
-        // 页面是 https：直链统一升到 https，避免混合内容被拦截。
-        const playUrl = rawUrl.replace(/^http:\/\//, 'https://');
         if (!playUrl) {
-            return json({ status: 0, error: `kugou tracker returned no url (code ${payload?.error ?? payload?.status ?? '?'})` }, 502);
+            return json({ status: 0, error: kugou tracker returned no url (code ) }, 502);
         }
         return json({
             status: 1,
