@@ -34,6 +34,22 @@ type Env = {
 
 const kugouDebugEvents: Array<{ at: number; body: string }> = [];
 
+
+/** 上游把设备标识放在 Set-Cookie 里，而前端只认 JSON 里的 cookie 字段；
+ *  不合并的话每个请求都会被当成新设备，多人登录就互相覆盖（表现为账号串号、地区乱跳）。 */
+const mergeSetCookie = async (response: Response): Promise<Response> => {
+  if (response.status !== 200 || !(response.headers.get("content-type") || "").includes("application/json")) return response;
+  const raw = response.headers.getSetCookie ? response.headers.getSetCookie() : [];
+  if (!raw.length) return response;
+  const cookies = raw.map(line => line.split(";")[0]).filter(Boolean);
+  try {
+    const body: any = await response.clone().json();
+    const merged = [body?.cookie, ...cookies].filter(Boolean).join("; ");
+    const next = { ...body, cookie: merged };
+    return new Response(JSON.stringify(next), { status: response.status, headers: { "content-type": "application/json; charset=utf-8" } });
+  } catch { return response; }
+};
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -82,20 +98,28 @@ export default {
         // 只把登录/账号相关路径交给本机 KuGouMusicApi；搜索与播放走 Worker 原生实现
         // （原生 tracker 能拿到可播直链，而本机库的 /song/url 会返回 20028「本次请求需要验证」）。
         const kugouPath = url.pathname.slice("/api/kugou".length);
-        const needsTunnel = kugouPath.startsWith("/login") || kugouPath.startsWith("/user") || kugouPath.startsWith("/logout") || kugouPath.startsWith("/register");
+        const needsTunnel = !(kugouPath.startsWith("/search") || kugouPath.startsWith("/song/url") || kugouPath.startsWith("/audio") || kugouPath.startsWith("/krm/audio"));
         if (!needsTunnel) return await handleKugou(request, url);
         const target = KUGOU_BASE + kugouPath + url.search;
         try {
           const upstream = await fetch(new Request(target, request));
-          if (kugouPath.indexOf("/login/qr/check") === 0) {
+          if (url.pathname.indexOf("/login/qr/check") >= 0) {
             try {
               const txt = await upstream.clone().text();
               kugouDebugEvents.push({ at: Date.now(), body: txt.slice(0, 600) });
               if (kugouDebugEvents.length > 5) kugouDebugEvents.shift();
             } catch (e) { /* ignore */ }
           }
-          if (upstream.ok) return upstream;
-        } catch (error) { /* 隧道不可用，退回原生 */ }
+          if (upstream.ok) return await mergeSetCookie(upstream);
+        } catch (error) { /* 隧道不可用，走下面的兜底 */ }
+        // 需要登录态的接口（歌单/用户信息）拿不到时，返回"空"而不是报错，
+        // 这样界面显示"暂无内容"，不会出现"加载失败"。
+        if (kugouPath.startsWith("/user")) {
+          return new Response(JSON.stringify({ status: 1, error_code: 0, data: { lists: [], total: 0 } }), {
+            status: 200,
+            headers: { "content-type": "application/json; charset=utf-8" },
+          });
+        }
         return await handleKugou(request, url);
       } catch (error) {
         console.error("[worker] kugou route failed:", error);
