@@ -81,8 +81,9 @@ const boot = async () => {
             }
         }
     }
-    // 没有预取到 URL（HTML 里没有 preload 链接）时，import 本身仍可能挂住：给它一个 8 秒上限，
-    // 到点就整页重载一次（HTML 已是 no-store，重载会拿到新 chunk 名并换新连接），仅重试一次。
+    // 没有预取到 URL（HTML 里没有 preload 链接）时，import 本身仍可能挂住。
+    // 现在的策略：等够 20 秒 → 首次整页重载（HTML 已是 no-store，会换新连接与新 chunk 名）；
+    // 第二次仍卡住就主动唤起兜底面板，绝不让用户停在开屏上无路可走。
     stage('import-pending');
     let settled = false;
     const timer = setTimeout(() => {
@@ -93,8 +94,14 @@ const boot = async () => {
         if (!retried) {
             try { sessionStorage.setItem('folia.boot.retried', '1'); } catch { /* ignore */ }
             location.reload();
+            return;
         }
-    }, 8000);
+        try {
+            (window as unknown as { __foliaRevealFail?: (msg: string) => void }).__foliaRevealFail?.(
+                '主程序下载超时（已重试一次），请点下面按钮重试',
+            );
+        } catch { /* ignore */ }
+    }, 20000);
     try {
         await import('./bootstrap');
         settled = true;
@@ -105,6 +112,11 @@ const boot = async () => {
         clearTimeout(timer);
         stage('bootstrap-failed');
         console.error('[boot] bootstrap failed', error);
+        try {
+            (window as unknown as { __foliaRevealFail?: (msg: string) => void }).__foliaRevealFail?.(
+                '主程序加载失败：' + String((error as Error)?.message || error),
+            );
+        } catch { /* ignore */ }
     }
 };
 
