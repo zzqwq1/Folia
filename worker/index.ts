@@ -74,7 +74,12 @@ export default {
       try {
         // 优先走本机 KuGouMusicApi（含扫码登录）；隧道不可用时退回 Worker 原生实现。
         const KUGOU_BASE = "https://missile-calculated-sys-cut.trycloudflare.com";
-        const target = KUGOU_BASE + url.pathname.slice("/api/kugou".length) + url.search;
+        // 只把登录/账号相关路径交给本机 KuGouMusicApi；搜索与播放走 Worker 原生实现
+        // （原生 tracker 能拿到可播直链，而本机库的 /song/url 会返回 20028「本次请求需要验证」）。
+        const kugouPath = url.pathname.slice("/api/kugou".length);
+        const needsTunnel = kugouPath.startsWith("/login") || kugouPath.startsWith("/user") || kugouPath.startsWith("/logout");
+        if (!needsTunnel) return await handleKugou(request, url);
+        const target = KUGOU_BASE + kugouPath + url.search;
         try {
           const upstream = await fetch(new Request(target, request));
           if (upstream.ok) return upstream;
@@ -82,7 +87,7 @@ export default {
         return await handleKugou(request, url);
       } catch (error) {
         console.error("[worker] kugou route failed:", error);
-        return new Response(JSON.stringify({ status: 0, error: "kugou route failed" }), { status: 502, headers: { "content-type": "application/json; charset=utf-8" } });
+        return new Response(JSON.stringify({ status: 0, error: "kugou route failed: " + String((error as Error)?.message || error) }), { status: 502, headers: { "content-type": "application/json; charset=utf-8" } });
       }
     }
 
