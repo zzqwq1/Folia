@@ -2043,6 +2043,9 @@ export default function App() {
         }
         if (audioRef.current) {
             audioRef.current.currentTime = time;
+            // 立即同步播放时钟：iOS/WKWebView 上 `seeked` 事件可能延迟上百毫秒甚至丢失，
+            // 拖进度条后歌词会落在旧的时钟上（表现为「歌词差三四句」）。
+            currentTime.set(time);
             if (audioRef.current.paused) {
                 void audioRef.current.play();
                 setPlayerState(PlayerState.PLAYING);
