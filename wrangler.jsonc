@@ -16,7 +16,8 @@
       "/api/*",
       "/",
       "/index.html",
-      "/boot-manifest.json"
+      "/boot-manifest.json",
+      "/assets/*"
     ]
   },
   "durable_objects": {
