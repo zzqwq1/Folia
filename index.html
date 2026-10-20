@@ -414,6 +414,10 @@
     var pre = document.getElementById('boot-fail-diag');
     if (pre) pre.textContent = collectDiag();
   }
+  // 启动代码在 import 卡死时主动唤起面板（否则用户会永远停在开屏）。
+  window.__foliaRevealFail = function (msg) {
+    try { reveal(msg || '加载超时'); } catch (e) {}
+  };
   // 应用挂载完成后（开屏被移除）标记 booted，之后不再误报。
   var watchBoot = setInterval(function () {
     if (!document.getElementById('app-splash')) { booted = true; clearInterval(watchBoot); }
