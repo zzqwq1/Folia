@@ -354,6 +354,7 @@
   <div>
     <button id="boot-fail-reload" style="border:0;border-radius:999px;padding:11px 26px;font-size:14px;font-weight:600;color:#fff;background:linear-gradient(135deg,#ff7e9d,#ff4d6d);cursor:pointer;margin-right:8px">重新加载</button>
     <button id="boot-fail-retry" style="border:1px solid rgba(255,255,255,.18);border-radius:999px;padding:9px 18px;font-size:12px;color:#9ca3af;background:transparent;cursor:pointer">清除缓存</button>
+    <button id="boot-fail-wait" style="border:1px solid rgba(255,255,255,.18);border-radius:999px;padding:9px 18px;font-size:12px;color:#9ca3af;background:transparent;cursor:pointer;margin-left:8px">再等等</button>
     <button id="boot-fail-copy" style="border:1px solid rgba(255,255,255,.18);border-radius:999px;padding:9px 18px;font-size:12px;color:#9ca3af;background:transparent;cursor:pointer;margin-left:8px">复制诊断</button>
   </div>
   <pre id="boot-fail-diag" style="display:none;max-width:36em;max-height:40vh;overflow:auto;text-align:left;white-space:pre-wrap;word-break:break-all;font-size:10px;line-height:1.5;color:#9ca3af;background:#111114;border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:10px;margin:0"></pre>
@@ -404,10 +405,15 @@
   var watchBoot = setInterval(function () {
     if (!document.getElementById('app-splash')) { booted = true; clearInterval(watchBoot); }
   }, 500);
-  // 慢机 + 大包：给到 15 秒，避免正常加载被判成失败。
-  setTimeout(function () {
-    if (stillBooting()) reveal('等待超时：脚本可能没下载完，或浏览器缓存了旧版本。');
-  }, 15000);
+  // 慢机 + 大包：给到 30 秒。用户点「再等等」会重新计时，避免误判。
+  var failTimer = null;
+  function armFailTimer() {
+    if (failTimer) clearTimeout(failTimer);
+    failTimer = setTimeout(function () {
+      if (stillBooting()) reveal('等待超时：脚本可能没下载完，或浏览器缓存了旧版本。');
+    }, 30000);
+  }
+  armFailTimer();
   window.addEventListener('error', function (e) {
     var t = e && e.target;
     if (t && t.tagName === 'SCRIPT') { reveal('脚本加载失败：' + (t.src || '未知地址')); return; }
@@ -436,7 +442,18 @@
     copyBtn.textContent = '已复制 / 已展开';
   });
   var reloadBtn = document.getElementById('boot-fail-reload');
-  if (reloadBtn) reloadBtn.addEventListener('click', function () { location.reload(); });
+  if (reloadBtn) reloadBtn.addEventListener('click', function () {
+    var url = location.pathname + location.search + location.hash;
+    var sep = location.search ? '&' : '?';
+    location.replace(url + sep + 'fresh=' + Date.now());
+  });
+  var waitBtn = document.getElementById('boot-fail-wait');
+  if (waitBtn) waitBtn.addEventListener('click', function () {
+    var panel = document.getElementById('boot-fail');
+    if (panel) panel.style.display = 'none';
+    revealed = false;
+    armFailTimer();
+  });
   var btn = document.getElementById('boot-fail-retry');
   if (btn) btn.addEventListener('click', function () {
     if (btn.dataset.busy === '1') return;
