@@ -32,6 +32,8 @@ type Env = {
   OPENAI_API_TEMPERATURE?: string;
 } & QqServerlessEnv;
 
+const kugouDebugEvents: Array<{ at: number; body: string }> = [];
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -71,6 +73,9 @@ export default {
     // 少了这段，/api/kugou/* 会落到静态资源兜底并返回 index.html（表现为扫码/播放全部"登录错误"）。
     // 酷狗：原生实现在 worker/kugou.ts（原来的 Vercel 后端已停用）。
     if (url.pathname === "/api/kugou" || url.pathname.startsWith("/api/kugou/")) {
+      if (url.pathname === "/api/kugou/login/debug") {
+        return new Response(JSON.stringify({ events: kugouDebugEvents }), { headers: { "content-type": "application/json; charset=utf-8" } });
+      }
       try {
         // 优先走本机 KuGouMusicApi（含扫码登录）；隧道不可用时退回 Worker 原生实现。
         const KUGOU_BASE = "https://missile-calculated-sys-cut.trycloudflare.com";
@@ -82,6 +87,13 @@ export default {
         const target = KUGOU_BASE + kugouPath + url.search;
         try {
           const upstream = await fetch(new Request(target, request));
+          if (kugouPath.indexOf("/login/qr/check") === 0) {
+            try {
+              const txt = await upstream.clone().text();
+              kugouDebugEvents.push({ at: Date.now(), body: txt.slice(0, 600) });
+              if (kugouDebugEvents.length > 5) kugouDebugEvents.shift();
+            } catch (e) { /* ignore */ }
+          }
           if (upstream.ok) return upstream;
         } catch (error) { /* 隧道不可用，退回原生 */ }
         return await handleKugou(request, url);
