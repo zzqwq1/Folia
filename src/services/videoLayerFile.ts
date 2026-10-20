@@ -35,8 +35,28 @@ const pickWithInput = (): Promise<File | null> => new Promise((resolve) => {
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = 'video/*';
-    input.addEventListener('change', () => resolve(input.files?.[0] ?? null), { once: true });
-    input.addEventListener('cancel', () => resolve(null), { once: true });
+    // iOS/Safari 只在 input 真正挂到文档里时才会弹出选择器；脱离文档的 input.click() 静默无反应，
+    // 表现就是「点选择视频，选完什么都没发生」。
+    input.style.position = 'fixed';
+    input.style.left = '-9999px';
+    input.style.opacity = '0';
+    let settled = false;
+    const finish = (file: File | null) => {
+        if (settled) return;
+        settled = true;
+        input.remove();
+        resolve(file);
+    };
+    input.addEventListener('change', () => finish(input.files?.[0] ?? null), { once: true });
+    input.addEventListener('cancel', () => finish(null), { once: true });
+    // 部分浏览器没有 cancel 事件：窗口重新获得焦点后仍没有文件，就当作取消。
+    const onFocus = () => {
+        window.setTimeout(() => {
+            if (!settled && (!input.files || input.files.length === 0)) finish(null);
+        }, 800);
+    };
+    window.addEventListener('focus', onFocus, { once: true });
+    document.body.appendChild(input);
     input.click();
 });
 
