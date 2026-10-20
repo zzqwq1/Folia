@@ -5,6 +5,7 @@ import { handleLyricProxy } from "./lyric-proxy.ts";
 import { handleSegmentLyrics } from "./segment-lyrics.ts";
 import { QQ_API_PREFIX, type QqServerlessEnv, handleQq } from "./qq.ts";
 import { handleBodian } from "./bodian.ts";
+import { handleKugou } from "./kugou.ts";
 
 // qq-music-api uses Buffer during requests; Workers do not expose it without nodejs_compat.
 // 这一行在模块作用域，所以它先于 fetch handler 与下面导出的 Durable Object 具现化执行 ——
@@ -68,7 +69,17 @@ export default {
     // KuGou API 同源反代：转发到 Vercel 上的 KuGouMusicApi。
     // 前端用 VITE_KUGOU_API_BASE=/api/kugou 走同源，避免 vercel.app 在国内被墙。
     // 少了这段，/api/kugou/* 会落到静态资源兜底并返回 index.html（表现为扫码/播放全部"登录错误"）。
+    // 酷狗：原生实现在 worker/kugou.ts（原来的 Vercel 后端已停用）。
     if (url.pathname === "/api/kugou" || url.pathname.startsWith("/api/kugou/")) {
+      try {
+        return await handleKugou(request, url);
+      } catch (error) {
+        console.error("[worker] kugou route failed:", error);
+        return new Response(JSON.stringify({ status: 0, error: "kugou route failed" }), { status: 502, headers: { "content-type": "application/json; charset=utf-8" } });
+      }
+    }
+
+    if (false) {
       const KUGOU_API_BASE = "https://ku-gou-music-api-steel.vercel.app";
       const target = KUGOU_API_BASE + url.pathname.slice("/api/kugou".length) + url.search;
       return fetch(new Request(target, request));
