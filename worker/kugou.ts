@@ -79,11 +79,54 @@ export const handleKugou = async (request: Request, url: URL): Promise<Response>
             },
         });
     }
-    if (path === '/song/url') {
-        const hash = (url.searchParams.get('hash') || '').trim();
+    if (path === '/search/lyric') {
+        // 前端先按 hash/关键词搜歌词候选，返回 candidates（含 id/accesskey）。
+        const hash = (url.searchParams.get('hash') || url.searchParams.get('fileHash') || '').trim();
+        const keyword = url.searchParams.get('keyword') || url.searchParams.get('man') || '';
+        const duration = url.searchParams.get('duration') || '';
+        const searchUrl = 'https://krcs.kugou.com/search?ver=1&man=yes&client=mobi&keyword='
+            + encodeURIComponent(keyword) + '&duration=' + encodeURIComponent(duration)
+            + (hash ? '&hash=' + hash : '');
+        try {
+            const response = await fetch(searchUrl, { headers: { 'user-agent': 'Mozilla/5.0' } });
+            const payload: any = await response.json().catch(() => null);
+            const candidates = (payload?.candidates || []).map((item: any) => ({
+                id: String(item.id ?? ''), accesskey: String(item.accesskey ?? ''),
+                song: item.song ?? '', singer: item.singer ?? '', duration: item.duration ?? '',
+            }));
+            return json({ status: 200, candidates, data: candidates });
+        } catch (error) {
+            return json({ status: 200, candidates: [], data: [], error: String(error) });
+        }
+    }
+    if (path === '/lyric') {
+        // 前端拿 id + accesskey 取歌词文本，读的是 decodeContent。
+        const id = url.searchParams.get('id') || '';
+        const accesskey = url.searchParams.get('accesskey') || '';
+        // krc 是二进制歌词，atob 后无法当文本用；统一取 lrc 文本，保证能显示。
+        const fmt = 'lrc';
+        if (!id || !accesskey) return json({ status: 200, decodeContent: '', lyric: '' });
+        const dlUrl = 'https://lyrics.kugou.com/download?ver=1&client=pc&id=' + encodeURIComponent(id)
+            + '&accesskey=' + encodeURIComponent(accesskey) + '&fmt=' + encodeURIComponent(fmt) + '&charset=utf8';
+        try {
+            const response = await fetch(dlUrl, { headers: { 'user-agent': 'Mozilla/5.0', referer: 'https://www.kugou.com/' } });
+            const payload: any = await response.json().catch(() => null);
+            let text = '';
+            if (payload?.content) {
+                try { text = atob(payload.content); } catch { text = String(payload.content); }
+            }
+            return json({ status: 200, decodeContent: text, lyric: text, data: { lyric: text } });
+        } catch (error) {
+            return json({ status: 200, decodeContent: '', lyric: '', error: String(error) });
+        }
+    }
+
+    if (path === '/audio' || path === '/krm/audio' || path === '/song/url') {
+        // 前端播放走的是 /audio（不是 /song/url），这里统一处理。
+        const hash = (url.searchParams.get('hash') || url.searchParams.get('fileHash')
+            || url.searchParams.get('id') || '').trim();
         if (!/^[a-f0-9]{32}$/i.test(hash)) return json({ status: 0, error: 'hash is required' }, 400);
-        const quality = (url.searchParams.get('quality') || 'high').toLowerCase();
-        // 不同音质可用性不同（code 2 = 该音质拿不到直链）。按顺序回退，拿到就用。
+        const quality = (url.searchParams.get('quality') || url.searchParams.get('level') || 'high').toLowerCase();
         const attempts: string[] = quality === 'lossless' ? ['sq', 'hq', '128']
             : quality === 'standard' ? ['128', 'hq']
             : ['hq', '128', 'sq'];
@@ -95,65 +138,21 @@ export const handleKugou = async (request: Request, url: URL): Promise<Response>
             const tracker = TRACKER_URL + '?key=' + key + '&hash=' + hash + '&br=' + br
                 + '&appid=1005&pid=2&cmd=25&behavior=play';
             try {
-                const response = await fetch(tracker, {
-                    headers: { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36' },
-                });
+                const response = await fetch(tracker, { headers: { 'user-agent': 'Mozilla/5.0' } });
                 const payload: any = await response.json().catch(() => null);
                 lastCode = payload?.error ?? payload?.status ?? '';
                 const urls: string[] = Array.isArray(payload?.url) ? payload.url : payload?.url ? [payload.url] : [];
                 const found = urls.find((item: string) => /^https?:\/\//.test(item));
-                if (found) {
-                    // 页面是 https：直链统一升到 https，避免混合内容被浏览器拦截。
-                    playUrl = found.replace(/^http:\/\//, 'https://');
-                    usedBr = br;
-                    break;
-                }
-            } catch { /* 换下一个音质 */ }
+                if (found) { playUrl = found.replace(/^http:\/\//, 'https://'); usedBr = br; break; }
+            } catch { /* next */ }
         }
-        if (!playUrl) {
-            return json({ status: 0, error: 'kugou tracker returned no url (code ' + String(lastCode) + ')' }, 502);
-        }
+        if (!playUrl) return json({ status: 0, error: 'kugou tracker returned no url (code ' + String(lastCode) + ')' }, 502);
         return json({
             status: 1,
             errcode: 0,
-            url: '/api/kugou/stream?url=' + encodeURIComponent(playUrl),
-            data: {
-                url: playUrl,
-                quality: usedBr === 'sq' ? 'lossless' : usedBr === '128' ? 'standard' : 'high',
-            },
+            url: playUrl,
+            data: { url: playUrl, quality: usedBr === 'sq' ? 'lossless' : usedBr === '128' ? 'standard' : 'high' },
         });
-    }
-
-    if (path === '/stream/debug') {
-        return json({ hits: streamHits });
-    }
-    if (path === '/stream') {
-        // 同源音频代理：酷狗 CDN 不带 CORS 头，前端用 fetch 取流会被浏览器拦掉（表现为"连接失败"）。
-        // 这里原样转发（含 Range），并补上 CORS 头。
-        const target = url.searchParams.get('url') || '';
-        if (!/^https?:\/\//.test(target)) return json({ status: 0, error: 'url is required' }, 400);
-        const range = request.headers.get('range') || '';
-        let upstream: Response;
-        try {
-            upstream = await fetch(target, {
-                headers: {
-                    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
-                    ...(range ? { range } : {}),
-                },
-            });
-        } catch (error) {
-            return json({ status: 0, error: 'stream unreachable: ' + String(error) }, 502);
-        }
-        const headers = new Headers();
-        for (const key of ['content-type', 'content-length', 'content-range', 'accept-ranges', 'etag', 'last-modified']) {
-            const value = upstream.headers.get(key);
-            if (value) headers.set(key, value);
-        }
-        headers.set('access-control-allow-origin', '*');
-        headers.set('cache-control', 'public, max-age=3600');
-        streamHits.push({ at: Date.now(), range, ok: upstream.ok });
-        if (streamHits.length > 10) streamHits.shift();
-        return new Response(upstream.body, { status: upstream.status, headers });
     }
 
     return json({ status: 0, error: `kugou route not implemented yet: ${path}` }, 501);
