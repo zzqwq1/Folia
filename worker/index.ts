@@ -99,6 +99,16 @@ export default {
       }
     }
 
+    // 网易云：后端在本机（NeteaseCloudMusicApi）+ Cloudflare Tunnel，前端统一走同源 /api/netease。
+    if (url.pathname === "/api/netease" || url.pathname.startsWith("/api/netease/")) {
+      const NETEASE_BASE = "https://contest-dubai-scientist-survivor.trycloudflare.com";
+      try {
+        return await fetch(new Request(NETEASE_BASE + url.pathname.slice("/api/netease".length) + url.search, request));
+      } catch (error) {
+        return new Response(JSON.stringify({ code: 502, message: "netease tunnel unreachable" }), { status: 502, headers: { "content-type": "application/json" } });
+      }
+    }
+
     const assetResponse = await env.ASSETS.fetch(request);
     // HTML 永远回源：边缘缓存过的旧 index 会引用已经被新构建替换掉的 chunk，
     // 表现就是模块图补不齐、页面永远白屏（换网络也没用）。
