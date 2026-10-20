@@ -94,7 +94,9 @@ export const handleKugou = async (request: Request, url: URL): Promise<Response>
         }
         const payload: any = await response.json().catch(() => null);
         const urls: string[] = Array.isArray(payload?.url) ? payload.url : payload?.url ? [payload.url] : [];
-        const playUrl = urls.find((item: string) => /^https?:\/\//.test(item)) || '';
+        const rawUrl = urls.find((item: string) => /^https?:\/\//.test(item)) || '';
+        // 页面是 https：直链统一升到 https，避免混合内容被拦截。
+        const playUrl = rawUrl.replace(/^http:\/\//, 'https://');
         if (!playUrl) {
             return json({ status: 0, error: `kugou tracker returned no url (code ${payload?.error ?? payload?.status ?? '?'})` }, 502);
         }
