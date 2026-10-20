@@ -63,6 +63,15 @@ export default {
     }
 
     if (url.pathname === "/api/lyric-proxy") {
+      // QQ 音乐对 Cloudflare 出口 IP 风控（code 2001），本机直连正常（code 0）。
+      // 目标域名是 QQ 系时改走本机代理（qq-proxy 服务 + 隧道），其余仍由 Worker 直连。
+      try {
+        const target = new URL(url.searchParams.get("url") || "");
+        if (/(^|\.)(qq\.com|gtimg\.cn)$/.test(target.hostname)) {
+          const QQ_PROXY_BASE = "https://star-representative-animated-demographic.trycloudflare.com";
+          return await fetch(new Request(QQ_PROXY_BASE + url.pathname.slice(0) + url.search, request));
+        }
+      } catch { /* fallthrough */ }
       return handleLyricProxy(request);
     }
 
@@ -151,7 +160,16 @@ export default {
     if (url.pathname === "/api/netease" || url.pathname.startsWith("/api/netease/")) {
       const NETEASE_BASE = "https://contest-dubai-scientist-survivor.trycloudflare.com";
       try {
-        return await fetch(new Request(NETEASE_BASE + url.pathname.slice("/api/netease".length) + url.search, request));
+        const upstream = await fetch(new Request(NETEASE_BASE + url.pathname.slice("/api/netease".length) + url.search, request));
+        // 网易云下发的播放直链是 http://…music.126.net，https 页面里会被当作混合内容拦截。
+        // 这里把 JSON 响应里的这些地址统一升成 https（126.net 的 https 可用，已实测 206 audio/mpeg）。
+        const upstreamType = upstream.headers.get("content-type") || "";
+        if (upstreamType.includes("application/json")) {
+          const text = await upstream.text();
+          const fixed = text.replace(/http:\/\/([a-z0-9.-]+\.)?(music\.126\.net|126\.net)/g, "https://$1$2");
+          return new Response(fixed, { status: upstream.status, headers: { "content-type": "application/json; charset=utf-8" } });
+        }
+        return upstream;
       } catch (error) {
         return new Response(JSON.stringify({ code: 502, message: "netease tunnel unreachable" }), { status: 502, headers: { "content-type": "application/json" } });
       }
