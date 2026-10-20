@@ -160,7 +160,14 @@ export default {
     if (url.pathname === "/api/netease" || url.pathname.startsWith("/api/netease/")) {
       const NETEASE_BASE = "https://contest-dubai-scientist-survivor.trycloudflare.com";
       try {
-        const upstream = await fetch(new Request(NETEASE_BASE + url.pathname.slice("/api/netease".length) + url.search, request));
+        // 本机 NeteaseCloudMusicApi 偶尔会在 /song/url 上挂很久（上游网易云不响应），
+        // 前端就会一直停在「正在获取歌曲链接」。这里给 12 秒上限，超时立刻返回 504，
+        // 让界面走失败提示而不是无限等待。
+        const upstreamSignal = AbortSignal.timeout(12000);
+        const upstream = await fetch(
+          new Request(NETEASE_BASE + url.pathname.slice("/api/netease".length) + url.search, request),
+          { signal: upstreamSignal },
+        );
         // 网易云下发的播放直链是 http://…music.126.net，https 页面里会被当作混合内容拦截。
         // 这里把 JSON 响应里的这些地址统一升成 https（126.net 的 https 可用，已实测 206 audio/mpeg）。
         const upstreamType = upstream.headers.get("content-type") || "";
@@ -171,7 +178,14 @@ export default {
         }
         return upstream;
       } catch (error) {
-        return new Response(JSON.stringify({ code: 502, message: "netease tunnel unreachable" }), { status: 502, headers: { "content-type": "application/json" } });
+        const aborted = (error as Error)?.name === "TimeoutError" || (error as Error)?.name === "AbortError";
+        return new Response(
+          JSON.stringify({
+            code: aborted ? 504 : 502,
+            message: aborted ? "netease upstream timeout" : "netease tunnel unreachable",
+          }),
+          { status: aborted ? 504 : 502, headers: { "content-type": "application/json" } },
+        );
       }
     }
 
