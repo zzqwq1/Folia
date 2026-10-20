@@ -140,6 +140,17 @@ export function usePlaybackAudioBridge({
             const AudioContextClass = window.AudioContext || (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
             const ctx = new AudioContextClass();
             audioContextRef.current = ctx;
+            // 抖音等 App 抢走音频会话后 iOS 把 ctx 置为 interrupted（图整体静音）。
+            // 回到前台或状态恢复时自动 resume，避免“显示播放中却没有声音”。
+            const resumeInterrupted = () => {
+                if (ctx.state === 'suspended' || ctx.state === 'interrupted') {
+                    ctx.resume().catch(() => { /* 等下一次手势 */ });
+                }
+            };
+            ctx.addEventListener('statechange', resumeInterrupted);
+            document.addEventListener('visibilitychange', () => {
+                if (document.visibilityState === 'visible') resumeInterrupted();
+            });
 
             const analyser = ctx.createAnalyser();
             analyser.fftSize = 2048;
