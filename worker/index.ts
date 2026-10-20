@@ -68,7 +68,7 @@ export default {
       try {
         const target = new URL(url.searchParams.get("url") || "");
         if (/(^|\.)(qq\.com|gtimg\.cn)$/.test(target.hostname)) {
-          const QQ_PROXY_BASE = "https://star-representative-animated-demographic.trycloudflare.com";
+          const QQ_PROXY_BASE = "https://semester-platinum-settings-yen.trycloudflare.com";
           return await fetch(new Request(QQ_PROXY_BASE + url.pathname.slice(0) + url.search, request));
         }
       } catch { /* fallthrough */ }
@@ -103,7 +103,7 @@ export default {
       }
       try {
         // 优先走本机 KuGouMusicApi（含扫码登录）；隧道不可用时退回 Worker 原生实现。
-        const KUGOU_BASE = "https://missile-calculated-sys-cut.trycloudflare.com";
+        const KUGOU_BASE = "https://opt-privileges-connection-grass.trycloudflare.com";
         // 只把登录/账号相关路径交给本机 KuGouMusicApi；搜索与播放走 Worker 原生实现
         // （原生 tracker 能拿到可播直链，而本机库的 /song/url 会返回 20028「本次请求需要验证」）。
         const kugouPath = url.pathname.slice("/api/kugou".length);
@@ -158,7 +158,7 @@ export default {
 
     // 网易云：后端在本机（NeteaseCloudMusicApi）+ Cloudflare Tunnel，前端统一走同源 /api/netease。
     if (url.pathname === "/api/netease" || url.pathname.startsWith("/api/netease/")) {
-      const NETEASE_BASE = "https://contest-dubai-scientist-survivor.trycloudflare.com";
+      const NETEASE_BASE = "https://shop-algorithms-appeals-come.trycloudflare.com";
       try {
         // 本机 NeteaseCloudMusicApi 偶尔会在 /song/url 上挂很久（上游网易云不响应），
         // 前端就会一直停在「正在获取歌曲链接」。这里给 12 秒上限，超时立刻返回 504，
@@ -192,6 +192,14 @@ export default {
     const assetResponse = await env.ASSETS.fetch(request);
     // HTML 永远回源：边缘缓存过的旧 index 会引用已经被新构建替换掉的 chunk，
     // 表现就是模块图补不齐、页面永远白屏（换网络也没用）。
+    // 带内容哈希的 /assets/* 可以永久缓存：这样启动时的「预取 + import」第二次直接从本地拿，
+    // 弱网不会把 2MB 主包下载两遍（之前 max-age=0 会强制回源，等于白预取）。
+    if (url.pathname.startsWith("/assets/")) {
+      const assetHeaders = new Headers(assetResponse.headers);
+      assetHeaders.set("cache-control", "public, max-age=31536000, immutable");
+      return new Response(assetResponse.body, { status: assetResponse.status, headers: assetHeaders });
+    }
+
     const contentType = assetResponse.headers.get("content-type") || "";
     // boot-manifest.json 里的文件名每次构建都会变，必须不缓存，否则客户端会预取旧地址。
     if (contentType.includes("text/html") || url.pathname === "/boot-manifest.json") {
