@@ -4,6 +4,7 @@ import { PlayerState } from '../../../types';
 import { currentTime } from '../../../stores/motionSignals';
 import { selectDisplayPlayerState, selectDisplaySong, usePlaybackStore } from '../../../stores/usePlaybackStore';
 import { ensureVideoLayerFileRestored, useVideoLayerSettingsStore } from '../../../stores/useVideoLayerSettingsStore';
+import { setStatusMessage } from '../../../stores/useStatusMessageStore';
 
 // src/components/visualizer/videoLayer/VideoLayer.tsx
 // Built-in muted video behind the lyrics (above the background, under the lyrics). The video follows
@@ -104,6 +105,12 @@ const VideoLayer: React.FC<VideoLayerProps> = ({ paused }) => {
             playsInline
             preload="auto"
             aria-hidden
+            // iOS 对 HEVC/超大文件可能直接解码失败：静默会表现为「选了但没画面」，这里给出提示。
+            onError={() => {
+                console.warn('[VideoLayer] video decode failed for', source);
+                void useVideoLayerSettingsStore.getState().clearLocalFile();
+                setStatusMessage({ type: 'error', text: '这个视频无法在当前设备解码（建议 mp4/h264）' });
+            }}
             className="absolute inset-0 h-full w-full pointer-events-none"
             style={{ opacity, objectFit: fit }}
         />
