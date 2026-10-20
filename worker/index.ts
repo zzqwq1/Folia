@@ -82,7 +82,7 @@ export default {
         // 只把登录/账号相关路径交给本机 KuGouMusicApi；搜索与播放走 Worker 原生实现
         // （原生 tracker 能拿到可播直链，而本机库的 /song/url 会返回 20028「本次请求需要验证」）。
         const kugouPath = url.pathname.slice("/api/kugou".length);
-        const needsTunnel = kugouPath.startsWith("/login") || kugouPath.startsWith("/user") || kugouPath.startsWith("/logout");
+        const needsTunnel = kugouPath.startsWith("/login") || kugouPath.startsWith("/user") || kugouPath.startsWith("/logout") || kugouPath.startsWith("/register");
         if (!needsTunnel) return await handleKugou(request, url);
         const target = KUGOU_BASE + kugouPath + url.search;
         try {
