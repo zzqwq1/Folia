@@ -117,12 +117,21 @@ export function usePlaybackTransportController({
         const shouldAutoplay = () => wantsPlayback.current && isSameSource();
 
         setupAudioAnalyzer();
-        if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+        // iOS 上被其它 App（抖音等）打断后，AudioContext 会进入 interrupted 而不是 suspended；
+        // 两种状态都会让整条 Web Audio 图静音（元素还在走、界面在播、但没有声音）。
+        const contextState = audioContextRef.current?.state;
+        if (audioContextRef.current && (contextState === 'suspended' || contextState === 'interrupted')) {
             try {
                 await audioContextRef.current.resume();
             } catch (error) {
                 if (!isCurrent()) return;
-                throw error;
+                // 打断刚结束时的 resume 可能被系统拒绝一次，退避后重试一次。
+                await new Promise(resolve => setTimeout(resolve, 200));
+                try {
+                    await audioContextRef.current?.resume();
+                } catch {
+                    throw error;
+                }
             }
         }
         if (!isCurrent()) return;
