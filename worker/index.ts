@@ -72,6 +72,13 @@ export default {
     // 酷狗：原生实现在 worker/kugou.ts（原来的 Vercel 后端已停用）。
     if (url.pathname === "/api/kugou" || url.pathname.startsWith("/api/kugou/")) {
       try {
+        // 优先走本机 KuGouMusicApi（含扫码登录）；隧道不可用时退回 Worker 原生实现。
+        const KUGOU_BASE = "https://missile-calculated-sys-cut.trycloudflare.com";
+        const target = KUGOU_BASE + url.pathname.slice("/api/kugou".length) + url.search;
+        try {
+          const upstream = await fetch(new Request(target, request));
+          if (upstream.ok) return upstream;
+        } catch (error) { /* 隧道不可用，退回原生 */ }
         return await handleKugou(request, url);
       } catch (error) {
         console.error("[worker] kugou route failed:", error);
