@@ -498,10 +498,10 @@
 <!-- ========== 版本更新公告（每个版本只弹一次） ========== -->
 <div id="update-mask" style="display:none;position:fixed;inset:0;z-index:2147483500;background:rgba(0,0,0,.62);backdrop-filter:blur(14px);align-items:center;justify-content:center;padding:20px">
   <div style="width:100%;max-width:340px;background:#fff;border-radius:22px;padding:24px 22px 18px;box-shadow:0 24px 60px rgba(0,0,0,.35);text-align:center;color:#111">
-    <div style="font-size:17px;font-weight:700;letter-spacing:.2px">1.7.3 版本更新提示</div>
+    <div style="font-size:17px;font-weight:700;letter-spacing:.2px">1.7.4 版本更新提示</div>
     <p style="margin:14px 0 0;font-size:13px;line-height:1.7;color:#444;text-align:left">
-      1. 修复了网易云无法登陆的问题，原因是 Vercel 部署免费额度用尽，给各位用户带来不便与麻烦。<br>
-      2. 正在尝试修复酷狗，QQ 音乐可正常使用。
+      1. 部分用户网易云提示登录错误：这是设备缓存了旧版本，请点错误页面的「清除缓存」，或删除 App 重新安装。<br>
+      2. QQ 音乐搜索与酷狗歌词已修复，后台播放被打断后恢复无声的问题已修复。
     </p>
     <p style="margin:14px 0 0;font-size:13px;line-height:1.7;color:#444">
       QQ 粉丝群：<b style="color:#111">1131099078</b>
@@ -511,7 +511,7 @@
 </div>
 <script>
 (function () {
-  var VERSION = '1.7.3';
+  var VERSION = '1.7.4';
   var KEY = 'folia.update.seen';
   try { if (localStorage.getItem(KEY) === VERSION) return; } catch (e) { /* 隐私模式下不阻断 */ }
   var mask = document.getElementById('update-mask');
