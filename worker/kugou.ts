@@ -9,6 +9,9 @@ import { md5Hex } from './bodian.ts';
 const SEARCH_URL = 'https://songsearch.kugou.com/song_search_v2';
 const TRACKER_URL = 'https://trackercdn.kugou.com/i/v2/';
 
+/** 记录播放代理被调用的情况，用来判断前端到底有没有走同源代理。 */
+const streamHits: Array<{ at: number; range: string; ok: boolean }> = [];
+
 const json = (body: unknown, status = 200): Response => new Response(JSON.stringify(body), {
     status,
     headers: { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*' },
@@ -113,12 +116,44 @@ export const handleKugou = async (request: Request, url: URL): Promise<Response>
         return json({
             status: 1,
             errcode: 0,
-            url: playUrl,
+            url: '/api/kugou/stream?url=' + encodeURIComponent(playUrl),
             data: {
                 url: playUrl,
                 quality: usedBr === 'sq' ? 'lossless' : usedBr === '128' ? 'standard' : 'high',
             },
         });
+    }
+
+    if (path === '/stream/debug') {
+        return json({ hits: streamHits });
+    }
+    if (path === '/stream') {
+        // 同源音频代理：酷狗 CDN 不带 CORS 头，前端用 fetch 取流会被浏览器拦掉（表现为"连接失败"）。
+        // 这里原样转发（含 Range），并补上 CORS 头。
+        const target = url.searchParams.get('url') || '';
+        if (!/^https?:\/\//.test(target)) return json({ status: 0, error: 'url is required' }, 400);
+        const range = request.headers.get('range') || '';
+        let upstream: Response;
+        try {
+            upstream = await fetch(target, {
+                headers: {
+                    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+                    ...(range ? { range } : {}),
+                },
+            });
+        } catch (error) {
+            return json({ status: 0, error: 'stream unreachable: ' + String(error) }, 502);
+        }
+        const headers = new Headers();
+        for (const key of ['content-type', 'content-length', 'content-range', 'accept-ranges', 'etag', 'last-modified']) {
+            const value = upstream.headers.get(key);
+            if (value) headers.set(key, value);
+        }
+        headers.set('access-control-allow-origin', '*');
+        headers.set('cache-control', 'public, max-age=3600');
+        streamHits.push({ at: Date.now(), range, ok: upstream.ok });
+        if (streamHits.length > 10) streamHits.shift();
+        return new Response(upstream.body, { status: upstream.status, headers });
     }
 
     return json({ status: 0, error: `kugou route not implemented yet: ${path}` }, 501);
