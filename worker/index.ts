@@ -354,10 +354,16 @@ export default {
           if (forced) return forced;
         }
         const upstreamSignal = AbortSignal.timeout(12000);
-        const upstream = await fetch(
-          new Request(NETEASE_BASE + url.pathname.slice("/api/netease".length) + url.search, request),
-          { signal: upstreamSignal },
-        );
+        const neteaseTarget = NETEASE_BASE + url.pathname.slice("/api/netease".length) + url.search;
+        let upstream = await fetch(new Request(neteaseTarget, request), { signal: upstreamSignal });
+        // quick tunnel 偶发 530（边缘没连上源站），等 300ms 重试一次通常就通；
+        // 用户看到的「加载失败 … returned HTTP 530 without a JSON body」就是这一次抖动。
+        if (upstream.status >= 500) {
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          try {
+            upstream = await fetch(new Request(neteaseTarget, request), { signal: AbortSignal.timeout(12000) });
+          } catch { /* 保持第一次的结果，交给下面的兜底 */ }
+        }
         // 网易云下发的播放直链是 http://…music.126.net，https 页面里会被当作混合内容拦截。
         // 这里把 JSON 响应里的这些地址统一升成 https（126.net 的 https 可用，已实测 206 audio/mpeg）。
         if (upstream.status >= 500) {
