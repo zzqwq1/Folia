@@ -127,9 +127,11 @@ export const useVideoLayerSettingsStore = create<VideoLayerSettingsState>((set, 
     // 进入播放前写 pending，稳定播放 15 秒后改写成 ok；下次启动若发现还是 pending，
     // 说明上次是带着视频层崩的，自动关掉视频层，避免用户一进 App 就闪退、连设置都进不去。
     let videoLayerEnabled = getStoredBoolean(VIDEO_LAYER_ENABLED_KEY, false);
-    if (videoLayerEnabled && getStoredString('video_layer_crash_guard', '') === 'pending') {
+    if (getStoredString('video_layer_crash_guard', '') === 'pending') {
         videoLayerEnabled = false;
         setStoredBoolean(VIDEO_LAYER_ENABLED_KEY, false);
+        // 上次带着视频层崩了：顺手把持久化的大视频也删掉，否则它一直是内存隐患。
+        void clearVideoLayerBlob();
         console.warn('[VideoLayer] previous run crashed with the video layer on; disabling it');
     }
 
