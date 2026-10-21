@@ -325,7 +325,7 @@
   <div id="donate-card">
     <div class="donate-title">给 Ex 赞赏</div>
     <div class="donate-version">
-      <span>当前版本 <b id="donate-version-num">1.7.5</b></span>
+      <span>当前版本 <b id="donate-version-num">1.7.6</b></span>
       <span>·</span>
       <a id="donate-get-latest" href="javascript:void(0)">获取最新版本</a>
     </div>
@@ -347,7 +347,7 @@
 
 <script>
 // 版本号唯一来源：下面的更新公告脚本也读这个值，避免两处版本号不一致。
-var FOLIA_VERSION = '1.7.5';
+var FOLIA_VERSION = '1.7.6';
 (function(){
   // OBS 浏览器源 / 透明背景 / 免开屏模式：不弹
   try {
@@ -573,8 +573,8 @@ var FOLIA_VERSION = '1.7.5';
 <!-- ========== 版本更新公告（每个版本只弹一次） ========== -->
 <div id="update-mask" style="display:none;position:fixed;inset:0;z-index:2147483500;background:rgba(0,0,0,.62);backdrop-filter:blur(14px);align-items:center;justify-content:center;padding:20px">
   <div style="width:100%;max-width:340px;background:#fff;border-radius:22px;padding:24px 22px 18px;box-shadow:0 24px 60px rgba(0,0,0,.35);text-align:center;color:#111">
-    <div style="font-size:17px;font-weight:700;letter-spacing:.2px">1.7.5 版本更新提示</div>
-    <p style="margin:14px 0 0;font-size:13px;line-height:1.7;color:#444;text-align:left">1. 修复网易云「打不开 / 登录错误」：本地服务与隧道地址失配，已自动恢复。<br>2. 修复酷狗歌词空白，以及歌词与声音不同步（歌词版本匹配错误）。<br>3. 修复拖进度条后歌词错位；可用「设置 → 播放 → 全局时间偏移」微调。<br>4. 修复 QQ 音乐搜不到歌（补全请求参数 + 国内出口代理）。<br>5. 修复 iOS 选择视频没反应、搜索后页面被放大。<br>6. 修复白屏/卡加载：静态资源强缓存，不再重复下载主包；启动失败会弹出可操作面板。<br>7. 修复后台播放被抖音等 App 打断后无声。<br>8. 歌词越听越偏已修：新增播放时钟看门狗，切后台/锁屏回来后自动校准。<br>9. 「全局时间偏移」可调范围从 ±2 秒放宽到 ±5 秒。<br>10. 视频层：重启 App 后自动恢复上次选的视频（iOS 不用重选）；关闭视频层时不再加载视频，修掉「关了也闪退」。</p>
+    <div style="font-size:17px;font-weight:700;letter-spacing:.2px">1.7.6 版本更新提示</div>
+    <p style="margin:14px 0 0;font-size:13px;line-height:1.7;color:#444;text-align:left">1. 修复「点播放没反应」：歌词请求不再阻塞播放（6 秒上限），音频长时间无推进会自动重建音源。<br>2. 修复 iOS 音频被系统/其他 App 抢走后永久静音：任意一次点击都会尝试恢复音频通道。<br>3. 新增「重置播放引擎」：设置 → 播放 → 重置播放引擎，一键清缓存重建音频通道。<br>4. 修复酷狗会员歌听不了：登录后的取流改走账号鉴权，并统一响应格式。<br>5. 修复网易云登录报错/搜索异常：转发时保留 Set-Cookie，登录态不再丢。<br>6. 修复「正在获取最佳歌词」后卡住：歌词失败不再拖住播放。<br>7. 修复切歌太频繁偶发闪退：切歌加 350ms 最小间隔。<br>8. 修复启动卡在「页面没能加载完成」：导航请求不再回落旧页面，主包移出预缓存，失败自动清缓存重载。<br>9. 赞赏弹窗上方显示当前版本与「获取最新版本」。<br>10. 视频层：重启后自动恢复、开启但未选视频会给出提示、修复「开了没背景」。</p>
     <p style="margin:14px 0 0;font-size:13px;line-height:1.7;color:#444">
       QQ 粉丝群：<b style="color:#111">1131099078</b>
     </p>
@@ -583,7 +583,7 @@ var FOLIA_VERSION = '1.7.5';
 </div>
 <script>
 (function () {
-  var VERSION = (typeof FOLIA_VERSION === 'string' && FOLIA_VERSION) || '1.7.5';
+  var VERSION = (typeof FOLIA_VERSION === 'string' && FOLIA_VERSION) || '1.7.6';
   var KEY = 'folia.update.seen';
   try { if (localStorage.getItem(KEY) === VERSION) return; } catch (e) { /* 隐私模式下不阻断 */ }
   var mask = document.getElementById('update-mask');
