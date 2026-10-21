@@ -98,7 +98,7 @@ const pickDisplay = (cover: string, targetStep: number): PosterArtwork => {
 /** Fetches the variant a box of `sizePx` will need, off the path of the interaction that opens it. */
 export const prewarmWallPosterArtwork = (cover: string | undefined, sizePx: number): void => {
     if (!cover) return;
-    const url = variantUrl(cover, resolveCoverSizeStep(sizePx));
+    const url = variantUrl(cover, Math.min(resolveCoverSizeStep(sizePx), 256));
     if (!url || decodedVariants.has(url) || failedVariants.has(url)) return;
     void decodeVariant(url);
 };
@@ -113,7 +113,10 @@ export const prewarmWallPosterArtwork = (cover: string | undefined, sizePx: numb
  */
 export const useWallPosterArtwork = (cover: string | undefined, sizePx: number): string => {
     const source = cover ?? '';
-    const targetStep = resolveCoverSizeStep(sizePx);
+    // 墙面「列拼贴」会同时铺几十张海报：iOS 上按目标尺寸解码会把 WebView 内存顶爆（用户报
+    // 「墙面 + 列拼贴闪退」）。这里把墙面海报的解码尺寸统一封顶到最小档 256，墙面上几乎看不出
+    // 差别，但内存峰值能降一个数量级。
+    const targetStep = Math.min(resolveCoverSizeStep(sizePx), 256);
     const [ready, setReady] = useState<PosterArtwork>(() => pickDisplay(source, targetStep));
     // Recomputed only when this slot changes song; the artwork of the previous one must not linger.
     const current = useMemo(
