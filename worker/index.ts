@@ -119,15 +119,27 @@ export default {
             const upstream = await fetch(new Request(KUGOU_BASE + kugouPath + url.search, request));
             if (upstream.ok) {
               const body = await upstream.text();
-              const noUrl = !/"url"\s*:\s*"https?:/.test(body);
-              const failed = /"status"\s*:\s*0/.test(body)
-                || /"error_code"\s*:\s*(2|152|20028)\b/.test(body)
-                || noUrl;
+              let parsed: any = null;
+              try { parsed = JSON.parse(body); } catch { parsed = null; }
+              // 本机 KuGouMusicApi 与 Worker 原生实现的响应形状不一致（一个顶层 url、一个 data 里带 url），
+              // 前端是按下标/字段去取的，所以这里统一成前端的期望形状，避免"登录后反而播不了"。
+              const urlFromBody = parsed?.url
+                ?? parsed?.data?.url
+                ?? (Array.isArray(parsed?.data) ? parsed.data[0]?.url : undefined)
+                ?? undefined;
+              const upstreamCode = parsed?.error_code ?? parsed?.errcode;
+              const failed = !urlFromBody
+                || parsed?.status === 0
+                || upstreamCode === 2
+                || upstreamCode === 152
+                || upstreamCode === 20028;
               if (!failed) {
-                return new Response(body, {
-                  status: 200,
-                  headers: { "content-type": "application/json; charset=utf-8" },
-                });
+                return new Response(JSON.stringify({
+                  status: 1,
+                  errcode: 0,
+                  url: String(urlFromBody),
+                  data: [{ url: String(urlFromBody) }],
+                }), { status: 200, headers: { "content-type": "application/json; charset=utf-8" } });
               }
             }
           } catch (error) { /* 隧道不可用：退回下面的原生实现 */ }
