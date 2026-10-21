@@ -41,9 +41,13 @@ export function useLatticeLyricCanvas(hostRef: RefObject<HTMLDivElement | null>,
     const latest = useRef(input); latest.current = input;
     const devicePixelRatio = useDevicePixelRatio();
     // iPhone 的 devicePixelRatio 是 3，晶格歌词画布的像素预算会变成 9 倍；WebGL 显存在 iOS 上
-    // 有明显上限，用户报「用晶格播放视窗会闪退」大概率就是这里被系统回收。这里把密度封顶在 2，
-    // 视觉差异很小，但像素量直接降 55%。
-    const safeDensity = Math.min(devicePixelRatio, 2);
+    // 有明显上限，用户报「用晶格播放视窗会闪退」大概率就是这里被系统回收。
+    // iOS 上封顶 1.5（像素量降到 1/4），其它平台封顶 2：文字用 canvas 采样纹理渲染，
+    // 这个范围内的清晰度差异肉眼几乎看不出来，但显存压力差一个数量级。
+    const isIos = typeof navigator !== 'undefined'
+        && /iP(hone|ad|od)/.test(navigator.userAgent);
+    const densityCap = isIos ? 1.5 : 2;
+    const safeDensity = Math.min(devicePixelRatio, densityCap);
     const density = useRef(safeDensity); density.current = safeDensity;
     // The host's last observed content box, kept outside the session effect so a density change
     // can resize the live runtime without restarting the session.
@@ -122,7 +126,7 @@ export function useLatticeLyricCanvas(hostRef: RefObject<HTMLDivElement | null>,
 
     useEffect(() => { if (input) runtimeRef.current?.update(input); }, [input]);
     // Dragging the window onto a display of another density: same box, different pixel budget.
-    useEffect(() => { runtimeRef.current?.resize(box.current.width, box.current.height, Math.min(devicePixelRatio, 2)); }, [devicePixelRatio]);
+    useEffect(() => { runtimeRef.current?.resize(box.current.width, box.current.height, Math.min(devicePixelRatio, densityCap)); }, [devicePixelRatio, densityCap]);
     useEffect(() => {
         if (!input || !document.fonts) return;
         const primary = `${resolveThemeFontWeight(input.theme, 600)} 36px ${resolveThemeFontStack(input.theme)}`;
