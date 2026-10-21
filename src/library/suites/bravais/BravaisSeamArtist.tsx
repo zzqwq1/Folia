@@ -17,7 +17,7 @@ const BravaisSeamArtist: React.FC<{ artist: BravaisSeamArtistModel }> = ({ artis
         <div className="bravais-seam-artist-head">
             <span className="bravais-seam-artist-avatar" style={{ width: AVATAR_PX, height: AVATAR_PX }}>
                 {artist.coverUrl ? (
-                    <img src={getSizedCoverUrl(artist.coverUrl, 128)} alt={artist.name} draggable={false} decoding="async" />
+                    <img loading="lazy" decoding="async" src={getSizedCoverUrl(artist.coverUrl, 128)} alt={artist.name} draggable={false} decoding="async" />
                 ) : (
                     <Disc aria-hidden />
                 )}
