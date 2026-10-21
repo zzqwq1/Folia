@@ -21,7 +21,8 @@ export const GLOBAL_LYRIC_TIMELINE_OFFSET_STORAGE_KEY = 'global_lyric_timeline_o
 
 // Device-local audio/visual latency compensation (Bluetooth headphones and the like). Deliberately
 // NOT part of the synced visual config: the right value belongs to this machine's output path.
-export const GLOBAL_LYRIC_TIMELINE_OFFSET_LIMIT_MS = 2000;
+// ±5s：iOS/WKWebView 的输出链路延迟经常到 2-3 秒，原来 ±2000ms 的上限让用户根本调不齐。
+export const GLOBAL_LYRIC_TIMELINE_OFFSET_LIMIT_MS = 5000;
 
 export const clampGlobalLyricTimelineOffsetMs = (value: number): number => {
     if (!Number.isFinite(value)) {
