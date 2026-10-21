@@ -61,6 +61,12 @@ const VideoLayer: React.FC<VideoLayerProps> = ({ paused }) => {
             followState();
         };
 
+        // 崩溃守卫：开始播放记为 pending，稳定 15 秒后记 ok（见 store 里的自动降级）。
+        try { window.localStorage.setItem('video_layer_crash_guard', 'pending'); } catch { /* ignore */ }
+        const guardTimer = window.setTimeout(() => {
+            try { window.localStorage.setItem('video_layer_crash_guard', 'ok'); } catch { /* ignore */ }
+        }, 15000);
+
         video.addEventListener('loadedmetadata', onMetadata);
         if (video.readyState >= HTMLMediaElement.HAVE_METADATA) onMetadata();
 
@@ -76,6 +82,7 @@ const VideoLayer: React.FC<VideoLayerProps> = ({ paused }) => {
         const drift = window.setInterval(align, DRIFT_CHECK_MS);
 
         return () => {
+            window.clearTimeout(guardTimer);
             window.clearInterval(drift);
             unsubscribeClock();
             unsubscribeStore();
