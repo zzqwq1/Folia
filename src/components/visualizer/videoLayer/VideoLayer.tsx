@@ -112,7 +112,7 @@ const VideoLayer: React.FC<VideoLayerProps> = ({ paused }) => {
             muted
             loop
             playsInline
-            preload="metadata"
+            preload="auto"
             aria-hidden
             // iOS 对 HEVC/超大文件可能直接解码失败：静默会表现为「选了但没画面」，这里给出提示。
             onError={() => {
@@ -120,7 +120,7 @@ const VideoLayer: React.FC<VideoLayerProps> = ({ paused }) => {
                 void useVideoLayerSettingsStore.getState().clearLocalFile();
                 setStatusMessage({ type: 'error', text: '这个视频无法在当前设备解码（建议 mp4/h264）' });
             }}
-            className="absolute inset-0 h-full w-full pointer-events-none"
+            className="absolute inset-0 h-full w-full pointer-events-none bg-transparent"
             style={{ opacity, objectFit: fit }}
         />
     );
