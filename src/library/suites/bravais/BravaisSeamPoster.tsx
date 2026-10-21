@@ -143,7 +143,7 @@ const BravaisSeamPoster: React.FC<{ layer: BravaisLayer; actions: BravaisSeamAct
                     与块里同一个地址，不多下载一张。 */}
                 {coverUrl && (
                     <div className="bravais-poster-backdrop" data-bravais-poster-backdrop>
-                        <img src={getSizedCoverUrl(coverUrl, 1024)} alt="" draggable={false} decoding="async" />
+                        <img loading="lazy" decoding="async" src={getSizedCoverUrl(coverUrl, 1024)} alt="" draggable={false} decoding="async" />
                     </div>
                 )}
                 {/* 装着定妆照的斜切色块：先画错开的虚影，再画块本身（照片 + 网点 + 白色描边）。 */}
@@ -151,7 +151,7 @@ const BravaisSeamPoster: React.FC<{ layer: BravaisLayer; actions: BravaisSeamAct
                 <div className="bravais-poster-shape" style={{ clipPath }}>
                     {coverUrl && (
                         <div className="bravais-poster-portrait" data-bravais-poster-portrait>
-                            <img src={getSizedCoverUrl(coverUrl, 1024)} alt="" draggable={false} decoding="async" />
+                            <img loading="lazy" decoding="async" src={getSizedCoverUrl(coverUrl, 1024)} alt="" draggable={false} decoding="async" />
                         </div>
                     )}
                 </div>
