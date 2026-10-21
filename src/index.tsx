@@ -93,7 +93,36 @@ const boot = async () => {
         try { retried = sessionStorage.getItem('folia.boot.retried') === '1'; } catch { /* ignore */ }
         if (!retried) {
             try { sessionStorage.setItem('folia.boot.retried', '1'); } catch { /* ignore */ }
-            location.reload();
+            // 单纯 reload 会继续用旧的 Service Worker 缓存，坏状态永远修不回来。
+            // 这里先注销 SW + 清 CacheStorage，再带 fresh 参数重载（新连接、新 chunk 名），
+            // 让「页面没能加载完成」这种状态自己恢复，用户不必手动清缓存。
+            const goFresh = () => location.replace(location.pathname + '?fresh=' + Date.now());
+            void (async () => {
+                const cap = (task: Promise<unknown>, ms: number) => Promise.race([
+                    task.catch(() => undefined),
+                    new Promise<void>((resolve) => { setTimeout(resolve, ms); }),
+                ]);
+                try {
+                    if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+                        await cap(
+                            navigator.serviceWorker.getRegistrations()
+                                .then((registrations) => Promise.all(registrations.map((r) => r.unregister()))),
+                            1500,
+                        );
+                    }
+                } catch { /* ignore */ }
+                try {
+                    if (window.caches && caches.keys) {
+                        await cap(
+                            caches.keys().then((keys) => Promise.all(keys.map((key) => caches.delete(key)))),
+                            1200,
+                        );
+                    }
+                } catch { /* ignore */ }
+                goFresh();
+            })();
+            // 浏览器把上面那几步卡住时也保证跳一次，不至于停在开屏。
+            setTimeout(goFresh, 2600);
             return;
         }
         try {
