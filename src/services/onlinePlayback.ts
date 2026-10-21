@@ -211,7 +211,22 @@ export async function loadOnlineSongLyrics(
             chorusRanges: [],
           }
         : await (async () => {
-            const result = await omni.getLyrics(song, { userId });
+            // 歌词请求不能无限期阻塞播放：酷狗/QQ 的歌词搜索偶尔会挂住（隧道抖动、上游限流），
+            // 用户看到的就是「正在获取最佳歌词」转几秒然后什么也不发生——播放永远不开始。
+            // 这里给 6 秒上限，超时就当作"没有歌词"继续走播放流程。
+            const emptyLyrics = {
+                mainLrc: null as string | null,
+                yrcLrc: null as string | null,
+                transLrc: null as string | null,
+                isPureMusic: false,
+                lyrics: null,
+                chorusRanges: [] as never[],
+            };
+            const timeout = new Promise<null>((resolve) => {
+                window.setTimeout(() => resolve(null), 6000);
+            });
+            const result = await Promise.race([omni.getLyrics(song, { userId }), timeout]).catch(() => null);
+            if (!result) return emptyLyrics;
             return {
                 mainLrc: result.mainText ?? null,
                 yrcLrc: result.wordByWordText ?? null,
