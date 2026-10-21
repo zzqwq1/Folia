@@ -107,6 +107,31 @@ export default {
         // 只把登录/账号相关路径交给本机 KuGouMusicApi；搜索与播放走 Worker 原生实现
         // （原生 tracker 能拿到可播直链，而本机库的 /song/url 会返回 20028「本次请求需要验证」）。
         const kugouPath = url.pathname.slice("/api/kugou".length);
+        // 用户登录后，取流必须交给本机 KuGouMusicApi：会员曲目的播放地址由账号鉴权决定，
+        // 而 Worker 原生实现只走匿名 tracker，登录了也照样返回 code 2（「会员歌还是听不了」）。
+        // 因此带 cookie 的播放请求优先走隧道，失败或无 url 时再退回原生匿名实现。
+        const hasAccountCookie = Boolean(url.searchParams.get("cookie"));
+        const isPlaybackPath = kugouPath.startsWith("/audio")
+          || kugouPath.startsWith("/song/url")
+          || kugouPath.startsWith("/krm/audio");
+        if (hasAccountCookie && isPlaybackPath) {
+          try {
+            const upstream = await fetch(new Request(KUGOU_BASE + kugouPath + url.search, request));
+            if (upstream.ok) {
+              const body = await upstream.text();
+              const noUrl = !/"url"\s*:\s*"https?:/.test(body);
+              const failed = /"status"\s*:\s*0/.test(body)
+                || /"error_code"\s*:\s*(2|152|20028)\b/.test(body)
+                || noUrl;
+              if (!failed) {
+                return new Response(body, {
+                  status: 200,
+                  headers: { "content-type": "application/json; charset=utf-8" },
+                });
+              }
+            }
+          } catch (error) { /* 隧道不可用：退回下面的原生实现 */ }
+        }
         const needsTunnel = !(kugouPath.startsWith("/search") || kugouPath.startsWith("/song/url") || kugouPath.startsWith("/audio") || kugouPath.startsWith("/krm/audio"));
         if (!needsTunnel) return await handleKugou(request, url);
         const target = KUGOU_BASE + kugouPath + url.search;
