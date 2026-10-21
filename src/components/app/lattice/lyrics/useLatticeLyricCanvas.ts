@@ -46,7 +46,7 @@ export function useLatticeLyricCanvas(hostRef: RefObject<HTMLDivElement | null>,
     // 这个范围内的清晰度差异肉眼几乎看不出来，但显存压力差一个数量级。
     const isIos = typeof navigator !== 'undefined'
         && /iP(hone|ad|od)/.test(navigator.userAgent);
-    const densityCap = isIos ? 1.5 : 2;
+    const densityCap = isIos ? 1 : 2;
     const safeDensity = Math.min(devicePixelRatio, densityCap);
     const density = useRef(safeDensity); density.current = safeDensity;
     // The host's last observed content box, kept outside the session effect so a density change
