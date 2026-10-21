@@ -145,6 +145,9 @@ export const useVideoLayerSettingsStore = create<VideoLayerSettingsState>((set, 
         setVideoLayerEnabled: (enabled) => {
             set({ videoLayerEnabled: enabled });
             setStoredBoolean(VIDEO_LAYER_ENABLED_KEY, enabled);
+            // 启动时如果视频层是关的，我们不会去读视频（避免白占内存）；等用户在这里打开时，
+            // 再把上次选过的视频取回来，否则他会以为「设置没了、要重选」。
+            if (enabled) void loadStoredFile(false);
         },
         setVideoLayerUrl: (url) => {
             const normalized = url.trim();
