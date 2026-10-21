@@ -86,6 +86,12 @@ export const useVideoLayerSettingsStore = create<VideoLayerSettingsState>((set, 
     };
 
     const loadStoredFile = async (request: boolean) => {
+        // 视频层关着的时候绝不去读视频：iOS 上把 20MB 视频挂进 <video> 解码会直接吃掉内存，
+        // 用户看到的却是「关了视频层还是播放就闪退」。
+        if (!get().videoLayerEnabled) {
+            dropFile();
+            return;
+        }
         const revision = fileRevision;
         const handle = await loadVideoLayerFileHandle();
         if (!handle) {
