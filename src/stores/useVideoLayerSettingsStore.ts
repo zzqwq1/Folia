@@ -120,12 +120,7 @@ export const useVideoLayerSettingsStore = create<VideoLayerSettingsState>((set, 
     // iOS 上「视频层 + 播放」有概率把 WebView 拖崩（系统回收）。
     // 进入播放前写 pending，稳定播放 15 秒后改写成 ok；下次启动若发现还是 pending，
     // 说明上次是带着视频层崩的，自动关掉视频层，避免用户一进 App 就闪退、连设置都进不去。
-    // iOS/WKWebView 上「视频层 + WebGL 可视化 + 毛玻璃」会让 WebKit 直接崩溃（已有多例）。
-// 这里在 iOS 上默认关闭视频层：用户仍可手动打开，但默认不让新用户一进来就崩。
-const isIosWebKit = typeof navigator !== 'undefined'
-    && /iP(hone|ad|od)/.test(navigator.userAgent)
-    && !/Electron/i.test(navigator.userAgent);
-let videoLayerEnabled = getStoredBoolean(VIDEO_LAYER_ENABLED_KEY, false);
+    let videoLayerEnabled = getStoredBoolean(VIDEO_LAYER_ENABLED_KEY, false);
 if (isIosWebKit && videoLayerEnabled && getStoredString('video_layer_ios_optin', '') !== '1') {
     videoLayerEnabled = false;
     setStoredBoolean(VIDEO_LAYER_ENABLED_KEY, false);
