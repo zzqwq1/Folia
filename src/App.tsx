@@ -1206,6 +1206,29 @@ export default function App() {
         if (element) currentTime.set(element.currentTime);
     }, [audioRef, currentTime, getDisplayElement, isShowingTail]);
 
+    // 播放时钟看门狗：iOS 上页面切后台/锁屏时 rAF 会停，但音频继续走，回来之后虚拟时钟就永久落后
+    // （用户看到的现象是声音比歌词早几秒，而且越拖越偏）。这里每 5 秒、以及每次回到前台/重新播放时
+    // 拿音频元素的真实 currentTime 校一次，偏差超过 0.4 秒就直接对齐。
+    useEffect(() => {
+        const sync = () => {
+            const element = audioRef.current;
+            if (!element || element.paused) return;
+            if (Math.abs(element.currentTime - currentTime.get()) > 0.4) {
+                currentTime.set(element.currentTime);
+            }
+        };
+        const id = window.setInterval(sync, 5000);
+        const onVisible = () => { if (!document.hidden) sync(); };
+        document.addEventListener('visibilitychange', onVisible);
+        const element = audioRef.current;
+        element?.addEventListener('playing', sync);
+        return () => {
+            window.clearInterval(id);
+            document.removeEventListener('visibilitychange', onVisible);
+            element?.removeEventListener('playing', sync);
+        };
+    }, [audioRef, currentTime]);
+
     // Restore the displayed song's remembered manual offset (0 when never adjusted, so a fresh
     // song behaves exactly like the old reset). Keyed on the DISPLAYED song, not the playing one:
     // this is what the lyrics on screen are read against, and firing it when a blend arms would
