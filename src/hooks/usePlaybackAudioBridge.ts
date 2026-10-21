@@ -151,6 +151,13 @@ export function usePlaybackAudioBridge({
             document.addEventListener('visibilitychange', () => {
                 if (document.visibilityState === 'visible') resumeInterrupted();
             });
+            // iOS 把 ctx 置成 interrupted 之后，只有「用户手势」能把它恢复回来（statechange 里
+            // resume 往往被拒绝）。用户报「点了播放没反应、一直没声音」时，多半就是这个状态：
+            // 所以在任意一次点击/触摸/按键上顺手 resume，一次点击就能把音频通道救回来。
+            const unlockOnGesture = () => resumeInterrupted();
+            document.addEventListener('pointerdown', unlockOnGesture, true);
+            document.addEventListener('touchend', unlockOnGesture, true);
+            document.addEventListener('keydown', unlockOnGesture, true);
 
             const analyser = ctx.createAnalyser();
             analyser.fftSize = 2048;
