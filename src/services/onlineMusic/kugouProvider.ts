@@ -719,14 +719,30 @@ const getKugouLyricCandidate = async (song: SongResult): Promise<any | null> => 
     const albumAudioId = sourceRef?.providerData?.albumAudioId
         ?? sourceRef?.providerData?.mixSongId
         ?? sourceRef?.providerData?.catalogLookupId;
+    // 只带 hash 时，krcs 对部分歌曲会返回空的候选列表（表现就是“酷狗没歌词”）；
+    // 补上「歌手 - 歌名」关键词能显著提高命中率。拿到多个候选后按时长最接近挑，
+    // 避免取到 live/翻唱那版导致时间轴整体错位。
+    const artistsStr = song.artists?.map(a => a.name).join(', ') || '';
     const response = await requestKugou('search_lyric', {
         hash: String(song.kgHash ?? song.id).toUpperCase(),
         duration: song.durationMs,
+        keyword: artistsStr ? `${artistsStr} - ${song.name}` : song.name,
         man: 'no',
         ...(albumAudioId !== undefined ? { album_audio_id: String(albumAudioId) } : {}),
     });
     const candidates = (response as any)?.candidates;
-    return Array.isArray(candidates) ? candidates[0] ?? null : null;
+    if (!Array.isArray(candidates) || candidates.length === 0) {
+        return null;
+    }
+    const targetMs = Number(song.durationMs) || 0;
+    if (targetMs <= 0) {
+        return candidates[0] ?? null;
+    }
+    return [...candidates].sort((a, b) => {
+        const da = Math.abs(Number(a?.duration ?? 0) - targetMs) || Number.MAX_SAFE_INTEGER;
+        const db = Math.abs(Number(b?.duration ?? 0) - targetMs) || Number.MAX_SAFE_INTEGER;
+        return da - db;
+    })[0] ?? null;
 };
 
 // Fetches the server-decoded KRC payload exposed by the current KuGou provider API.
