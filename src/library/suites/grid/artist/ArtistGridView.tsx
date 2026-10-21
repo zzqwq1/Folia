@@ -992,7 +992,7 @@ const ArtistGridView: React.FC<ArtistGridViewProps> = ({
                                 }}
                             >
                                 {item.coverUrl ? (
-                                    <img src={getSizedCoverUrl(item.coverUrl, 512)} alt="avatar" draggable={false} loading="lazy" decoding="async" className="w-full h-full object-cover select-none" />
+                                    <img loading="lazy" decoding="async" src={getSizedCoverUrl(item.coverUrl, 512)} alt="avatar" draggable={false} loading="lazy" decoding="async" className="w-full h-full object-cover select-none" />
                                 ) : (
                                     <div className="w-full h-full flex items-center justify-center bg-white/5">
                                         <Disc size={48} className="opacity-20 animate-spin" style={{ animationDuration: '4s' }} />
@@ -1238,8 +1238,7 @@ const ArtistGridView: React.FC<ArtistGridViewProps> = ({
                     className="absolute inset-0 pointer-events-none overflow-hidden select-none z-0"
                     style={{ opacity: isDaylight ? 0.18 : 0.12 }}
                 >
-                    <img
-                        src={toHttpsCoverUrl(getLowResCoverUrl(backgroundCoverUrl))}
+                    <img loading="lazy" decoding="async"                         src={toHttpsCoverUrl(getLowResCoverUrl(backgroundCoverUrl))}
                         alt=""
                         className="w-full h-full object-cover scale-110 filter blur-[30px]"
                     />
