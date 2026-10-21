@@ -1206,6 +1206,37 @@ export default function App() {
         if (element) currentTime.set(element.currentTime);
     }, [audioRef, currentTime, getDisplayElement, isShowingTail]);
 
+    // 播放卡死自愈：用户点了播放、状态也是 PLAYING，但音频长时间没有任何推进（iOS 上偶发
+    // "audio 元素活着却不出声"，解码器没真正起来）。此时重新 load() 一次音源是唯一有效的恢复手段，
+    // 用户看到的是"点了播放没反应"，我们不应该让他自己去杀掉 App。
+    useEffect(() => {
+        let lastTime = -1;
+        let stalledTicks = 0;
+        const id = window.setInterval(() => {
+            const element = audioRef.current;
+            if (!element) return;
+            if (playerState !== PlayerState.PLAYING || element.paused) {
+                lastTime = -1;
+                stalledTicks = 0;
+                return;
+            }
+            if (element.readyState >= 2 && element.currentTime !== lastTime) {
+                lastTime = element.currentTime;
+                stalledTicks = 0;
+                return;
+            }
+            stalledTicks += 1;
+            // 2 秒一次采样：连续 3 次（约 6 秒）没有任何推进才动手，避免误伤缓冲较慢的歌。
+            if (stalledTicks >= 3) {
+                stalledTicks = 0;
+                console.warn('[playback] stalled; reloading the audio element');
+                try { element.load(); } catch { /* ignore */ }
+                void element.play().catch(() => { /* 交给上层错误处理 */ });
+            }
+        }, 2000);
+        return () => window.clearInterval(id);
+    }, [audioRef, playerState]);
+
     // 播放时钟看门狗：iOS 上页面切后台/锁屏时 rAF 会停，但音频继续走，回来之后虚拟时钟就永久落后
     // （用户看到的现象是声音比歌词早几秒，而且越拖越偏）。这里每 5 秒、以及每次回到前台/重新播放时
     // 拿音频元素的真实 currentTime 校一次，偏差超过 0.4 秒就直接对齐。
