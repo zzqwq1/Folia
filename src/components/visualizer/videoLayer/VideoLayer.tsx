@@ -61,11 +61,19 @@ const VideoLayer: React.FC<VideoLayerProps> = ({ paused }) => {
             followState();
         };
 
-        // 崩溃守卫：开始播放记为 pending，稳定 15 秒后记 ok（见 store 里的自动降级）。
-        try { window.localStorage.setItem('video_layer_crash_guard', 'pending'); } catch { /* ignore */ }
-        const guardTimer = window.setTimeout(() => {
-            try { window.localStorage.setItem('video_layer_crash_guard', 'ok'); } catch { /* ignore */ }
-        }, 15000);
+        // 崩溃守卫：只在视频**真正开始播放**时记 pending，稳定播放 15 秒后记 ok。
+        // 之前是在组件挂载时就写 pending，用户 15 秒内退出 App 就会留下 pending，
+        // 下次启动会被 store 判定成「上次带视频层崩了」→ 关掉视频层并删掉视频，
+        // 用户看到的现象就是「背景视频怎么不显示了」。
+        let guardTimer: number | undefined;
+        const markVideoPlaying = () => {
+            try { window.localStorage.setItem('video_layer_crash_guard', 'pending'); } catch { /* ignore */ }
+            if (guardTimer !== undefined) return;
+            guardTimer = window.setTimeout(() => {
+                try { window.localStorage.setItem('video_layer_crash_guard', 'ok'); } catch { /* ignore */ }
+            }, 15000);
+        };
+        video.addEventListener('playing', markVideoPlaying);
 
         video.addEventListener('loadedmetadata', onMetadata);
         if (video.readyState >= HTMLMediaElement.HAVE_METADATA) onMetadata();
@@ -82,6 +90,11 @@ const VideoLayer: React.FC<VideoLayerProps> = ({ paused }) => {
         const drift = window.setInterval(align, DRIFT_CHECK_MS);
 
         return () => {
+            // 正常卸载 = 没有崩：把守卫标记清成 ok，避免下次启动误判。
+            if (guardTimer !== undefined) {
+                try { window.localStorage.setItem('video_layer_crash_guard', 'ok'); } catch { /* ignore */ }
+            }
+            video.removeEventListener('playing', markVideoPlaying);
             window.clearTimeout(guardTimer);
             window.clearInterval(drift);
             unsubscribeClock();
