@@ -174,7 +174,14 @@ export default {
         if (upstreamType.includes("application/json")) {
           const text = await upstream.text();
           const fixed = text.replace(/http:\/\/([a-z0-9.-]+\.)?(music\.126\.net|126\.net)/g, "https://$1$2");
-          return new Response(fixed, { status: upstream.status, headers: { "content-type": "application/json; charset=utf-8" } });
+          // 登录态靠 cookie 传递：NeteaseCloudMusicApi 在登录成功后用 Set-Cookie 下发 MUSIC_U，
+          // 之前这里重建 Response 时把 Set-Cookie 丢了，前端拿不到 cookie，于是「登录提示成功但下一次
+          // 请求又是匿名」——表现就是登录错误、搜索/歌单用不了。这里把 Set-Cookie 带过去并合并进 JSON。
+          const headers = new Headers({ "content-type": "application/json; charset=utf-8" });
+          const rawCookies = (upstream.headers as any).getSetCookie ? (upstream.headers as any).getSetCookie() : [];
+          for (const line of rawCookies as string[]) headers.append("set-cookie", line);
+          const rebuilt = new Response(fixed, { status: upstream.status, headers });
+          return await mergeSetCookie(rebuilt);
         }
         return upstream;
       } catch (error) {
