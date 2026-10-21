@@ -1591,6 +1591,8 @@ export default {
     "lyricMatchPriorityDesc": "When multiple lyric sources have high-confidence matches, prefer this source first."
   },
   "options": {
+        "resetPlaybackEngine": "Reset playback engine",
+        "resetPlaybackEngineDesc": "Use when pressing play does nothing or there is no sound: clears caches and reloads once to rebuild the audio pipeline.",
     "ponderHints": "Ponder tutorial hints",
     "ponderHintsDesc": "Hovering a teachable control shows a hint to hold G, which opens an animated walkthrough of that gesture.",
     "ponderHintsAlways": "Always show",
