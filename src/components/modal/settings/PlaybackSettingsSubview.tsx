@@ -191,6 +191,25 @@ const PlaybackSettingsSubview: React.FC<PlaybackSettingsSubviewProps> = ({
         <div className="space-y-5">
             <SettingsAnchor anchorId="queueSettings" label={t('options.queueSettings')}>
                 <SettingsSectionHeading icon={PlayCircle} label={t('options.queueSettings')} />
+                    <button
+                        type="button"
+                        onClick={() => { void resetPlaybackEngine(); }}
+                        className="w-full p-4 border-t text-left transition-colors hover:bg-white/8"
+                        style={{ borderColor: 'var(--border-primary, rgba(255,255,255,0.06))' }}
+                    >
+                        <div className="flex items-center justify-between gap-4">
+                            <div className="space-y-1">
+                                <div className="text-sm font-medium flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>
+                                    <RefreshCw size={14} />
+                                    {t('options.resetPlaybackEngine')}
+                                </div>
+                                <div className="text-[11px] opacity-50 max-w-[420px]" style={{ color: 'var(--text-secondary)' }}>
+                                    {t('options.resetPlaybackEngineDesc')}
+                                </div>
+                            </div>
+                            <ChevronRight size={18} className="shrink-0 opacity-60" style={{ color: 'var(--text-primary)' }} />
+                        </div>
+                    </button>
                 <div className={`p-4 rounded-xl border space-y-4 ${settingsCardClass}`}>
                     <div className="space-y-1">
                         <div className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
@@ -402,25 +421,6 @@ const PlaybackSettingsSubview: React.FC<PlaybackSettingsSubviewProps> = ({
                                 </span>
                                 <ChevronRight size={18} className="opacity-60" style={{ color: 'var(--text-primary)' }} />
                             </div>
-                        </div>
-                    </button>
-                    <button
-                        type="button"
-                        onClick={() => { void resetPlaybackEngine(); }}
-                        className="w-full p-4 border-t text-left transition-colors hover:bg-white/8"
-                        style={{ borderColor: 'var(--border-primary, rgba(255,255,255,0.06))' }}
-                    >
-                        <div className="flex items-center justify-between gap-4">
-                            <div className="space-y-1">
-                                <div className="text-sm font-medium flex items-center gap-2" style={{ color: 'var(--text-primary)' }}>
-                                    <RefreshCw size={14} />
-                                    {t('options.resetPlaybackEngine')}
-                                </div>
-                                <div className="text-[11px] opacity-50 max-w-[420px]" style={{ color: 'var(--text-secondary)' }}>
-                                    {t('options.resetPlaybackEngineDesc')}
-                                </div>
-                            </div>
-                            <ChevronRight size={18} className="shrink-0 opacity-60" style={{ color: 'var(--text-primary)' }} />
                         </div>
                     </button>
                     <button
