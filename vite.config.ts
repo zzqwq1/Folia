@@ -289,6 +289,11 @@ export default async function viteConfig(_config: ConfigEnv): Promise<UserConfig
           enabled: true
         },
         workbox: {
+          // 新版本一上线就接管：否则用户 Service Worker 会继续用旧缓存，
+          // 旧 HTML 引用的 chunk 已经被新构建替换掉，点播放/切页面时直接白屏或闪退。
+          skipWaiting: true,
+          clientsClaim: true,
+          cleanupOutdatedCaches: true,
           maximumFileSizeToCacheInBytes: 5000000,
           importScripts: [localCoverWorkerImport],
           // Docker serves this file dynamically; it must never be pinned in the PWA precache.
