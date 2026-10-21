@@ -12,8 +12,10 @@ import { setStatusMessage } from '../../../stores/useStatusMessageStore';
 // playback clock (seek, song change) re-aligns it, and slow drift is corrected every few seconds.
 // The video position is the song position modulo the video length, so a short loop keeps cycling.
 
-const DRIFT_CHECK_MS = 2000;
-const DRIFT_TOLERANCE_SEC = 0.35;
+const DRIFT_CHECK_MS = 5000;
+// iOS 上频繁 seek 会拖垮解码器并导致整个 WebView 被系统回收（闪退），
+// 容差放宽到 1.5 秒、检查间隔拉到 5 秒，减少 seek 次数。
+const DRIFT_TOLERANCE_SEC = 1.5;
 // A clock step bigger than this between two ticks is a seek or a song change, not playback.
 const CLOCK_JUMP_SEC = 1;
 
@@ -103,7 +105,7 @@ const VideoLayer: React.FC<VideoLayerProps> = ({ paused }) => {
             muted
             loop
             playsInline
-            preload="auto"
+            preload="metadata"
             aria-hidden
             // iOS 对 HEVC/超大文件可能直接解码失败：静默会表现为「选了但没画面」，这里给出提示。
             onError={() => {
