@@ -34,7 +34,7 @@ const BravaisProviderAvatar: React.FC<{ providerId: string; name: string; avatar
     className,
 }) => {
     if (avatarUrl) {
-        return <img className={`bravais-account-avatar${className ? ` ${className}` : ''}`} src={resolveAvatarSrc(avatarUrl)} alt="" aria-hidden
+        return <img loading="lazy" decoding="async" className={`bravais-account-avatar${className ? ` ${className}` : ''}`} src={resolveAvatarSrc(avatarUrl)} alt="" aria-hidden
             draggable={false} data-bravais-account-avatar="image" />;
     }
     const badge = resolveBravaisProviderBadge(providerId, name);
