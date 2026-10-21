@@ -1,6 +1,7 @@
 import React from 'react';
-import { Lightbulb, Sparkles } from 'lucide-react';
+import { Lightbulb, RefreshCw, Sparkles } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { resetPlaybackEngine } from '../../services/playbackEngineReset';
 
 // src/components/modal/SettingsHelpActions.tsx
 
@@ -14,6 +15,19 @@ const SettingsHelpActions: React.FC<SettingsHelpActionsProps> = ({ onOpenRelease
 
     return (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <button
+                type="button"
+                data-testid="help-reset-playback"
+                onClick={() => { void resetPlaybackEngine(); }}
+                className="flex items-center gap-3 rounded-2xl bg-white/5 p-4 text-left transition-colors hover:bg-white/10"
+                style={{ color: 'var(--text-primary)' }}
+            >
+                <RefreshCw size={19} className="shrink-0 opacity-75" aria-hidden="true" />
+                <span>
+                    <span className="block text-sm font-semibold">{t('options.resetPlaybackEngine')}</span>
+                    <span className="mt-0.5 block text-xs opacity-55">{t('options.resetPlaybackEngineDesc')}</span>
+                </span>
+            </button>
             <button
                 type="button"
                 data-testid="help-release-notes"
