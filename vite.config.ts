@@ -304,13 +304,12 @@ export default async function viteConfig(_config: ConfigEnv): Promise<UserConfig
           // 这里只让 HTML 走 NetworkFirst，离线时才回退缓存。
           navigateFallback: null,
           runtimeCaching: [{
+            // 导航请求一律走网络：NetworkFirst 在弱网下会「超时回落旧 HTML」，
+            // 而旧 HTML 引用的 chunk 已被新构建替换 → 启动直接卡在「页面没能加载完成」，
+            // 且用户怎么重载都回不来（今晚有多个用户卡在这个状态）。
+            // 这个前端本来就是远端加载的、离线也没法用，所以直接 NetworkOnly 更安全。
             urlPattern: ({ request }: { request: Request }) => request.mode === 'navigate',
-            handler: 'NetworkFirst' as const,
-            options: {
-              cacheName: 'folia-pages',
-              networkTimeoutSeconds: 5,
-              expiration: { maxEntries: 8 },
-            },
+            handler: 'NetworkOnly' as const,
           }, {
             // Per-icon chunks load on demand. Their names are content-hashed, so an icon cached on
             // first use can be served as-is when the app later starts offline.
