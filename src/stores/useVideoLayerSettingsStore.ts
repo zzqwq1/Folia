@@ -2,6 +2,9 @@ import { create } from 'zustand';
 import { getStoredBoolean, getStoredString, setStoredBoolean } from './storagePrimitives';
 import {
     canPersistVideoLayerFile,
+    clearVideoLayerBlob,
+    loadVideoLayerBlob,
+    saveVideoLayerBlob,
     clearVideoLayerFileHandle,
     loadVideoLayerFileHandle,
     pickVideoLayerFile,
@@ -85,7 +88,16 @@ export const useVideoLayerSettingsStore = create<VideoLayerSettingsState>((set, 
     const loadStoredFile = async (request: boolean) => {
         const revision = fileRevision;
         const handle = await loadVideoLayerFileHandle();
-        if (!handle || revision !== fileRevision) return;
+        if (!handle) {
+            // iOS/WKWebView 没有 handle：用上次存进 IndexedDB 的视频 Blob 还原，
+            // 这样重启 App 后不需要重新选文件。
+            const stored = await loadVideoLayerBlob().catch(() => null);
+            if (stored && revision === fileRevision) {
+                showFile(new File([stored.blob], stored.name, { type: stored.type || 'video/mp4' }));
+            }
+            return;
+        }
+        if (revision !== fileRevision) return;
         let result: Awaited<ReturnType<typeof readVideoLayerFileHandle>>;
         try {
             result = await readVideoLayerFileHandle(handle, request);
@@ -147,8 +159,14 @@ export const useVideoLayerSettingsStore = create<VideoLayerSettingsState>((set, 
             if (!picked) return null;
             fileRevision += 1;
             restoreStarted = true;
-            if (picked.handle) await saveVideoLayerFileHandle(picked.handle);
-            else await clearVideoLayerFileHandle();
+            if (picked.handle) {
+                await saveVideoLayerFileHandle(picked.handle);
+            } else {
+                // 没有 handle（iOS/Safari）：把文件本身存进 IndexedDB，重启后还能自动恢复。
+                await clearVideoLayerFileHandle();
+                const persisted = await saveVideoLayerBlob(picked.file).catch(() => false);
+                if (!persisted) console.warn('[VideoLayer] video too large to persist; it will last this session only');
+            }
             showFile(picked.file);
             get().setVideoLayerEnabled(true);
             return picked.file.name;
@@ -158,6 +176,7 @@ export const useVideoLayerSettingsStore = create<VideoLayerSettingsState>((set, 
             restoreStarted = true;
             dropFile();
             await clearVideoLayerFileHandle();
+            await clearVideoLayerBlob();
         },
         restoreLocalFile: () => loadStoredFile(false),
         regrantLocalFile: () => loadStoredFile(true),
