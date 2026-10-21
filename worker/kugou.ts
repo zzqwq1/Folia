@@ -82,10 +82,19 @@ export const handleKugou = async (request: Request, url: URL): Promise<Response>
     if (path === '/search/lyric') {
         // 前端先按 hash/关键词搜歌词候选，返回 candidates（含 id/accesskey）。
         const hash = (url.searchParams.get('hash') || url.searchParams.get('fileHash') || '').trim();
-        const keyword = url.searchParams.get('keyword') || url.searchParams.get('man') || '';
+        // 注意：`man` 是「是否要多个候选」的开关，绝不能当关键词用。
+        // 之前的写法把 man=no 传成了 keyword=no，会让 krcs 匹配到别的版本（比如现场版），
+        // 时间轴对不上，表现就是「歌词和声音不同步」。
+        const keyword = (url.searchParams.get('keyword') || '').trim();
+        const man = url.searchParams.get('man') || 'no';
         const duration = url.searchParams.get('duration') || '';
-        const searchUrl = 'https://krcs.kugou.com/search?ver=1&man=yes&client=mobi&keyword='
-            + encodeURIComponent(keyword) + '&duration=' + encodeURIComponent(duration)
+        const albumAudioId = url.searchParams.get('album_audio_id') || '';
+        const requestedMs = Number(duration) || 0;
+        const searchUrl = 'https://krcs.kugou.com/search?ver=1&man=' + encodeURIComponent(man)
+            + '&client=mobi'
+            + (keyword ? '&keyword=' + encodeURIComponent(keyword) : '')
+            + (duration ? '&duration=' + encodeURIComponent(duration) : '')
+            + (albumAudioId ? '&album_audio_id=' + encodeURIComponent(albumAudioId) : '')
             + (hash ? '&hash=' + hash : '');
         try {
             const response = await fetch(searchUrl, { headers: { 'user-agent': 'Mozilla/5.0' } });
@@ -94,6 +103,14 @@ export const handleKugou = async (request: Request, url: URL): Promise<Response>
                 id: String(item.id ?? ''), accesskey: String(item.accesskey ?? ''),
                 song: item.song ?? '', singer: item.singer ?? '', duration: item.duration ?? '',
             }));
+            // 按时长接近度排序：时长差得越少，越可能是同一个录音版本，时间轴才对得上。
+            if (requestedMs > 0) {
+                candidates.sort((a: any, b: any) => {
+                    const da = Math.abs(Number(a.duration) - requestedMs) || Number.MAX_SAFE_INTEGER;
+                    const db = Math.abs(Number(b.duration) - requestedMs) || Number.MAX_SAFE_INTEGER;
+                    return da - db;
+                });
+            }
             return json({ status: 200, candidates, data: candidates });
         } catch (error) {
             return json({ status: 200, candidates: [], data: [], error: String(error) });
