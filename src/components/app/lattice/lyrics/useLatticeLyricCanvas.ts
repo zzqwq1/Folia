@@ -12,6 +12,20 @@ const RUNTIME_REUSE_MS = 2000;
 type ParkedRuntime = { runtime: LatticeLyricRuntime; timer: ReturnType<typeof setTimeout> };
 const parkedRuntimes = new WeakMap<object, ParkedRuntime>();
 
+// iOS 同时存在两个大 WebGL 画布（播放页一个 + 墙面播放一个）会被系统直接回收，用户报「墙面播放 +
+// 晶格闪退」就是这个。这里维护一份"活着的晶格运行时"集合：新画布出现时，把其它画布先隐藏（停止绘制），
+// 只留当前这个在渲染；旧画布重新可见时会自己恢复。
+const activeLatticeRuntimes = new Set<LatticeLyricRuntime>();
+
+/** 只让 newest 这个运行时继续绘制，其它全部停下（不销毁，恢复可见时会自己回来）。 */
+const isolateLatticeRuntime = (newest: LatticeLyricRuntime) => {
+    activeLatticeRuntimes.add(newest);
+    for (const runtime of activeLatticeRuntimes) {
+        if (runtime === newest) continue;
+        try { runtime.setVisible(false); } catch { /* ignore */ }
+    }
+};
+
 /** Keeps one stopped runtime per playback clock so a song change can move it to the next card. */
 const parkRuntime = (clock: object, runtime: LatticeLyricRuntime) => {
     runtime.setVisible(false);
@@ -69,7 +83,8 @@ export function useLatticeLyricCanvas(hostRef: RefObject<HTMLDivElement | null>,
         const onFailure = (error: unknown) => {
             if (!active) return;
             console.warn('[Lattice lyrics] Falling back to the song title', error);
-            runtimeRef.current?.destroy(); runtimeRef.current = null;
+            if (runtimeRef.current) activeLatticeRuntimes.delete(runtimeRef.current);
+        runtimeRef.current?.destroy(); runtimeRef.current = null;
             setReady(false); setFailedKey(initial.songKey);
         };
         const session = startLatticeLyricSession(signal => {
@@ -84,6 +99,7 @@ export function useLatticeLyricCanvas(hostRef: RefObject<HTMLDivElement | null>,
             return parked ?? createLatticeLyricRuntime(host, initial, signal, onFailure);
         }, runtime => {
             runtimeRef.current = runtime;
+            isolateLatticeRuntime(runtime);
             runtime.attach(host);
             runtime.setErrorHandler(onFailure);
             if (latest.current) runtime.update(latest.current);
