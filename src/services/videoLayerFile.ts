@@ -7,6 +7,11 @@ import { getFromCache, removeFromCache, saveToCache } from './db';
 // and lasts for the session only.
 
 const VIDEO_LAYER_FILE_HANDLE_KEY = 'video_layer_file_handle';
+// iOS/WKWebView 没有 File System Access API，handle 方案不可用；这里把选中的视频 Blob 存进
+// IndexedDB，重启后直接 load 回来，用户不需要每次重新选文件。
+const VIDEO_LAYER_BLOB_KEY = 'video_layer_file_blob';
+/** 超过这个体积就不落盘，避免把用户存储吃满（大视频仍可按次选择）。 */
+export const VIDEO_LAYER_BLOB_LIMIT_BYTES = 200 * 1024 * 1024;
 
 type PermissionAwareFileHandle = FileSystemFileHandle & {
     queryPermission?: (descriptor: { mode: 'read' }) => Promise<PermissionState>;
@@ -88,6 +93,20 @@ export const saveVideoLayerFileHandle = (handle: FileSystemFileHandle) => saveTo
 export const loadVideoLayerFileHandle = () => getFromCache<FileSystemFileHandle>(VIDEO_LAYER_FILE_HANDLE_KEY);
 
 export const clearVideoLayerFileHandle = () => removeFromCache(VIDEO_LAYER_FILE_HANDLE_KEY);
+
+export type StoredVideoLayerBlob = { blob: Blob; name: string; type: string };
+
+/** 持久化会话式选择（无 handle 时的回退）。超过上限会拒绝并返回 false。 */
+export const saveVideoLayerBlob = async (file: File): Promise<boolean> => {
+    if (file.size > VIDEO_LAYER_BLOB_LIMIT_BYTES) return false;
+    const payload: StoredVideoLayerBlob = { blob: file.slice(0, file.size, file.type), name: file.name, type: file.type };
+    await saveToCache(VIDEO_LAYER_BLOB_KEY, payload);
+    return true;
+};
+
+export const loadVideoLayerBlob = () => getFromCache<StoredVideoLayerBlob>(VIDEO_LAYER_BLOB_KEY);
+
+export const clearVideoLayerBlob = () => removeFromCache(VIDEO_LAYER_BLOB_KEY);
 
 export type VideoLayerFileReadResult =
     | { status: 'ready'; file: File }
