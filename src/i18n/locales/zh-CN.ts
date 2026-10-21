@@ -1590,6 +1590,8 @@ export default {
     "lyricMatchPriorityDesc": "在多个歌词源都存在高置信度匹配时，优先选择该歌词源的结果。"
   },
   "options": {
+        "resetPlaybackEngine": "重置播放引擎",
+        "resetPlaybackEngineDesc": "点了播放没反应 / 一直没声音时用：清掉播放缓存并重载一次，强制重建音频通道。",
     "ponderHints": "思索教程提示",
     "ponderHintsDesc": "把指针停在可教学的控件上会提示长按 G，松手后打开一段演示该手势的动画教程。",
     "ponderHintsAlways": "始终显示",
