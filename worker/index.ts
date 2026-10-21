@@ -50,6 +50,83 @@ const mergeSetCookie = async (response: Response): Promise<Response> => {
   } catch { return response; }
 };
 
+// ---------- 网易云 weapi 加密（让取流完全跑在 Cloudflare，不依赖本机电脑） ----------
+const NETEASE_PRESET_KEY = "0CoJUm6Qyw8W8jud";
+const NETEASE_IV = "0102030405060708";
+const NETEASE_PUBMOD = BigInt(
+  "0x00e0b509f6259df8642dbc35662901477df22677ec152b5ff68ace615bb7b725152b3ab17a876aea8a5aa76d2e417629ec4ee341f56135fccf695280104e0312ecbda92557c93870114af6c9d05c4f7f0c3685b7a46bee255932575cce10b424d813cfe4875d3e82047b97ddef52741d546b8e289dc6935b3ece0462db0a22b8e7",
+);
+const NETEASE_PUBEXP = 65537n;
+const NETEASE_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+const modPow = (base: bigint, exp: bigint, mod: bigint): bigint => {
+  let result = 1n;
+  let b = base % mod;
+  let e = exp;
+  while (e > 0n) {
+    if (e & 1n) result = (result * b) % mod;
+    b = (b * b) % mod;
+    e >>= 1n;
+  }
+  return result;
+};
+
+const aesCbcBase64 = async (text: string, key: string): Promise<string> => {
+  const enc = new TextEncoder();
+  const cryptoKey = await crypto.subtle.importKey("raw", enc.encode(key), { name: "AES-CBC" }, false, ["encrypt"]);
+  const encrypted = await crypto.subtle.encrypt({ name: "AES-CBC", iv: enc.encode(NETEASE_IV) }, cryptoKey, enc.encode(text));
+  let binary = "";
+  const bytes = new Uint8Array(encrypted);
+  for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+};
+
+/** 生成 weapi 需要的 params / encSecKey。 */
+const neteaseWeapi = async (payload: Record<string, unknown>): Promise<{ params: string; encSecKey: string }> => {
+  const text = JSON.stringify(payload);
+  const first = await aesCbcBase64(text, NETEASE_PRESET_KEY);
+  let key = "";
+  for (let i = 0; i < 16; i += 1) key += NETEASE_CHARS[Math.floor(Math.random() * NETEASE_CHARS.length)];
+  const params = await aesCbcBase64(first, key);
+  const reversed = key.split("").reverse().join("");
+  let hex = "";
+  for (let i = 0; i < reversed.length; i += 1) hex += reversed.charCodeAt(i).toString(16).padStart(2, "0");
+  const encSecKey = modPow(BigInt("0x" + hex), NETEASE_PUBEXP, NETEASE_PUBMOD)
+    .toString(16)
+    .padStart(256, "0");
+  return { params, encSecKey };
+};
+
+/** 调一次网易云 weapi，返回解析后的 JSON。 */
+// 匿名 cookie：不注册匿名设备时，取流接口对部分歌会直接返回 404（等价“未登录”）。
+let neteaseAnonCookie: string | null = null;
+const ensureNeteaseAnonCookie = async (): Promise<string> => {
+  if (neteaseAnonCookie) return neteaseAnonCookie;
+  try {
+    const data: any = await neteaseWeapiRequest("/weapi/register/anonimous", {});
+    neteaseAnonCookie = typeof data?.cookie === "string" ? data.cookie : "";
+  } catch {
+    neteaseAnonCookie = "";
+  }
+  return neteaseAnonCookie ?? "";
+};
+
+const neteaseWeapiRequest = async (path: string, payload: Record<string, unknown>): Promise<any> => {
+  const { params, encSecKey } = await neteaseWeapi({ ...payload, csrf_token: "" });
+  const body = new URLSearchParams({ params, encSecKey }).toString();
+  const response = await fetch("https://music.163.com" + path, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      "referer": "https://music.163.com/",
+      "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+      "cookie": (neteaseAnonCookie ? neteaseAnonCookie + "; " : "") + "os=pc; appver=2.9.7; channel=netease;",
+    },
+    body,
+  });
+  return response.json();
+};
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -68,8 +145,15 @@ export default {
       try {
         const target = new URL(url.searchParams.get("url") || "");
         if (/(^|\.)(qq\.com|gtimg\.cn)$/.test(target.hostname)) {
-          const QQ_PROXY_BASE = "https://semester-platinum-settings-yen.trycloudflare.com";
-          return await fetch(new Request(QQ_PROXY_BASE + url.pathname.slice(0) + url.search, request));
+          const QQ_PROXY_BASE = "https://placed-vintage-precision-donate.trycloudflare.com";
+          try {
+            const viaProxy = await fetch(new Request(QQ_PROXY_BASE + url.pathname + url.search, request));
+            // 530/5xx 说明 Cloudflare 边缘没连上那条隧道：退回 Worker 直连再试一次。
+            // QQ 搜索走直连多数情况仍可用（只有播放接口会被 code 2001 风控拦），
+            // 这样「QQ 搜不出歌」不会因为一条隧道抖动就整块不可用。
+            if (viaProxy.status < 500) return viaProxy;
+          } catch { /* 隧道异常，落到直连 */ }
+          return handleLyricProxy(request);
         }
       } catch { /* fallthrough */ }
       return handleLyricProxy(request);
@@ -103,7 +187,7 @@ export default {
       }
       try {
         // 优先走本机 KuGouMusicApi（含扫码登录）；隧道不可用时退回 Worker 原生实现。
-        const KUGOU_BASE = "https://opt-privileges-connection-grass.trycloudflare.com";
+        const KUGOU_BASE = "https://comm-included-scratch-sara.trycloudflare.com";
         // 只把登录/账号相关路径交给本机 KuGouMusicApi；搜索与播放走 Worker 原生实现
         // （原生 tracker 能拿到可播直链，而本机库的 /song/url 会返回 20028「本次请求需要验证」）。
         const kugouPath = url.pathname.slice("/api/kugou".length);
@@ -193,13 +277,82 @@ export default {
       }
     }
 
+    // 网易云原生兜底：本机隧道不可用时（Cloudflare Worker 无法回连 trycloudflare，会 530），
+    // 直接用网易云公开接口兜住搜索 / 歌词 / 取流，让"电脑关机也能播"。
+    const nativeNetease = async (pathname: string, searchParams: URLSearchParams): Promise<Response | null> => {
+      const pick = (name: string, fallback = "") => searchParams.get(name) ?? fallback;
+      const headers = {
+        "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+        "referer": "https://music.163.com/",
+        "accept": "application/json",
+      };
+      const json = (body: unknown) => new Response(JSON.stringify(body), {
+        headers: { "content-type": "application/json; charset=utf-8", "set-cookie": "keep-alive" },
+      });
+      try {
+        if (pathname === "/search" || pathname === "/cloudsearch") {
+          const keyword = pick("keywords") || pick("s");
+          const limit = pick("limit", "30");
+          const offset = pick("offset", "0");
+          const upstream = await fetch(
+            `https://music.163.com/api/search/get?s=${encodeURIComponent(keyword)}&type=1&limit=${limit}&offset=${offset}`,
+            { headers },
+          );
+          const data: any = await upstream.json();
+          const songs = (data?.result?.songs || []).map((song: any) => ({
+            id: song.id,
+            name: song.name,
+            artists: (song.artists || []).map((artist: any) => ({ id: artist.id, name: artist.name })),
+            album: song.album ? { id: song.album.id, name: song.album.name, picUrl: song.album.picUrl } : undefined,
+            duration: song.duration,
+          }));
+          return json({ code: 200, result: { songs, songCount: songs.length } });
+        }
+        if (pathname === "/lyric") {
+          const id = pick("id");
+          const upstream = await fetch(
+            `https://music.163.com/api/song/lyric?id=${encodeURIComponent(id)}&lv=1&kv=1&tv=-1`,
+            { headers },
+          );
+          const data: any = await upstream.json();
+          return json({ code: 200, lrc: data?.lrc, klyric: data?.klyric, tlyric: data?.tlyric });
+        }
+        if (pathname === "/song/url") {
+          const id = pick("id");
+          await ensureNeteaseAnonCookie().catch(() => "");
+          const data: any = await neteaseWeapiRequest("/weapi/song/enhance/player/url", {
+            ids: `[${id}]`,
+            br: 320000,
+          });
+          const fixed = JSON.stringify(data).replace(/http:\/\/([a-z0-9.-]+\.)?(music\.126\.net|126\.net)/g, "https://$1$2");
+          return new Response(fixed, { headers: { "content-type": "application/json; charset=utf-8" } });
+        }
+        if (pathname === "/song/detail" || pathname === "/song/detail/") {
+          const ids = pick("ids");
+          const upstream = await fetch(`https://music.163.com/api/song/detail?ids=[${encodeURIComponent(ids)}]`, { headers });
+          const body = await upstream.text();
+          const fixed = body.replace(/http:\/\/([a-z0-9.-]+\.)?(music\.126\.net|126\.net)/g, "https://$1$2");
+          return new Response(fixed, { headers: { "content-type": "application/json; charset=utf-8" } });
+        }
+        return null;
+      } catch (error) {
+        console.error("[worker] native netease failed:", error);
+        return null;
+      }
+    };
+
     // 网易云：后端在本机（NeteaseCloudMusicApi）+ Cloudflare Tunnel，前端统一走同源 /api/netease。
     if (url.pathname === "/api/netease" || url.pathname.startsWith("/api/netease/")) {
-      const NETEASE_BASE = "https://shop-algorithms-appeals-come.trycloudflare.com";
+      const NETEASE_BASE = "https://lion-asks-latinas-paul.trycloudflare.com";
       try {
         // 本机 NeteaseCloudMusicApi 偶尔会在 /song/url 上挂很久（上游网易云不响应），
         // 前端就会一直停在「正在获取歌曲链接」。这里给 12 秒上限，超时立刻返回 504，
         // 让界面走失败提示而不是无限等待。
+        // ?native=1 强制走 Cloudflare 原生实现（用于验证/无需本机电脑的场景）
+        if (url.searchParams.get("native") === "1") {
+          const forced = await nativeNetease(url.pathname.slice("/api/netease".length) || "/", url.searchParams);
+          if (forced) return forced;
+        }
         const upstreamSignal = AbortSignal.timeout(12000);
         const upstream = await fetch(
           new Request(NETEASE_BASE + url.pathname.slice("/api/netease".length) + url.search, request),
@@ -207,6 +360,17 @@ export default {
         );
         // 网易云下发的播放直链是 http://…music.126.net，https 页面里会被当作混合内容拦截。
         // 这里把 JSON 响应里的这些地址统一升成 https（126.net 的 https 可用，已实测 206 audio/mpeg）。
+        if (upstream.status >= 500) {
+          const neteasePath = url.pathname.slice("/api/netease".length) || "/";
+          const native = await nativeNetease(neteasePath, url.searchParams);
+          if (native) return native;
+          // 隧道与原生兜底都不可用：返回结构化错误，避免把 Cloudflare 的 530 HTML 丢给前端，
+          // 那样界面会一直转圈而不是给出「音源不可用」的明确提示。
+          return new Response(JSON.stringify({
+            code: 503,
+            message: "netease backend offline (tunnel unreachable from worker)",
+          }), { status: 200, headers: { "content-type": "application/json; charset=utf-8" } });
+        }
         const upstreamType = upstream.headers.get("content-type") || "";
         if (upstreamType.includes("application/json")) {
           const text = await upstream.text();
@@ -222,6 +386,9 @@ export default {
         }
         return upstream;
       } catch (error) {
+        const neteasePath = url.pathname.slice("/api/netease".length) || "/";
+        const native = await nativeNetease(neteasePath, url.searchParams);
+        if (native) return native;
         const aborted = (error as Error)?.name === "TimeoutError" || (error as Error)?.name === "AbortError";
         return new Response(
           JSON.stringify({
