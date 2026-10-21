@@ -298,7 +298,7 @@ export default async function viteConfig(_config: ConfigEnv): Promise<UserConfig
           importScripts: [localCoverWorkerImport],
           // Docker serves this file dynamically; it must never be pinned in the PWA precache.
           // The cover route is stored with the worker script itself, so precaching it is redundant.
-          globIgnores: ['**/runtime-config.js', '**/assets/folium-icons/**', '**/folia-cover-sw.js', '**/index.html'],
+          globIgnores: ['**/runtime-config.js', '**/assets/folium-icons/**', '**/folia-cover-sw.js', '**/index.html', '**/assets/bootstrap-*.js'],
           // 导航请求必须走网络：预缓存过的旧 index.html 会引用已经被新构建替换掉的 chunk，
           // 那份 HTML 一旦被 Service Worker 直接返回，页面就永远停在白屏（换网络也没用）。
           // 这里只让 HTML 走 NetworkFirst，离线时才回退缓存。
