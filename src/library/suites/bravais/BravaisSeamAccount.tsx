@@ -33,7 +33,7 @@ const QR_FACE_STYLE: React.CSSProperties = { alignSelf: 'center', flex: 'none' }
 
 const LoginQr: React.FC<{ qr: BravaisLoginForm['qr'] }> = ({ qr }) => (
     <div className={`bravais-login-qr is-${qr.kind}`} data-bravais-login-qr={qr.kind}>
-        {qr.kind === 'image' && <img src={qr.url} alt="QR Code" width={200} height={200} />}
+        {qr.kind === 'image' && <img loading="lazy" decoding="async" src={qr.url} alt="QR Code" width={200} height={200} />}
         {qr.kind === 'loading' && <Loader2 aria-hidden className="animate-spin" />}
         {qr.kind === 'choose-method' && <span>{qr.text}</span>}
         {qr.kind === 'backend-failure' && (
@@ -208,7 +208,7 @@ const LoginView: React.FC<{ form: BravaisLoginForm; actions: BravaisAccountActio
                                 className={option.selected ? 'is-selected' : undefined}
                                 onClick={() => actions.selectMethod(option.id)}
                             >
-                                {LOGIN_METHOD_ICONS[option.iconKey] && <img src={LOGIN_METHOD_ICONS[option.iconKey]} alt="" aria-hidden />}
+                                {LOGIN_METHOD_ICONS[option.iconKey] && <img loading="lazy" decoding="async" src={LOGIN_METHOD_ICONS[option.iconKey]} alt="" aria-hidden />}
                                 <span>{option.label}</span>
                                 {option.selected && <Check aria-hidden />}
                             </button>
