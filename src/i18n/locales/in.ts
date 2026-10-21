@@ -1584,6 +1584,8 @@ export default {
     "lyricMatchPriorityDesc": "Saat beberapa sumber lirik memiliki kecocokan berkualitas tinggi, utamakan sumber ini terlebih dahulu."
   },
   "options": {
+        "resetPlaybackEngine": "Setel ulang mesin pemutaran",
+        "resetPlaybackEngineDesc": "Pakai saat menekan putar tidak bereaksi atau tidak ada suara: hapus cache lalu muat ulang untuk membangun ulang jalur audio.",
     "ponderHints": "Petunjuk tutorial Ponder",
     "ponderHintsDesc": "Mengarahkan kursor ke kontrol yang bisa dipelajari akan memunculkan petunjuk untuk menahan G, yang membuka panduan animasi gerakan tersebut.",
     "ponderHintsAlways": "Selalu tampilkan",
