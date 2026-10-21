@@ -115,7 +115,20 @@ const VideoLayer: React.FC<VideoLayerProps> = ({ paused }) => {
         }
     }, [active, paused]);
 
-    if (!active || !source) return null;
+    if (!active) return null;
+
+    // 开关打开但没有任何视频源时，之前是直接 return null：用户看到的就是「开了都没背景」，
+    // 完全不知道是没选文件。这里给一条可见提示，把"没配置"和"配置了但放不出来"区分开。
+    if (!source) {
+        return (
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                <div className="rounded-xl px-4 py-2 text-xs"
+                    style={{ background: 'rgba(0,0,0,0.45)', color: 'rgba(255,255,255,0.82)' }}>
+                    视频层已开启，但还没有选择视频 —— 设置 → 视觉设置 → 视频层 → 选择视频
+                </div>
+            </div>
+        );
+    }
 
     return (
         <video
