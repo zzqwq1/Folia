@@ -1,0 +1,66 @@
+# 在没有 Mac 的情况下，用 GitHub 的 macOS runner 编译出未签名 IPA。
+#
+# 用途：本地是 Windows，无法跑 xcodebuild；这个 workflow 提供一条可复现的 iOS 构建通道。
+# 产物是**未签名** IPA，需要你自己用签名服务签名后才能安装。
+#
+# 手动触发：仓库 Actions -> "iOS 未签名构建" -> Run workflow
+name: iOS 未签名构建
+
+on:
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: "构建配置"
+        required: false
+        default: "Release"
+        type: choice
+        options:
+          - Release
+          - Debug
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 40
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 选择 Xcode
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app || sudo xcode-select -s /Applications/Xcode.app
+
+      - name: 构建未签名 archive
+        run: |
+          set -euo pipefail
+          cd ios/App
+          xcodebuild \
+            -project App.xcodeproj \
+            -scheme App \
+            -configuration "${{ inputs.configuration }}" \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/App.xcarchive" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            archive | tail -n 40
+
+      - name: 打包成 IPA（未签名）
+        run: |
+          set -euo pipefail
+          APP_PATH="$RUNNER_TEMP/App.xcarchive/Products/Applications/App.app"
+          test -d "$APP_PATH"
+          mkdir -p "$RUNNER_TEMP/Payload"
+          cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
+          cd "$RUNNER_TEMP"
+          zip -r folia-unsigned.ipa Payload
+          ls -lh folia-unsigned.ipa
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: folia-unsigned-ipa
+          path: ${{ runner.temp }}/folia-unsigned.ipa
+          if-no-files-found: error
