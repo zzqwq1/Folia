@@ -470,12 +470,21 @@ const foliaFetch = async (request: Request, env: Env): Promise<Response> => {
         // 本机 NeteaseCloudMusicApi 偶尔会在 /song/url 上挂很久（上游网易云不响应），
         // 前端就会一直停在「正在获取歌曲链接」。这里给 12 秒上限，超时立刻返回 504，
         // 让界面走失败提示而不是无限等待。
-        // 扫码登录路径原生优先：这三个接口走 weapi 直连网易，绕过隧道，
-        // 否则 LAX 线路 16 秒级卡死会让 check 在浏览器侧直接 Load failed。
+        // 扫码登录路径：服务器隧道优先，原生仅兜底。
+        // 原生（CF 出口）做 check 会被网易风控（-462 验证码 / 800 过期，共享出口 IP 串号），
+        // 北京服务器上的 NeteaseCloudMusicApi 反而是稳定的（匿名 cookie + 固定 IP）。
         if (url.pathname === "/api/netease/login/qr/key"
           || url.pathname === "/api/netease/login/qr/create"
           || url.pathname === "/api/netease/login/qr/check") {
           const qrPath = url.pathname.slice("/api/netease".length);
+          try {
+            const qrUpstream = await fetchWithBackup(
+              (base: string) => `${base || NETEASE_BASE}${qrPath}${url.search}`,
+              request,
+              AbortSignal.timeout(30000),
+            );
+            if (qrUpstream.status < 500) return qrUpstream;
+          } catch { /* 隧道失败，走原生兜底 */ }
           const qrNative = await nativeNetease(qrPath, url.searchParams);
           if (qrNative) return qrNative;
         }
