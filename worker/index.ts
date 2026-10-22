@@ -153,10 +153,17 @@ const withCors = (request: Request, response: Response): Response => {
   headers.set("access-control-expose-headers", "set-cookie, content-range, accept-ranges");
 
   // Headers 会把重复的 Set-Cookie 合并掉，这里逐条补回去（登录态就靠它）。
+  // 同时补 SameSite=None; Secure：页面来源是 capacitor://localhost 时属于「跨站」，
+  // 不带这两个属性的 cookie 会被 WebKit 直接丢弃 —— 表现就是「登录提示成功但下一次请求仍是匿名」。
   const setCookies = (response.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie?.() ?? [];
   if (setCookies.length > 0) {
     headers.delete("set-cookie");
-    for (const line of setCookies) headers.append("set-cookie", line);
+    for (const raw of setCookies) {
+      let line = raw;
+      if (!/samesite=/i.test(line)) line += "; SameSite=None";
+      if (!/;\s*secure/i.test(line)) line += "; Secure";
+      headers.append("set-cookie", line);
+    }
   }
 
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
