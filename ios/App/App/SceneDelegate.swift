@@ -66,32 +66,32 @@ class FoliaBridgeViewController: CAPBridgeViewController {
 }
 
 /// Reads `window.__foliaNative` and drives a Metal overlay.
-/// The shape JS publishes:
-///   null                                     -> nothing to draw
-///   { mount: { x, y, width, height } }       -> create/refresh the overlay
-///   { mount: null }                          -> remove the overlay
-///   { level: 0...1, hue: 0...1 }             -> per-frame state
 ///
-/// Step D: no Timer and no repeated evaluateJavaScript. Only one read is scheduled after the
-/// page settles, so a crash here would point at the single call rather than at a polling loop.
+/// Step E: the native path is now **opt-in through the page URL**. Three seconds after the
+/// web view appears the renderer checks whether the loaded URL carries `nativeViz=1`; without
+/// that marker it does nothing at all. This keeps the default launch inert (the build that
+/// boots) while still letting a single build exercise the native code on demand.
 final class FoliaNativeRenderer {
     private weak var hostView: WKWebView?
     private var metalView: FoliaMetalView?
     private var mountedRect: CGRect?
     private var didSchedule = false
 
-    /// Remembers the web view and schedules exactly one state read.
+    /// Remembers the web view and schedules one delayed activation check.
     func attach(to webView: WKWebView) {
         hostView = webView
         guard !didSchedule else { return }
         didSchedule = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-            self?.readOnce()
+            self?.activateIfRequested()
         }
     }
 
-    private func readOnce() {
+    /// Only reads the page when the URL asked for the native layer.
+    private func activateIfRequested() {
         guard let webView = hostView else { return }
+        let url = webView.url?.absoluteString ?? ""
+        guard url.contains("nativeViz=1") else { return }
         webView.evaluateJavaScript("JSON.stringify(window.__foliaNative || null)") { [weak self] result, _ in
             guard let self, let text = result as? String, text != "null" else { return }
             guard let data = text.data(using: .utf8),
