@@ -145,7 +145,7 @@ export default {
       try {
         const target = new URL(url.searchParams.get("url") || "");
         if (/(^|\.)(qq\.com|gtimg\.cn)$/.test(target.hostname)) {
-          const QQ_PROXY_BASE = "https://placed-vintage-precision-donate.trycloudflare.com";
+          const QQ_PROXY_BASE = "https://personals-viewed-bradford-kings.trycloudflare.com/qq";
           try {
             const viaProxy = await fetch(new Request(QQ_PROXY_BASE + url.pathname + url.search, request));
             // 530/5xx 说明 Cloudflare 边缘没连上那条隧道：退回 Worker 直连再试一次。
@@ -187,7 +187,7 @@ export default {
       }
       try {
         // 优先走本机 KuGouMusicApi（含扫码登录）；隧道不可用时退回 Worker 原生实现。
-        const KUGOU_BASE = "https://comm-included-scratch-sara.trycloudflare.com";
+        const KUGOU_BASE = "https://personals-viewed-bradford-kings.trycloudflare.com/kugou";
         // 只把登录/账号相关路径交给本机 KuGouMusicApi；搜索与播放走 Worker 原生实现
         // （原生 tracker 能拿到可播直链，而本机库的 /song/url 会返回 20028「本次请求需要验证」）。
         const kugouPath = url.pathname.slice("/api/kugou".length);
@@ -343,7 +343,7 @@ export default {
 
     // 网易云：后端在本机（NeteaseCloudMusicApi）+ Cloudflare Tunnel，前端统一走同源 /api/netease。
     if (url.pathname === "/api/netease" || url.pathname.startsWith("/api/netease/")) {
-      const NETEASE_BASE = "https://lion-asks-latinas-paul.trycloudflare.com";
+      const NETEASE_BASE = "https://personals-viewed-bradford-kings.trycloudflare.com/netease";
       try {
         // 本机 NeteaseCloudMusicApi 偶尔会在 /song/url 上挂很久（上游网易云不响应），
         // 前端就会一直停在「正在获取歌曲链接」。这里给 12 秒上限，超时立刻返回 504，
