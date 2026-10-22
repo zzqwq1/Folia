@@ -7,24 +7,18 @@ import MetalKit
 //
 // NOTES
 // 1. Comments here stay ASCII-only: the iOS sources were once saved with a mismatched
-//    encoding and several Chinese comments turned into mojibake. Do not reintroduce that.
-// 2. The native renderer talks to JS through a WKScriptMessageHandler instead of a
-//    Capacitor plugin. Reason: plugin registration APIs differ between Capacitor majors
-//    (`registerPluginInstance`, `CAPPluginCall.getDouble` overloads, ...), and this code has
-//    to stay compilable on the pinned 8.5.3 without a Mac to iterate quickly. A message
-//    handler needs no registration at all, so the surface that can break is much smaller.
-// 3. The Metal view is added on top of the web view. It only draws the placeholder field for
-//    now; the lattice shader moves in once the JS -> native path is proven on device.
+//    encoding and several Chinese comments turned into mojibake.
+// 2. JS -> native goes through a 15 Hz `evaluateJavaScript` poll of `window.__foliaNative`
+//    instead of a WKScriptMessageHandler. Two builds were bisected already:
+//      - plain CAPBridgeViewController  : boots
+//      - subclass, nothing attached     : boots
+//      - subclass + message handler     : crashed, and `bridge` is not visible to this target
+//    Polling needs no bridge access and no mutation of the web view configuration, which is
+//    the smallest surface that can still prove "JS drives a Metal layer" on device.
+// 3. The Metal view draws a placeholder field; the lattice shader moves in once this path is
+//    confirmed to survive on a real phone.
 
-// Feature switch for the native renderer. Keep it OFF until a build is verified on device:
-// with the switch off the app boots exactly like before (plain CAPBridgeViewController, no
-// message handler, no Metal view), which is what makes a crash bisectable.
 private let foliaNativeRenderEnabled = true
-
-// Second switch, so a crash can be bisected one step at a time:
-//   step A: subclass only (no overrides at all)   -> foliaInstallNativeBridge = false
-//   step B: subclass + attach message handler     -> foliaInstallNativeBridge = true
-private let foliaInstallNativeBridge = false
 
 class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     var window: UIWindow?
@@ -33,7 +27,6 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         guard let windowScene = scene as? UIWindowScene else { return }
 
         window = UIWindow(windowScene: windowScene)
-        // When the switch is off this is the stock controller, i.e. byte-for-byte old behaviour.
         let root: UIViewController = foliaNativeRenderEnabled ? FoliaBridgeViewController() : CAPBridgeViewController()
         window?.rootViewController = root
         window?.makeKeyAndVisible()
@@ -50,75 +43,99 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
 }
 
-/// Installs the native renderer bridge on the web view once Capacitor has built it.
-/// Step A (subclass only) booted fine, so the attachment now uses the documented path
-/// (`capacitorDidLoad` + `bridge?.webView`) instead of walking the view tree from
-/// `viewDidAppear`, which was the only difference in the build that crashed.
+/// Hosts the native renderer and polls the page for its latest state.
 class FoliaBridgeViewController: CAPBridgeViewController {
-    private let nativeBridge = FoliaNativeBridge()
+    private let renderer = FoliaNativeRenderer()
 
-    override func capacitorDidLoad() {
-        super.capacitorDidLoad()
-        guard foliaInstallNativeBridge else { return }
-        guard let webView = bridge?.webView else { return }
-        nativeBridge.attach(to: webView)
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        guard foliaNativeRenderEnabled else { return }
+        if let webView = FoliaBridgeViewController.findWebView(in: view) {
+            renderer.attach(to: webView)
+        }
+    }
+
+    /// Depth-first search for the first WKWebView inside a view tree.
+    static func findWebView(in view: UIView) -> WKWebView? {
+        if let webView = view as? WKWebView { return webView }
+        for subview in view.subviews {
+            if let found = findWebView(in: subview) { return found }
+        }
+        return nil
     }
 }
 
-/// Receives fire-and-forget commands from JS via `window.webkit.messageHandlers.foliaNative`.
-/// Commands: { cmd: "mount", x, y, width, height } / { cmd: "unmount" } / { cmd: "frame", level, hue }.
-final class FoliaNativeBridge: NSObject, WKScriptMessageHandler {
+/// Reads `window.__foliaNative` a few times per second and drives a Metal overlay.
+/// The shape JS publishes:
+///   null                                     -> nothing to draw
+///   { mount: { x, y, width, height } }       -> create/refresh the overlay
+///   { mount: null }                          -> remove the overlay
+///   { level: 0...1, hue: 0...1 }             -> per-frame state
+final class FoliaNativeRenderer {
     private weak var hostView: WKWebView?
-    private var renderView: FoliaMetalView?
-    private var installed = false
+    private var metalView: FoliaMetalView?
+    private var timer: Timer?
+    private var mountedRect: CGRect?
 
-    /// Registers the message handler exactly once for the given web view.
+    /// Starts polling; safe to call more than once.
     func attach(to webView: WKWebView) {
+        if hostView === webView, timer != nil { return }
         hostView = webView
-        guard !installed else { return }
-        webView.configuration.userContentController.add(self, name: "foliaNative")
-        installed = true
+        timer?.invalidate()
+        let t = Timer(timeInterval: 1.0 / 15.0, repeats: true) { [weak self] _ in
+            self?.poll()
+        }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
     }
 
-    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard let body = message.body as? [String: Any], let cmd = body["cmd"] as? String else { return }
-        switch cmd {
-        case "mount":
-            let x = (body["x"] as? Double) ?? 0
-            let y = (body["y"] as? Double) ?? 0
-            let width = (body["width"] as? Double) ?? 0
-            let height = (body["height"] as? Double) ?? 0
-            mount(x: x, y: y, width: width, height: height)
-        case "unmount":
-            unmount()
-        case "frame":
-            let level = Float((body["level"] as? Double) ?? 0)
-            let hue = Float((body["hue"] as? Double) ?? 0.6)
-            renderView?.update(level: level, hue: hue)
-        default:
-            break
+    private func poll() {
+        guard let webView = hostView else { return }
+        webView.evaluateJavaScript("JSON.stringify(window.__foliaNative || null)") { [weak self] result, _ in
+            guard let self, let text = result as? String, text != "null" else { return }
+            guard let data = text.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+            self.apply(object)
         }
     }
 
-    private func mount(x: Double, y: Double, width: Double, height: Double) {
-        guard width > 0, height > 0, let device = MTLCreateSystemDefaultDevice() else { return }
-        DispatchQueue.main.async { [weak self] in
-            guard let self, let host = self.hostView else { return }
-            self.renderView?.removeFromSuperview()
-            let frame = CGRect(x: x, y: y, width: width, height: height)
-            let view = FoliaMetalView(frame: frame, device: device)
-            view.isUserInteractionEnabled = false
-            view.backgroundColor = .clear
-            host.addSubview(view)
-            self.renderView = view
+    private func apply(_ object: [String: Any]) {
+        if let mount = object["mount"] as? [String: Any] {
+            let rect = CGRect(
+                x: (mount["x"] as? Double) ?? 0,
+                y: (mount["y"] as? Double) ?? 0,
+                width: (mount["width"] as? Double) ?? 0,
+                height: (mount["height"] as? Double) ?? 0
+            )
+            if mountedRect != rect {
+                mountLayer(rect: rect)
+                mountedRect = rect
+            }
+        } else if mountedRect != nil {
+            unmountLayer()
+            mountedRect = nil
+        }
+
+        if let level = object["level"] as? Double, let hue = object["hue"] as? Double {
+            metalView?.update(level: Float(level), hue: Float(hue))
         }
     }
 
-    private func unmount() {
-        DispatchQueue.main.async { [weak self] in
-            self?.renderView?.removeFromSuperview()
-            self?.renderView = nil
-        }
+    private func mountLayer(rect: CGRect) {
+        guard rect.width > 0, rect.height > 0,
+              let host = hostView,
+              let device = MTLCreateSystemDefaultDevice() else { return }
+        metalView?.removeFromSuperview()
+        let view = FoliaMetalView(frame: rect, device: device)
+        view.isUserInteractionEnabled = false
+        view.backgroundColor = .clear
+        host.addSubview(view)
+        metalView = view
+    }
+
+    private func unmountLayer() {
+        metalView?.removeFromSuperview()
+        metalView = nil
     }
 }
 
