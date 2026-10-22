@@ -20,38 +20,28 @@ export const startNativeVisualizerProbeIfRequested = (): void => {
     if (params.get(PROBE_QUERY_KEY) !== '1') return;
     if (mounted) return;
 
-    // 原生侧是在 viewDidAppear 里挂 handler 的，页面刚起来时可能还没就绪，这里重试几次。
-    let attempts = 0;
-    const tryMount = () => {
-        attempts += 1;
-        const ok = mountNativeVisualizer({
-            x: 0,
-            y: 0,
-            width: window.innerWidth,
-            height: Math.round(window.innerHeight * 0.5),
-        });
-        if (!ok) {
-            if (attempts < 12) setTimeout(tryMount, 250);
-            return;
-        }
-        mounted = true;
+    const mountedOk = mountNativeVisualizer({
+        x: 0,
+        y: 0,
+        width: window.innerWidth,
+        height: Math.round(window.innerHeight * 0.5),
+    });
+    if (!mountedOk) return;
+    mounted = true;
 
-        // 用一条正弦曲线驱动电平，肉眼能确认画面确实在动、且由 JS 驱动。
-        let phase = 0;
-        frameTimer = setInterval(() => {
-            phase += 0.08;
-            const level = (Math.sin(phase) + 1) / 2;
-            pushNativeVisualizerFrame(level, 0.6);
-        }, 33);
+    // 用一条正弦曲线驱动电平，肉眼能确认画面确实在动、且由 JS 驱动。
+    let phase = 0;
+    frameTimer = setInterval(() => {
+        phase += 0.08;
+        const level = (Math.sin(phase) + 1) / 2;
+        pushNativeVisualizerFrame(level, 0.6);
+    }, 33);
 
-        // 方便卸载：调用 window.__foliaStopNativeViz()
-        (window as unknown as { __foliaStopNativeViz?: () => void }).__foliaStopNativeViz = () => {
-            if (frameTimer) clearInterval(frameTimer);
-            frameTimer = null;
-            unmountNativeVisualizer();
-            mounted = false;
-        };
+    // 方便卸载：调用 window.__foliaStopNativeViz()
+    (window as unknown as { __foliaStopNativeViz?: () => void }).__foliaStopNativeViz = () => {
+        if (frameTimer) clearInterval(frameTimer);
+        frameTimer = null;
+        unmountNativeVisualizer();
+        mounted = false;
     };
-
-    tryMount();
 };
