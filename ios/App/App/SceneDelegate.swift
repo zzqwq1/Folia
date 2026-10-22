@@ -43,7 +43,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
 }
 
-/// Hosts the native renderer and polls the page for its latest state.
+/// Hosts the native renderer and reads the page state.
 class FoliaBridgeViewController: CAPBridgeViewController {
     private let renderer = FoliaNativeRenderer()
 
@@ -65,31 +65,32 @@ class FoliaBridgeViewController: CAPBridgeViewController {
     }
 }
 
-/// Reads `window.__foliaNative` a few times per second and drives a Metal overlay.
+/// Reads `window.__foliaNative` and drives a Metal overlay.
 /// The shape JS publishes:
 ///   null                                     -> nothing to draw
 ///   { mount: { x, y, width, height } }       -> create/refresh the overlay
 ///   { mount: null }                          -> remove the overlay
 ///   { level: 0...1, hue: 0...1 }             -> per-frame state
+///
+/// Step D: no Timer and no repeated evaluateJavaScript. Only one read is scheduled after the
+/// page settles, so a crash here would point at the single call rather than at a polling loop.
 final class FoliaNativeRenderer {
     private weak var hostView: WKWebView?
     private var metalView: FoliaMetalView?
-    private var timer: Timer?
     private var mountedRect: CGRect?
+    private var didSchedule = false
 
-    /// Starts polling; safe to call more than once.
+    /// Remembers the web view and schedules exactly one state read.
     func attach(to webView: WKWebView) {
-        if hostView === webView, timer != nil { return }
         hostView = webView
-        timer?.invalidate()
-        let t = Timer(timeInterval: 1.0 / 15.0, repeats: true) { [weak self] _ in
-            self?.poll()
+        guard !didSchedule else { return }
+        didSchedule = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            self?.readOnce()
         }
-        RunLoop.main.add(t, forMode: .common)
-        timer = t
     }
 
-    private func poll() {
+    private func readOnce() {
         guard let webView = hostView else { return }
         webView.evaluateJavaScript("JSON.stringify(window.__foliaNative || null)") { [weak self] result, _ in
             guard let self, let text = result as? String, text != "null" else { return }
