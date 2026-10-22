@@ -29,6 +29,17 @@ jobs:
       - name: 选择 Xcode
         run: sudo xcode-select -s /Applications/Xcode_15.4.app || sudo xcode-select -s /Applications/Xcode.app
 
+      - name: 准备 web 资源目录
+        run: |
+          # Xcode 工程把 App/public 当文件夹资源引用，但仓库里不提交它。
+          # 线上版本通过 capacitor 的 server.url 远程加载页面，这里只要放个占位文件即可。
+          set -euo pipefail
+          mkdir -p ios/App/App/public
+          if [ ! -f ios/App/App/public/index.html ]; then
+            printf '<!doctype html><meta charset="utf-8"><title>Folia</title>\n' > ios/App/App/public/index.html
+          fi
+          ls -l ios/App/App/public
+
       - name: 构建未签名 archive
         run: |
           set -euo pipefail
