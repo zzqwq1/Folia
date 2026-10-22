@@ -397,7 +397,10 @@ const foliaFetch = async (request: Request, env: Env): Promise<Response> => {
           const forced = await nativeNetease(url.pathname.slice("/api/netease".length) || "/", url.searchParams);
           if (forced) return forced;
         }
-        const upstreamSignal = AbortSignal.timeout(12000);
+        // 扫码登录是长轮询（check 可能要挂十几秒），12 秒会把它掐断，浏览器侧就报 Load failed。
+        // 登录相关路径给 30 秒，其它接口仍保持 12 秒的快速失败。
+        const neteaseTimeoutMs = url.pathname.includes("/login/") ? 30000 : 12000;
+        const upstreamSignal = AbortSignal.timeout(neteaseTimeoutMs);
         const neteaseTarget = NETEASE_BASE + url.pathname.slice("/api/netease".length) + url.search;
         let upstream = await fetch(new Request(neteaseTarget, request), { signal: upstreamSignal });
         // quick tunnel 偶发 530（边缘没连上源站），等 300ms 重试一次通常就通；
@@ -405,7 +408,7 @@ const foliaFetch = async (request: Request, env: Env): Promise<Response> => {
         if (upstream.status >= 500) {
           await new Promise((resolve) => setTimeout(resolve, 300));
           try {
-            upstream = await fetch(new Request(neteaseTarget, request), { signal: AbortSignal.timeout(12000) });
+            upstream = await fetch(new Request(neteaseTarget, request), { signal: AbortSignal.timeout(neteaseTimeoutMs) });
           } catch { /* 保持第一次的结果，交给下面的兜底 */ }
         }
         // 网易云下发的播放直链是 http://…music.126.net，https 页面里会被当作混合内容拦截。
