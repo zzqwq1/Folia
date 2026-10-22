@@ -140,11 +140,25 @@ const withCors = (request: Request, response: Response): Response => {
   const origin = request.headers.get("origin");
   if (!origin) return response;
 
+  // 重建 Response 时不能带上 content-encoding / content-length：
+  // Worker 拿到的 body 已经是解压过的，浏览器看到这两个头会再解一次，
+  // 结果是请求直接以 TypeError: Load failed 结束（网易云扫码 check 就是这么挂的）。
   const headers = new Headers(response.headers);
+  headers.delete("content-encoding");
+  headers.delete("content-length");
+  headers.delete("transfer-encoding");
   headers.set("access-control-allow-origin", origin);
   headers.set("access-control-allow-credentials", "true");
   headers.set("vary", "origin");
-  headers.set("access-control-expose-headers", "set-cookie, content-length, content-range, accept-ranges");
+  headers.set("access-control-expose-headers", "set-cookie, content-range, accept-ranges");
+
+  // Headers 会把重复的 Set-Cookie 合并掉，这里逐条补回去（登录态就靠它）。
+  const setCookies = (response.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie?.() ?? [];
+  if (setCookies.length > 0) {
+    headers.delete("set-cookie");
+    for (const line of setCookies) headers.append("set-cookie", line);
+  }
+
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 };
 
