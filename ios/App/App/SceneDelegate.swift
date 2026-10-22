@@ -18,7 +18,10 @@ import MetalKit
 // 3. The Metal view draws a placeholder field; the lattice shader moves in once this path is
 //    confirmed to survive on a real phone.
 
-private let foliaNativeRenderEnabled = true
+// Native renderer switch. OFF until a crash log explains why the attached path dies on device:
+// with it off the app boots exactly like the stock Capacitor shell, which is verified working.
+// Flipping it back on is this one line once the crashing symbol is known.
+private let foliaNativeRenderEnabled = false
 
 class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     var window: UIWindow?
