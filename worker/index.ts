@@ -174,6 +174,9 @@ const withCors = (request: Request, response: Response): Response => {
 // quick tunnel 偶尔在 Cloudflare 边缘抖 100 秒级别，单条隧道会让扫码登录整段失败，
 // 所以这里按"主 → 备"顺序重试，任一成功即返回。
 const NETEASE_BACKUP_BASE = "https://enclosure-sailing-senate-taken.trycloudflare.com";
+// 家用电脑（住宅 IP）：网易扫码登录对它不弹验证码，机房 IP 会弹 -462。
+// 用户已把电脑长开（QQ 音乐回退也依赖它），登录优先走这条，其次才是云服务器。
+const HOME_NETEASE_BASE = "https://lion-asks-latinas-paul.trycloudflare.com";
 
 /**
  * 依次尝试主、备基址取数。
@@ -471,23 +474,40 @@ const foliaFetch = async (request: Request, env: Env): Promise<Response> => {
         // 本机 NeteaseCloudMusicApi 偶尔会在 /song/url 上挂很久（上游网易云不响应），
         // 前端就会一直停在「正在获取歌曲链接」。这里给 12 秒上限，超时立刻返回 504，
         // 让界面走失败提示而不是无限等待。
-        // 扫码登录路径：服务器隧道优先，原生仅兜底。
-        // 原生（CF 出口）做 check 会被网易风控（-462 验证码 / 800 过期，共享出口 IP 串号），
-        // 北京服务器上的 NeteaseCloudMusicApi 反而是稳定的（匿名 cookie + 固定 IP）。
+        // 扫码登录三条链路依次尝试：
+        //   1) 家用电脑（住宅 IP，网易对住宅不弹验证码）
+        //   2) 北京服务器（机房 IP，被网易风控时返回 -462 请完成验证操作）
+        //   3) Worker 原生 weapi（CF 出口共享 IP，-462/800 概率更高，仅作最后兜底）
         if (url.pathname === "/api/netease/login/qr/key"
           || url.pathname === "/api/netease/login/qr/create"
           || url.pathname === "/api/netease/login/qr/check") {
           const qrPath = url.pathname.slice("/api/netease".length);
+          const markHeader = (res: Response, src: string) => {
+            const headers = new Headers(res.headers);
+            headers.set("x-folia-upstream", src);
+            return new Response(res.body, { status: res.status, headers });
+          };
           try {
-            const qrUpstream = await fetchWithBackup(
+            const home = await fetch(
+              new Request(HOME_NETEASE_BASE + qrPath + url.search, request.clone()),
+              { signal: AbortSignal.timeout(25000) },
+            );
+            if (home.status < 500) return markHeader(home, "home");
+          } catch { /* 家用隧道失败 */ }
+          try {
+            const server = await fetchWithBackup(
               (base: string) => `${base || NETEASE_BASE}${qrPath}${url.search}`,
               request,
               AbortSignal.timeout(30000),
             );
-            if (qrUpstream.status < 500) return qrUpstream;
-          } catch { /* 隧道失败，走原生兜底 */ }
+            if (server.status < 500) return markHeader(server, "server");
+          } catch { /* 服务器隧道失败 */ }
           const qrNative = await nativeNetease(qrPath, url.searchParams);
-          if (qrNative) return qrNative;
+          if (qrNative) {
+            const headers = new Headers(qrNative.headers);
+            headers.set("x-folia-upstream", "native");
+            return new Response(qrNative.body, { status: qrNative.status, headers });
+          }
         }
         // ?native=1 强制走 Cloudflare 原生实现（用于验证/无需本机电脑的场景）
         if (url.searchParams.get("native") === "1") {
