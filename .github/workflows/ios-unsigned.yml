@@ -29,15 +29,24 @@ jobs:
       - name: 选择 Xcode
         run: sudo xcode-select -s /Applications/Xcode_15.4.app || sudo xcode-select -s /Applications/Xcode.app
 
+      - name: 安装前端依赖
+        run: npm ci --no-audit --no-fund
+
+      - name: 构建前端资源
+        run: |
+          # 1.7.6 发布包的做法：把 dist 一起打进 App（所以体积 10MB+）。
+          # 页面仍由 capacitor 的 server.url 远程加载，包内资源是发布形态的一部分。
+          set -euo pipefail
+          npm run build
+          test -f dist/index.html
+          du -sh dist
+
       - name: 准备 web 资源目录
         run: |
-          # 1.7.6 发布形态：页面由 https://app.folia-api.top 远程加载，包内只放占位资源。
-          # 之前的本地内置/原生渲染实验已回退，这里保持与发布版本一致。
           set -euo pipefail
+          rm -rf ios/App/App/public
           mkdir -p ios/App/App/public
-          if [ ! -f ios/App/App/public/index.html ]; then
-            printf '<!doctype html><meta charset="utf-8"><title>Folia</title>\n' > ios/App/App/public/index.html
-          fi
+          cp -R dist/. ios/App/App/public/
           cat > ios/App/App/capacitor.config.json <<'JSON'
           {
             "appId": "app.folia.major",
@@ -52,7 +61,7 @@ jobs:
             <name>Folia</name>
           </widget>
           XML
-          ls -l ios/App/App/public ios/App/App/capacitor.config.json
+          du -sh ios/App/App/public
 
       - name: 构建未签名 archive
         run: |
