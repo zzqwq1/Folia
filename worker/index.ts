@@ -169,6 +169,38 @@ const withCors = (request: Request, response: Response): Response => {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 };
 
+// 备用隧道：两条 quick tunnel 指向同一台服务器的同一个 nginx。
+// quick tunnel 偶尔在 Cloudflare 边缘抖 100 秒级别，单条隧道会让扫码登录整段失败，
+// 所以这里按"主 → 备"顺序重试，任一成功即返回。
+const NETEASE_BACKUP_BASE = "https://enclosure-sailing-senate-taken.trycloudflare.com";
+
+/**
+ * 依次尝试主、备基址取数。
+ *
+ * `buildUrl` 把基址拼成完整 URL；请求体会按次 clone，避免 POST 在第二次尝试时已经被消费。
+ * 两次都失败时优先把"最后一次真实响应"返回给调用方，保持与单隧道时的错误语义一致。
+ */
+const fetchWithBackup = async (
+  buildUrl: (base: string) => string,
+  request: Request,
+  signal?: AbortSignal,
+): Promise<Response> => {
+  let lastResponse: Response | null = null;
+  const bases = ["", NETEASE_BACKUP_BASE];
+  for (const base of bases) {
+    try {
+      const attempt = await fetch(new Request(buildUrl(base), request.clone()), { signal });
+      if (attempt.status < 500) return attempt;
+      lastResponse = attempt;
+    } catch (error) {
+      if (lastResponse) continue;
+      throw error;
+    }
+  }
+  if (lastResponse) return lastResponse;
+  throw new Error("both backend tunnels unreachable");
+};
+
 const foliaFetch = async (request: Request, env: Env): Promise<Response> => {
     const url = new URL(request.url);
 
@@ -408,14 +440,15 @@ const foliaFetch = async (request: Request, env: Env): Promise<Response> => {
         // 登录相关路径给 30 秒，其它接口仍保持 12 秒的快速失败。
         const neteaseTimeoutMs = url.pathname.includes("/login/") ? 30000 : 12000;
         const upstreamSignal = AbortSignal.timeout(neteaseTimeoutMs);
-        const neteaseTarget = NETEASE_BASE + url.pathname.slice("/api/netease".length) + url.search;
-        let upstream = await fetch(new Request(neteaseTarget, request), { signal: upstreamSignal });
+        const neteasePath = url.pathname.slice("/api/netease".length) + url.search;
+        const buildNeteaseUrl = (base: string) => `${base || NETEASE_BASE}${neteasePath}`;
+        let upstream = await fetchWithBackup(buildNeteaseUrl, request, upstreamSignal);
         // quick tunnel 偶发 530（边缘没连上源站），等 300ms 重试一次通常就通；
         // 用户看到的「加载失败 … returned HTTP 530 without a JSON body」就是这一次抖动。
         if (upstream.status >= 500) {
           await new Promise((resolve) => setTimeout(resolve, 300));
           try {
-            upstream = await fetch(new Request(neteaseTarget, request), { signal: AbortSignal.timeout(neteaseTimeoutMs) });
+            upstream = await fetchWithBackup(buildNeteaseUrl, request, AbortSignal.timeout(neteaseTimeoutMs));
           } catch { /* 保持第一次的结果，交给下面的兜底 */ }
         }
         // 网易云下发的播放直链是 http://…music.126.net，https 页面里会被当作混合内容拦截。
