@@ -1,17 +1,20 @@
 import UIKit
 import Capacitor
+import WebKit
 import MetalKit
 
 // ios/App/App/SceneDelegate.swift
 //
-// NOTE: comments in this file are intentionally ASCII-only. The iOS sources were previously
-// saved with a mismatched encoding, which turned several Chinese comments into mojibake; any
-// new text here stays ASCII so the same damage cannot happen again.
-//
-// This file also hosts the first slice of the native rendering plugin. Xcode only compiles
-// files registered in project.pbxproj, so a brand new .swift file would require a project edit
-// as well. Keeping the plugin here lets the CI build prove the JS -> Capacitor -> Metal path
-// first; it can move into its own file once the plugin needs to grow.
+// NOTES
+// 1. Comments here stay ASCII-only: the iOS sources were once saved with a mismatched
+//    encoding and several Chinese comments turned into mojibake. Do not reintroduce that.
+// 2. The native renderer talks to JS through a WKScriptMessageHandler instead of a
+//    Capacitor plugin. Reason: plugin registration APIs differ between Capacitor majors
+//    (`registerPluginInstance`, `CAPPluginCall.getDouble` overloads, ...), and this code has
+//    to stay compilable on the pinned 8.5.3 without a Mac to iterate quickly. A message
+//    handler needs no registration at all, so the surface that can break is much smaller.
+// 3. The Metal view is added on top of the web view. It only draws the placeholder field for
+//    now; the lattice shader moves in once the JS -> native path is proven on device.
 
 class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     var window: UIWindow?
@@ -20,7 +23,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         guard let windowScene = scene as? UIWindowScene else { return }
 
         window = UIWindow(windowScene: windowScene)
-        // Use the subclass so in-app plugins get registered (see FoliaBridgeViewController below).
+        // Subclass so the native renderer can hook into the web view (see below).
         window?.rootViewController = FoliaBridgeViewController()
         window?.makeKeyAndVisible()
 
@@ -36,90 +39,76 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
 }
 
-/// Registers plugins that live inside the App target itself.
-/// Capacitor only auto-registers plugins shipped as packages, so app-local ones are wired here.
+/// Installs the native renderer bridge on the web view once Capacitor has loaded.
 class FoliaBridgeViewController: CAPBridgeViewController {
+    private let nativeBridge = FoliaNativeBridge()
+
     override func capacitorDidLoad() {
         super.capacitorDidLoad()
-        bridge?.registerPluginInstance(FoliaVisualizerPlugin())
+        guard let webView = bridgedWebView else { return }
+        nativeBridge.attach(to: webView)
     }
 }
 
-/// Native renderer bridge; JS side accesses it as `Capacitor.Plugins.FoliaVisualizer`.
-@objc(FoliaVisualizerPlugin)
-public class FoliaVisualizerPlugin: CAPPlugin, CAPBridgedPlugin {
-    public let identifier = "FoliaVisualizerPlugin"
-    public let jsName = "FoliaVisualizer"
-    public let pluginMethods: [CAPPluginMethod] = [
-        CAPPluginMethod(name: "mount", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "unmount", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "pushFrame", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "isSupported", returnType: CAPPluginReturnPromise),
-    ]
-
+/// Receives fire-and-forget commands from JS via `window.webkit.messageHandlers.foliaNative`.
+/// Commands: { cmd: "mount", x, y, width, height } / { cmd: "unmount" } / { cmd: "frame", level, hue }.
+final class FoliaNativeBridge: NSObject, WKScriptMessageHandler {
+    private weak var hostView: WKWebView?
     private var renderView: FoliaMetalView?
+    private var installed = false
 
-    /// Reports whether the native renderer can run here (device + Metal available).
-    @objc func isSupported(_ call: CAPPluginCall) {
-        call.resolve([
-            "supported": MTLCreateSystemDefaultDevice() != nil,
-            "backend": "metal",
-        ])
+    /// Registers the message handler exactly once for the given web view.
+    func attach(to webView: WKWebView) {
+        hostView = webView
+        guard !installed else { return }
+        webView.configuration.userContentController.add(self, name: "foliaNative")
+        installed = true
     }
 
-    /// Attaches a native render layer over the given rectangle (coordinates arrive in CSS pixels).
-    @objc func mount(_ call: CAPPluginCall) {
-        guard let bridge = self.bridge, let device = MTLCreateSystemDefaultDevice() else {
-            call.reject("Metal unavailable")
-            return
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let body = message.body as? [String: Any], let cmd = body["cmd"] as? String else { return }
+        switch cmd {
+        case "mount":
+            let x = (body["x"] as? Double) ?? 0
+            let y = (body["y"] as? Double) ?? 0
+            let width = (body["width"] as? Double) ?? 0
+            let height = (body["height"] as? Double) ?? 0
+            mount(x: x, y: y, width: width, height: height)
+        case "unmount":
+            unmount()
+        case "frame":
+            let level = Float((body["level"] as? Double) ?? 0)
+            let hue = Float((body["hue"] as? Double) ?? 0.6)
+            renderView?.update(level: level, hue: hue)
+        default:
+            break
         }
-        let x = CGFloat(call.getDouble("x") ?? 0)
-        let y = CGFloat(call.getDouble("y") ?? 0)
-        let width = CGFloat(call.getDouble("width") ?? 0)
-        let height = CGFloat(call.getDouble("height") ?? 0)
-        guard width > 0, height > 0 else {
-            call.reject("invalid size")
-            return
-        }
+    }
 
+    private func mount(x: Double, y: Double, width: Double, height: Double) {
+        guard width > 0, height > 0, let device = MTLCreateSystemDefaultDevice() else { return }
         DispatchQueue.main.async { [weak self] in
-            guard let self, let host = bridge.viewController?.webView else {
-                call.reject("no webview")
-                return
-            }
+            guard let self, let host = self.hostView else { return }
             self.renderView?.removeFromSuperview()
-
             let frame = CGRect(x: x, y: y, width: width, height: height)
             let view = FoliaMetalView(frame: frame, device: device)
             view.isUserInteractionEnabled = false
             view.backgroundColor = .clear
             host.addSubview(view)
             self.renderView = view
-
-            call.resolve(["mounted": true])
         }
     }
 
-    /// Removes the native layer and hands rendering back to the WebView canvas.
-    @objc func unmount(_ call: CAPPluginCall) {
+    private func unmount() {
         DispatchQueue.main.async { [weak self] in
             self?.renderView?.removeFromSuperview()
             self?.renderView = nil
-            call.resolve(["mounted": false])
         }
-    }
-
-    /// Pushes one frame of state; JS throttles the rate so this stays cheap.
-    @objc func pushFrame(_ call: CAPPluginCall) {
-        let level = Float(call.getDouble("level") ?? 0)
-        let hue = Float(call.getDouble("hue") ?? 0.6)
-        renderView?.update(level: level, hue: hue)
-        call.resolve()
     }
 }
 
-/// Minimal Metal view: one full-screen triangle plus a shader compiled at runtime,
-/// which avoids adding a .metal file to the Xcode target just for the scaffold.
+/// Minimal Metal view: one full-screen triangle plus a shader compiled at runtime, which
+/// avoids adding a .metal file to the Xcode target just for the scaffold.
 final class FoliaMetalView: MTKView {
     private var queue: MTLCommandQueue?
     private var pipeline: MTLRenderPipelineState?
@@ -206,7 +195,7 @@ final class FoliaMetalView: MTKView {
         }
     }
 
-    /// Written from the plugin queue, read on the render thread; plain floats need no locking.
+    /// Written from the web view thread, read on the render thread; plain floats need no locking.
     func update(level: Float, hue: Float) {
         self.level = max(0, min(1, level))
         self.hue = hue
