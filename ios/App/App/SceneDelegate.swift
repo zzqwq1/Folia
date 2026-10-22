@@ -39,14 +39,27 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
 }
 
-/// Installs the native renderer bridge on the web view once Capacitor has loaded.
+/// Installs the native renderer bridge on the web view once the view hierarchy is ready.
 class FoliaBridgeViewController: CAPBridgeViewController {
     private let nativeBridge = FoliaNativeBridge()
 
-    override func capacitorDidLoad() {
-        super.capacitorDidLoad()
-        guard let webView = bridgedWebView else { return }
-        nativeBridge.attach(to: webView)
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        // `bridgedWebView` is not exposed on every Capacitor version we might be pinned to,
+        // so locate the WKWebView by walking the hierarchy instead of relying on that property.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let webView = FoliaBridgeViewController.findWebView(in: self.view) else { return }
+            self.nativeBridge.attach(to: webView)
+        }
+    }
+
+    /// Depth-first search for the first WKWebView inside a view tree.
+    static func findWebView(in view: UIView) -> WKWebView? {
+        if let webView = view as? WKWebView { return webView }
+        for subview in view.subviews {
+            if let found = findWebView(in: subview) { return found }
+        }
+        return nil
     }
 }
 
