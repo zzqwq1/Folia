@@ -191,7 +191,8 @@ const fetchWithBackup = async (
   for (const base of bases) {
     try {
       const attempt = await fetch(new Request(buildUrl(base), request.clone()), { signal });
-      if (attempt.status < 500) return attempt;
+      // quick tunnel 的 Cloudflare 边缘偶发 403（非业务拒绝），与 5xx 一样换下一条隧道重试。
+      if (attempt.status < 500 && attempt.status !== 403) return attempt;
       lastResponse = attempt;
     } catch (error) {
       if (lastResponse) continue;
