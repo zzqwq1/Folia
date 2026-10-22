@@ -3,6 +3,7 @@
   "name": "folia-qq-api",
   "main": "./worker/index.ts",
   "compatibility_date": "2026-04-02",
+  "compatibility_flags": ["nodejs_compat"],
   "define": {
     "process.env.NODE_ENV": "\"production\"",
     "process.env.JEST_WORKER_ID": "undefined",
