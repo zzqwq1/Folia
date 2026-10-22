@@ -32,11 +32,17 @@ jobs:
       - name: 安装前端依赖
         run: npm ci --no-audit --no-fund
 
-      - name: 构建前端资源
+      - name: 构建前端资源（接口直连国内服务器）
         run: |
-          # 1.7.6 发布包的做法：把 dist 一起打进 App（所以体积 10MB+）。
-          # 页面仍由 capacitor 的 server.url 远程加载，包内资源是发布形态的一部分。
+          # 方案 A：绕开 Cloudflare 隧道。
+          # 页面来源 capacitor://localhost，接口直接打国内服务器的 8080（同机房直连），
+          # 不再经过"北京 -> 洛杉矶 -> 北京"的跨境隧道。
           set -euo pipefail
+          cat > .env.production <<'ENV'
+          VITE_NETEASE_API_BASE=http://120.53.28.28:8080/netease
+          VITE_QQ_API_BASE=http://120.53.28.28:8080/qq
+          VITE_KUGOU_API_BASE=http://120.53.28.28:8080/kugou
+          ENV
           npm run build
           test -f dist/index.html
           du -sh dist
@@ -52,7 +58,7 @@ jobs:
             "appId": "app.folia.major",
             "appName": "Folia",
             "webDir": "public",
-            "server": { "url": "https://app.folia-api.top", "cleartext": false }
+            "server": { "cleartext": true }
           }
           JSON
           cat > ios/App/App/config.xml <<'XML'
