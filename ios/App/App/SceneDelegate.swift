@@ -16,6 +16,11 @@ import MetalKit
 // 3. The Metal view is added on top of the web view. It only draws the placeholder field for
 //    now; the lattice shader moves in once the JS -> native path is proven on device.
 
+// Feature switch for the native renderer. Keep it OFF until a build is verified on device:
+// with the switch off the app boots exactly like before (plain CAPBridgeViewController, no
+// message handler, no Metal view), which is what makes a crash bisectable.
+private let foliaNativeRenderEnabled = false
+
 class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     var window: UIWindow?
 
@@ -23,8 +28,9 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         guard let windowScene = scene as? UIWindowScene else { return }
 
         window = UIWindow(windowScene: windowScene)
-        // Subclass so the native renderer can hook into the web view (see below).
-        window?.rootViewController = FoliaBridgeViewController()
+        // When the switch is off this is the stock controller, i.e. byte-for-byte old behaviour.
+        let root: UIViewController = foliaNativeRenderEnabled ? FoliaBridgeViewController() : CAPBridgeViewController()
+        window?.rootViewController = root
         window?.makeKeyAndVisible()
 
         SceneDelegateProxy.shared.scene(scene, willConnectTo: session, options: connectionOptions)
