@@ -29,22 +29,41 @@ jobs:
       - name: 选择 Xcode
         run: sudo xcode-select -s /Applications/Xcode_15.4.app || sudo xcode-select -s /Applications/Xcode.app
 
+      - name: 安装前端依赖
+        run: |
+          # 本地包模式需要把 dist 打进 IPA，所以要能在 CI 里构建前端。
+          set -euo pipefail
+          npm ci --no-audit --no-fund
+
+      - name: 构建前端（接口指向线上 Worker）
+        run: |
+          # 资源内置后，页面来源变成 capacitor://localhost，接口必须用绝对地址；
+          # Worker 侧已经补了 CORS（回显 Origin + 允许 credentials），登录态才能带过去。
+          set -euo pipefail
+          cat > .env.production <<'ENV'
+          VITE_NETEASE_API_BASE=https://app.folia-api.top/api/netease
+          VITE_QQ_API_BASE=https://app.folia-api.top/api/qq
+          VITE_KUGOU_API_BASE=https://app.folia-api.top/api/kugou
+          ENV
+          npm run build
+          test -f dist/index.html
+          du -sh dist
+
       - name: 准备 web 资源目录
         run: |
           # Xcode 工程把 App/public、App/config.xml、App/capacitor.config.json 当资源引用，
-          # 这些文件平时由 `npx cap sync ios` 生成、不提交进仓库。CI 里直接补出来。
-          # 线上版本通过 capacitor 的 server.url 远程加载页面，所以 public 里放占位文件即可。
+          # 这些文件平时由 `npx cap sync ios` 生成、不提交进仓库。
+          # 这里把构建产物整份拷进 public：App 变成"资源内置的本地应用"，不再从服务器拉页面。
           set -euo pipefail
+          rm -rf ios/App/App/public
           mkdir -p ios/App/App/public
-          if [ ! -f ios/App/App/public/index.html ]; then
-            printf '<!doctype html><meta charset="utf-8"><title>Folia</title>\n' > ios/App/App/public/index.html
-          fi
+          cp -R dist/. ios/App/App/public/
           cat > ios/App/App/capacitor.config.json <<'JSON'
           {
             "appId": "app.folia.major",
             "appName": "Folia",
             "webDir": "public",
-            "server": { "url": "https://app.folia-api.top", "cleartext": false }
+            "server": { "cleartext": false }
           }
           JSON
           cat > ios/App/App/config.xml <<'XML'
@@ -53,7 +72,7 @@ jobs:
             <name>Folia</name>
           </widget>
           XML
-          ls -l ios/App/App/public ios/App/App/capacitor.config.json ios/App/App/config.xml
+          ls ios/App/App/public | head -20
 
       - name: 构建未签名 archive
         run: |
