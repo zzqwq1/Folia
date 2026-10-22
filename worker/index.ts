@@ -440,6 +440,7 @@ const foliaFetch = async (request: Request, env: Env): Promise<Response> => {
         // 登录相关路径给 30 秒，其它接口仍保持 12 秒的快速失败。
         const neteaseTimeoutMs = url.pathname.includes("/login/") ? 30000 : 12000;
         const upstreamSignal = AbortSignal.timeout(neteaseTimeoutMs);
+        const startedAt = Date.now();
         const neteasePath = url.pathname.slice("/api/netease".length) + url.search;
         const buildNeteaseUrl = (base: string) => `${base || NETEASE_BASE}${neteasePath}`;
         let upstream = await fetchWithBackup(buildNeteaseUrl, request, upstreamSignal);
@@ -459,11 +460,14 @@ const foliaFetch = async (request: Request, env: Env): Promise<Response> => {
           if (native) return native;
           // 隧道与原生兜底都不可用：返回结构化错误，避免把 Cloudflare 的 530 HTML 丢给前端，
           // 那样界面会一直转圈而不是给出「音源不可用」的明确提示。
+          // 把上游状态码和耗时写进 message：客户端诊断面板会原样显示，
+          // 不用 wrangler tail 也能判断是"上游慢"还是"链路断"。
           return new Response(JSON.stringify({
             code: 503,
-            message: "netease backend offline (tunnel unreachable from worker)",
+            message: `netease backend offline (upstream=${upstream.status}, took=${Date.now() - startedAt}ms)`,
           }), { status: 200, headers: { "content-type": "application/json; charset=utf-8" } });
         }
+        console.log("[netease]", request.method, neteasePath, "->", upstream.status, Date.now() - startedAt, "ms");
         const upstreamType = upstream.headers.get("content-type") || "";
         if (upstreamType.includes("application/json")) {
           const text = await upstream.text();
@@ -486,7 +490,7 @@ const foliaFetch = async (request: Request, env: Env): Promise<Response> => {
         return new Response(
           JSON.stringify({
             code: aborted ? 504 : 502,
-            message: aborted ? "netease upstream timeout" : "netease tunnel unreachable",
+            message: `${aborted ? "netease upstream timeout" : "netease tunnel unreachable"} (took=${Date.now() - startedAt}ms, ${String((error as Error)?.name ?? error)})`,
           }),
           { status: aborted ? 504 : 502, headers: { "content-type": "application/json" } },
         );
