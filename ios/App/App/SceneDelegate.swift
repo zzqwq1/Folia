@@ -19,7 +19,12 @@ import MetalKit
 // Feature switch for the native renderer. Keep it OFF until a build is verified on device:
 // with the switch off the app boots exactly like before (plain CAPBridgeViewController, no
 // message handler, no Metal view), which is what makes a crash bisectable.
-private let foliaNativeRenderEnabled = false
+private let foliaNativeRenderEnabled = true
+
+// Second switch, so a crash can be bisected one step at a time:
+//   step A: subclass only (no overrides at all)   -> foliaInstallNativeBridge = false
+//   step B: subclass + attach message handler     -> foliaInstallNativeBridge = true
+private let foliaInstallNativeBridge = false
 
 class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     var window: UIWindow?
@@ -51,6 +56,7 @@ class FoliaBridgeViewController: CAPBridgeViewController {
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        guard foliaInstallNativeBridge else { return }
         // `bridgedWebView` is not exposed on every Capacitor version we might be pinned to,
         // so locate the WKWebView by walking the hierarchy instead of relying on that property.
         DispatchQueue.main.async { [weak self] in
