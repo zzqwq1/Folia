@@ -31,14 +31,29 @@ jobs:
 
       - name: 准备 web 资源目录
         run: |
-          # Xcode 工程把 App/public 当文件夹资源引用，但仓库里不提交它。
-          # 线上版本通过 capacitor 的 server.url 远程加载页面，这里只要放个占位文件即可。
+          # Xcode 工程把 App/public、App/config.xml、App/capacitor.config.json 当资源引用，
+          # 这些文件平时由 `npx cap sync ios` 生成、不提交进仓库。CI 里直接补出来。
+          # 线上版本通过 capacitor 的 server.url 远程加载页面，所以 public 里放占位文件即可。
           set -euo pipefail
           mkdir -p ios/App/App/public
           if [ ! -f ios/App/App/public/index.html ]; then
             printf '<!doctype html><meta charset="utf-8"><title>Folia</title>\n' > ios/App/App/public/index.html
           fi
-          ls -l ios/App/App/public
+          cat > ios/App/App/capacitor.config.json <<'JSON'
+          {
+            "appId": "app.folia.major",
+            "appName": "Folia",
+            "webDir": "public",
+            "server": { "url": "https://app.folia-api.top", "cleartext": false }
+          }
+          JSON
+          cat > ios/App/App/config.xml <<'XML'
+          <?xml version='1.0' encoding='utf-8'?>
+          <widget version="1.0.0" xmlns="http://www.w3.org/ns/widgets" xmlns:cdv="http://cordova.apache.org/ns/1.0">
+            <name>Folia</name>
+          </widget>
+          XML
+          ls -l ios/App/App/public ios/App/App/capacitor.config.json ios/App/App/config.xml
 
       - name: 构建未签名 archive
         run: |
