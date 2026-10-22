@@ -145,14 +145,24 @@ export default {
       try {
         const target = new URL(url.searchParams.get("url") || "");
         if (/(^|\.)(qq\.com|gtimg\.cn)$/.test(target.hostname)) {
-          const QQ_PROXY_BASE = "https://personals-viewed-bradford-kings.trycloudflare.com/qq";
+          // QQ 音乐按来源 IP 风控：机房 IP（云服务器）拿到 code 2001，只有住宅宽带 IP 能过。
+          // 先走云服务器；正文出现 2001 就回落到用户自己电脑上的代理（住宅 IP）。
+          // 电脑关机时回落也失败，此时返回服务器原始响应，表现只是「QQ 搜不到」，不影响其它平台。
+          const QQ_PROXY_SERVER = "https://personals-viewed-bradford-kings.trycloudflare.com/qq";
+          const QQ_PROXY_HOME = "https://placed-vintage-precision-donate.trycloudflare.com/qq";
+          let fromServer: Response | null = null;
           try {
-            const viaProxy = await fetch(new Request(QQ_PROXY_BASE + url.pathname + url.search, request));
-            // 530/5xx 说明 Cloudflare 边缘没连上那条隧道：退回 Worker 直连再试一次。
-            // QQ 搜索走直连多数情况仍可用（只有播放接口会被 code 2001 风控拦），
-            // 这样「QQ 搜不出歌」不会因为一条隧道抖动就整块不可用。
-            if (viaProxy.status < 500) return viaProxy;
-          } catch { /* 隧道异常，落到直连 */ }
+            fromServer = await fetch(new Request(QQ_PROXY_SERVER + url.pathname + url.search, request.clone()));
+            if (fromServer.status < 500) {
+              const body = await fromServer.clone().text();
+              if (!body.includes('"code":2001') && !body.includes('"code": 2001')) return fromServer;
+            }
+          } catch { /* 服务器路失败，继续试住宅路 */ }
+          try {
+            const viaHome = await fetch(new Request(QQ_PROXY_HOME + url.pathname + url.search, request.clone()));
+            if (viaHome.status < 500) return viaHome;
+          } catch { /* 电脑关机或家用隧道失效 */ }
+          if (fromServer) return fromServer;
           return handleLyricProxy(request);
         }
       } catch { /* fallthrough */ }
