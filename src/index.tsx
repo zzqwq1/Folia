@@ -4,6 +4,7 @@ import { installWebglContextGuard } from './utils/webglContextGuard';
 import { installConsoleLogCapture } from './utils/consoleLogBuffer';
 import { installDebugModule } from './services/debug/debugModule';
 import { installMemorySampleFeed } from './services/debug/memorySamples';
+import { startNativeVisualizerProbeIfRequested } from './services/nativeVisualizerProbe';
 // import { installCoverSizeAudit } from './services/debug/coverSizeSamples';
 // @ts-ignore
 globalThis.Buffer = Buffer;
@@ -150,3 +151,6 @@ const boot = async () => {
 };
 
 void boot();
+
+// 带 ?nativeViz=1 时启动原生渲染冒烟测试；默认不执行任何逻辑。
+startNativeVisualizerProbeIfRequested();
