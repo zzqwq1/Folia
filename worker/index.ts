@@ -127,8 +127,28 @@ const neteaseWeapiRequest = async (path: string, payload: Record<string, unknown
   return response.json();
 };
 
-export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+/**
+ * 把 /api/* 的响应补上 CORS 头。
+ *
+ * 用途：iOS 包如果把网页资源内置（capacitor://localhost），页面就成了另一个源，
+ * 直接请求 https://app.folia-api.top/api/... 属于跨域，必须显式允许，否则登录态、搜索、
+ * 歌词全部拿不到。这里回显 Origin 而不是写死 `*`，因为登录要带 cookie。
+ */
+const withCors = (request: Request, response: Response): Response => {
+  const url = new URL(request.url);
+  if (!url.pathname.startsWith("/api/")) return response;
+  const origin = request.headers.get("origin");
+  if (!origin) return response;
+
+  const headers = new Headers(response.headers);
+  headers.set("access-control-allow-origin", origin);
+  headers.set("access-control-allow-credentials", "true");
+  headers.set("vary", "origin");
+  headers.set("access-control-expose-headers", "set-cookie, content-length, content-range, accept-ranges");
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+};
+
+const foliaFetch = async (request: Request, env: Env): Promise<Response> => {
     const url = new URL(request.url);
 
     if (url.pathname === "/api/generate-theme") {
@@ -436,5 +456,26 @@ export default {
       return new Response(assetResponse.body, { status: assetResponse.status, headers });
     }
     return assetResponse;
+};
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
+    // 预检请求直接放行，避免跨域的写操作（登录、收藏）被浏览器拦掉。
+    if (request.method === "OPTIONS" && url.pathname.startsWith("/api/")) {
+      const origin = request.headers.get("origin") || "*";
+      return new Response(null, {
+        status: 204,
+        headers: {
+          "access-control-allow-origin": origin,
+          "access-control-allow-credentials": "true",
+          "access-control-allow-methods": "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS",
+          "access-control-allow-headers": request.headers.get("access-control-request-headers") || "content-type",
+          "access-control-max-age": "86400",
+          vary: "origin",
+        },
+      });
+    }
+    return withCors(request, await foliaFetch(request, env));
   },
 };
