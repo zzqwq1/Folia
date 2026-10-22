@@ -57,7 +57,9 @@ jobs:
 
       - name: 构建未签名 archive
         run: |
-          set -euo pipefail
+          # 不再用 `| tail` 截断输出：编译错误在日志中段，截断后定位不到。
+          # 完整日志写文件，失败时把 error: 行和它后面几行一起打出来。
+          set +e
           cd ios/App
           xcodebuild \
             -project App.xcodeproj \
@@ -71,7 +73,17 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             PROVISIONING_PROFILE_SPECIFIER="" \
-            archive | tail -n 40
+            archive > "$RUNNER_TEMP/build.log" 2>&1
+          status=$?
+          echo "xcodebuild exit=$status"
+          if [ $status -ne 0 ]; then
+            echo "===== 编译错误 ====="
+            grep -n -A 4 "error:" "$RUNNER_TEMP/build.log" | head -n 120
+            echo "===== 日志末尾 ====="
+            tail -n 30 "$RUNNER_TEMP/build.log"
+            exit $status
+          fi
+          tail -n 20 "$RUNNER_TEMP/build.log"
 
       - name: 打包成 IPA（未签名）
         run: |
