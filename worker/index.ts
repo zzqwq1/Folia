@@ -1,4 +1,5 @@
 import { Buffer } from "buffer";
+import QRCode from "qrcode/lib/server.js";
 import { handleGenerateTheme } from "./generate-theme.ts";
 import { handleGenerateOpenAITheme } from "./generate-theme_openai.ts";
 import { handleLyricProxy } from "./lyric-proxy.ts";
@@ -400,6 +401,44 @@ const foliaFetch = async (request: Request, env: Env): Promise<Response> => {
           const data: any = await upstream.json();
           return json({ code: 200, lrc: data?.lrc, klyric: data?.klyric, tlyric: data?.tlyric });
         }
+        if (pathname === "/login/qr/key") {
+          // 扫码第一步：unikey。路径与参数对齐 NeteaseCloudMusicApi（/api/login/qrcode/unikey -> weapi，type:3）。
+          const data: any = await neteaseWeapiRequest("/weapi/login/qrcode/unikey", { type: 3 });
+          return json({ code: 200, data: data ?? {} });
+        }
+        if (pathname === "/login/qr/create") {
+          // 扫码第二步：二维码。NeteaseCloudMusicApi 这一步不请求上游，而是本地拼 qrurl + 生成 PNG，
+          // Worker 里用 qrcode 包做同样的事。响应形状必须与框架一致：{ code:200, data:{ qrurl, qrimg } }。
+          const key = pick("key");
+          const qrurl = `https://music.163.com/login?codekey=${encodeURIComponent(key)}`;
+          let qrimg = "";
+          try {
+            qrimg = await QRCode.toDataURL(qrurl, { margin: 1, width: 320, color: { dark: "#000000", light: "#ffffff" } });
+          } catch (error) {
+            console.error("[worker] qrcode render failed:", error);
+          }
+          return json({ code: 200, data: { qrurl, qrimg } });
+        }
+        if (pathname === "/login/qr/check") {
+          // 扫码第三步：长轮询（网易侧会挂到确认/过期，约 20 秒），绝不能套 12 秒上限。
+          // 登录成功的 cookie 在响应头的 Set-Cookie 里，手动拼进 body.cookie（与框架行为一致）。
+          const key = pick("key");
+          const { params, encSecKey } = await neteaseWeapi({ key, type: 3 });
+          const upstream = await fetch("https://music.163.com/weapi/login/qrcode/client/login", {
+            method: "POST",
+            headers: {
+              "content-type": "application/x-www-form-urlencoded",
+              "referer": "https://music.163.com/",
+              "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+              "cookie": (neteaseAnonCookie ? neteaseAnonCookie + "; " : "") + "os=pc; appver=2.9.7; channel=netease;",
+            },
+            body: new URLSearchParams({ params, encSecKey }).toString(),
+          });
+          const data: any = await upstream.json().catch(() => ({}));
+          const rawCookies = (upstream.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie?.() ?? [];
+          data.cookie = rawCookies.join("; ");
+          return json(data ?? { code: 800, message: "expired" });
+        }
         if (pathname === "/song/url") {
           const id = pick("id");
           await ensureNeteaseAnonCookie().catch(() => "");
@@ -431,6 +470,15 @@ const foliaFetch = async (request: Request, env: Env): Promise<Response> => {
         // 本机 NeteaseCloudMusicApi 偶尔会在 /song/url 上挂很久（上游网易云不响应），
         // 前端就会一直停在「正在获取歌曲链接」。这里给 12 秒上限，超时立刻返回 504，
         // 让界面走失败提示而不是无限等待。
+        // 扫码登录路径原生优先：这三个接口走 weapi 直连网易，绕过隧道，
+        // 否则 LAX 线路 16 秒级卡死会让 check 在浏览器侧直接 Load failed。
+        if (url.pathname === "/api/netease/login/qr/key"
+          || url.pathname === "/api/netease/login/qr/create"
+          || url.pathname === "/api/netease/login/qr/check") {
+          const qrPath = url.pathname.slice("/api/netease".length);
+          const qrNative = await nativeNetease(qrPath, url.searchParams);
+          if (qrNative) return qrNative;
+        }
         // ?native=1 强制走 Cloudflare 原生实现（用于验证/无需本机电脑的场景）
         if (url.searchParams.get("native") === "1") {
           const forced = await nativeNetease(url.pathname.slice("/api/netease".length) || "/", url.searchParams);
