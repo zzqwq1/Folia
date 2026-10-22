@@ -29,37 +29,21 @@ jobs:
       - name: 选择 Xcode
         run: sudo xcode-select -s /Applications/Xcode_15.4.app || sudo xcode-select -s /Applications/Xcode.app
 
-      - name: 安装前端依赖
-        run: |
-          # 本地版：把 dist 打进 IPA，App 不再从服务器拉页面。
-          set -euo pipefail
-          npm ci --no-audit --no-fund
-
-      - name: 构建前端（接口指向线上 Worker）
-        run: |
-          # 资源内置后页面来源是 capacitor://localhost，接口必须用绝对地址；
-          # Worker 已补 CORS（回显 Origin + credentials + SameSite=None/Secure），登录态才能带过去。
-          set -euo pipefail
-          cat > .env.production <<'ENV'
-          VITE_NETEASE_API_BASE=https://app.folia-api.top/api/netease
-          VITE_QQ_API_BASE=https://app.folia-api.top/api/qq
-          VITE_KUGOU_API_BASE=https://app.folia-api.top/api/kugou
-          ENV
-          npm run build
-          test -f dist/index.html
-
       - name: 准备 web 资源目录
         run: |
+          # 1.7.6 发布形态：页面由 https://app.folia-api.top 远程加载，包内只放占位资源。
+          # 之前的本地内置/原生渲染实验已回退，这里保持与发布版本一致。
           set -euo pipefail
-          rm -rf ios/App/App/public
           mkdir -p ios/App/App/public
-          cp -R dist/. ios/App/App/public/
+          if [ ! -f ios/App/App/public/index.html ]; then
+            printf '<!doctype html><meta charset="utf-8"><title>Folia</title>\n' > ios/App/App/public/index.html
+          fi
           cat > ios/App/App/capacitor.config.json <<'JSON'
           {
             "appId": "app.folia.major",
             "appName": "Folia",
             "webDir": "public",
-            "server": { "cleartext": false }
+            "server": { "url": "https://app.folia-api.top", "cleartext": false }
           }
           JSON
           cat > ios/App/App/config.xml <<'XML'
@@ -68,7 +52,7 @@ jobs:
             <name>Folia</name>
           </widget>
           XML
-          ls ios/App/App/public | head -20
+          ls -l ios/App/App/public ios/App/App/capacitor.config.json
 
       - name: 构建未签名 archive
         run: |
