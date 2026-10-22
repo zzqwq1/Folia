@@ -50,28 +50,18 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
 }
 
-/// Installs the native renderer bridge on the web view once the view hierarchy is ready.
+/// Installs the native renderer bridge on the web view once Capacitor has built it.
+/// Step A (subclass only) booted fine, so the attachment now uses the documented path
+/// (`capacitorDidLoad` + `bridge?.webView`) instead of walking the view tree from
+/// `viewDidAppear`, which was the only difference in the build that crashed.
 class FoliaBridgeViewController: CAPBridgeViewController {
     private let nativeBridge = FoliaNativeBridge()
 
-    override func viewDidAppear(_ animated: Bool) {
-        super.viewDidAppear(animated)
+    override func capacitorDidLoad() {
+        super.capacitorDidLoad()
         guard foliaInstallNativeBridge else { return }
-        // `bridgedWebView` is not exposed on every Capacitor version we might be pinned to,
-        // so locate the WKWebView by walking the hierarchy instead of relying on that property.
-        DispatchQueue.main.async { [weak self] in
-            guard let self, let webView = FoliaBridgeViewController.findWebView(in: self.view) else { return }
-            self.nativeBridge.attach(to: webView)
-        }
-    }
-
-    /// Depth-first search for the first WKWebView inside a view tree.
-    static func findWebView(in view: UIView) -> WKWebView? {
-        if let webView = view as? WKWebView { return webView }
-        for subview in view.subviews {
-            if let found = findWebView(in: subview) { return found }
-        }
-        return nil
+        guard let webView = bridge?.webView else { return }
+        nativeBridge.attach(to: webView)
     }
 }
 
