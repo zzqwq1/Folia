@@ -2,6 +2,9 @@ import { create } from 'zustand';
 import { getStoredBoolean, getStoredString, setStoredBoolean } from './storagePrimitives';
 import {
     canPersistVideoLayerFile,
+    clearVideoLayerBlob,
+    loadVideoLayerBlob,
+    saveVideoLayerBlob,
     clearVideoLayerFileHandle,
     loadVideoLayerFileHandle,
     pickVideoLayerFile,
@@ -83,9 +86,24 @@ export const useVideoLayerSettingsStore = create<VideoLayerSettingsState>((set, 
     };
 
     const loadStoredFile = async (request: boolean) => {
+        // 视频层关着的时候绝不去读视频：iOS 上把 20MB 视频挂进 <video> 解码会直接吃掉内存，
+        // 用户看到的却是「关了视频层还是播放就闪退」。
+        if (!get().videoLayerEnabled) {
+            dropFile();
+            return;
+        }
         const revision = fileRevision;
         const handle = await loadVideoLayerFileHandle();
-        if (!handle || revision !== fileRevision) return;
+        if (!handle) {
+            // iOS/WKWebView 没有 handle：用上次存进 IndexedDB 的视频 Blob 还原，
+            // 这样重启 App 后不需要重新选文件。
+            const stored = await loadVideoLayerBlob().catch(() => null);
+            if (stored && revision === fileRevision) {
+                showFile(new File([stored.blob], stored.name, { type: stored.type || 'video/mp4' }));
+            }
+            return;
+        }
+        if (revision !== fileRevision) return;
         let result: Awaited<ReturnType<typeof readVideoLayerFileHandle>>;
         try {
             result = await readVideoLayerFileHandle(handle, request);
@@ -105,8 +123,20 @@ export const useVideoLayerSettingsStore = create<VideoLayerSettingsState>((set, 
         }
     };
 
+    // iOS 上「视频层 + 播放」有概率把 WebView 拖崩（系统回收）。
+    // 进入播放前写 pending，稳定播放 15 秒后改写成 ok；下次启动若发现还是 pending，
+    // 说明上次是带着视频层崩的，自动关掉视频层，避免用户一进 App 就闪退、连设置都进不去。
+    let videoLayerEnabled = getStoredBoolean(VIDEO_LAYER_ENABLED_KEY, false);
+    if (getStoredString('video_layer_crash_guard', '') === 'pending') {
+        videoLayerEnabled = false;
+        setStoredBoolean(VIDEO_LAYER_ENABLED_KEY, false);
+        // 上次带着视频层崩了：顺手把持久化的大视频也删掉，否则它一直是内存隐患。
+        void clearVideoLayerBlob();
+        console.warn('[VideoLayer] previous run crashed with the video layer on; disabling it');
+    }
+
     return {
-        videoLayerEnabled: getStoredBoolean(VIDEO_LAYER_ENABLED_KEY, false),
+        videoLayerEnabled,
         videoLayerUrl: getStoredString(VIDEO_LAYER_URL_KEY, ''),
         videoLayerOpacity: clampVideoLayerOpacity(Number(getStoredString(VIDEO_LAYER_OPACITY_KEY, String(VIDEO_LAYER_OPACITY_DEFAULT)))),
         videoLayerFit: getStoredString(VIDEO_LAYER_FIT_KEY, 'cover') === 'contain' ? 'contain' : 'cover',
@@ -117,6 +147,9 @@ export const useVideoLayerSettingsStore = create<VideoLayerSettingsState>((set, 
         setVideoLayerEnabled: (enabled) => {
             set({ videoLayerEnabled: enabled });
             setStoredBoolean(VIDEO_LAYER_ENABLED_KEY, enabled);
+            // 启动时如果视频层是关的，我们不会去读视频（避免白占内存）；等用户在这里打开时，
+            // 再把上次选过的视频取回来，否则他会以为「设置没了、要重选」。
+            if (enabled) void loadStoredFile(false);
         },
         setVideoLayerUrl: (url) => {
             const normalized = url.trim();
@@ -137,8 +170,14 @@ export const useVideoLayerSettingsStore = create<VideoLayerSettingsState>((set, 
             if (!picked) return null;
             fileRevision += 1;
             restoreStarted = true;
-            if (picked.handle) await saveVideoLayerFileHandle(picked.handle);
-            else await clearVideoLayerFileHandle();
+            if (picked.handle) {
+                await saveVideoLayerFileHandle(picked.handle);
+            } else {
+                // 没有 handle（iOS/Safari）：把文件本身存进 IndexedDB，重启后还能自动恢复。
+                await clearVideoLayerFileHandle();
+                const persisted = await saveVideoLayerBlob(picked.file).catch(() => false);
+                if (!persisted) console.warn('[VideoLayer] video too large to persist; it will last this session only');
+            }
             showFile(picked.file);
             get().setVideoLayerEnabled(true);
             return picked.file.name;
@@ -148,6 +187,7 @@ export const useVideoLayerSettingsStore = create<VideoLayerSettingsState>((set, 
             restoreStarted = true;
             dropFile();
             await clearVideoLayerFileHandle();
+            await clearVideoLayerBlob();
         },
         restoreLocalFile: () => loadStoredFile(false),
         regrantLocalFile: () => loadStoredFile(true),

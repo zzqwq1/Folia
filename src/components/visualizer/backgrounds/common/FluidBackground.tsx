@@ -260,8 +260,7 @@ const FluidBackground: React.FC<FluidBackgroundProps> = memo(({ coverUrl, theme 
             {coverUrl ? (
                 <>
                     {isIOSSafari ? (
-                        <img
-                            src={iosDisplayCoverUrl ?? coverUrl}
+                        <img loading="lazy" decoding="async"                             src={iosDisplayCoverUrl ?? coverUrl}
                             alt=""
                             aria-hidden="true"
                             draggable={false}
@@ -270,7 +269,7 @@ const FluidBackground: React.FC<FluidBackgroundProps> = memo(({ coverUrl, theme 
                             style={coverLayerStyle}
                         />
                     ) : (
-                        // Cross-fade the cover on song change instead of hard-swapping the <img src>: the
+                        // Cross-fade the cover on song change instead of hard-swapping the <img loading="lazy" decoding="async" src>: the
                         // outgoing cover fades out while the incoming one fades in (both mounted during the
                         // change), so the world's backdrop glides between songs like the camera does.
                         // The opacity is animated on a WRAPPER div, not on the blurred <img>: animating
@@ -296,8 +295,7 @@ const FluidBackground: React.FC<FluidBackgroundProps> = memo(({ coverUrl, theme 
                                         }
                                     }}
                                 >
-                                    <img
-                                        src={layer.url}
+                                    <img loading="lazy" decoding="async"                                         src={layer.url}
                                         alt=""
                                         aria-hidden="true"
                                         draggable={false}
@@ -331,8 +329,7 @@ const FluidBackground: React.FC<FluidBackgroundProps> = memo(({ coverUrl, theme 
                     {isIOSSafari && (
                         <>
                             {!isSoftFocusReady && (
-                                <img
-                                    src={coverUrl}
+                                <img loading="lazy" decoding="async"                                     src={coverUrl}
                                     alt=""
                                     aria-hidden="true"
                                     draggable={false}

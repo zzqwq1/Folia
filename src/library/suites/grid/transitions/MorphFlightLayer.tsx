@@ -183,13 +183,12 @@ const MorphFlightLayer: React.FC<MorphFlightLayerProps> = ({
                 onAnimationComplete={onCoverAnimationComplete}
             >
                 {start.coverUrl ? (
-                    <img src={start.coverUrl} alt="" className="absolute inset-0 w-full h-full object-cover" draggable={false} />
+                    <img loading="lazy" decoding="async" src={start.coverUrl} alt="" className="absolute inset-0 w-full h-full object-cover" draggable={false} />
                 ) : (
                     <div className="absolute inset-0 bg-zinc-800/40" />
                 )}
                 {target.coverUrl ? (
-                    <img
-                        src={target.coverUrl}
+                    <img loading="lazy" decoding="async"                         src={target.coverUrl}
                         alt=""
                         className="absolute inset-0 w-full h-full object-cover"
                         style={{ opacity: showHeroContent ? 1 : 0, transition: `opacity ${CROSSFADE_SECONDS}s ease` }}

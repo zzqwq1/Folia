@@ -12,6 +12,20 @@ const RUNTIME_REUSE_MS = 2000;
 type ParkedRuntime = { runtime: LatticeLyricRuntime; timer: ReturnType<typeof setTimeout> };
 const parkedRuntimes = new WeakMap<object, ParkedRuntime>();
 
+// iOS 同时存在两个大 WebGL 画布（播放页一个 + 墙面播放一个）会被系统直接回收，用户报「墙面播放 +
+// 晶格闪退」就是这个。这里维护一份"活着的晶格运行时"集合：新画布出现时，把其它画布先隐藏（停止绘制），
+// 只留当前这个在渲染；旧画布重新可见时会自己恢复。
+const activeLatticeRuntimes = new Set<LatticeLyricRuntime>();
+
+/** 只让 newest 这个运行时继续绘制，其它全部停下（不销毁，恢复可见时会自己回来）。 */
+const isolateLatticeRuntime = (newest: LatticeLyricRuntime) => {
+    activeLatticeRuntimes.add(newest);
+    for (const runtime of activeLatticeRuntimes) {
+        if (runtime === newest) continue;
+        try { runtime.setVisible(false); } catch { /* ignore */ }
+    }
+};
+
 /** Keeps one stopped runtime per playback clock so a song change can move it to the next card. */
 const parkRuntime = (clock: object, runtime: LatticeLyricRuntime) => {
     runtime.setVisible(false);
@@ -40,7 +54,15 @@ export function useLatticeLyricCanvas(hostRef: RefObject<HTMLDivElement | null>,
     const runtimeRef = useRef<LatticeLyricRuntime | null>(null);
     const latest = useRef(input); latest.current = input;
     const devicePixelRatio = useDevicePixelRatio();
-    const density = useRef(devicePixelRatio); density.current = devicePixelRatio;
+    // iPhone 的 devicePixelRatio 是 3，晶格歌词画布的像素预算会变成 9 倍；WebGL 显存在 iOS 上
+    // 有明显上限，用户报「用晶格播放视窗会闪退」大概率就是这里被系统回收。
+    // iOS 上封顶 1.5（像素量降到 1/4），其它平台封顶 2：文字用 canvas 采样纹理渲染，
+    // 这个范围内的清晰度差异肉眼几乎看不出来，但显存压力差一个数量级。
+    const isIos = typeof navigator !== 'undefined'
+        && /iP(hone|ad|od)/.test(navigator.userAgent);
+    const densityCap = isIos ? 1 : 2;
+    const safeDensity = Math.min(devicePixelRatio, densityCap);
+    const density = useRef(safeDensity); density.current = safeDensity;
     // The host's last observed content box, kept outside the session effect so a density change
     // can resize the live runtime without restarting the session.
     const box = useRef({ width: 0, height: 0 });
@@ -61,14 +83,23 @@ export function useLatticeLyricCanvas(hostRef: RefObject<HTMLDivElement | null>,
         const onFailure = (error: unknown) => {
             if (!active) return;
             console.warn('[Lattice lyrics] Falling back to the song title', error);
-            runtimeRef.current?.destroy(); runtimeRef.current = null;
+            if (runtimeRef.current) activeLatticeRuntimes.delete(runtimeRef.current);
+        runtimeRef.current?.destroy(); runtimeRef.current = null;
             setReady(false); setFailedKey(initial.songKey);
         };
         const session = startLatticeLyricSession(signal => {
+            // 切换渲染器时先把旧运行时销毁并让出一帧，避免新旧两个 WebGL 上下文同时存在：
+            // iOS 的上下文数量上限很低，同时存在时新的那个会创建失败，表现就是一块黑。
+            const previous = runtimeRef.current;
+            if (previous) {
+                runtimeRef.current = null;
+                previous.destroy();
+            }
             const parked = takeParkedRuntime(initial.currentTime);
             return parked ?? createLatticeLyricRuntime(host, initial, signal, onFailure);
         }, runtime => {
             runtimeRef.current = runtime;
+            isolateLatticeRuntime(runtime);
             runtime.attach(host);
             runtime.setErrorHandler(onFailure);
             if (latest.current) runtime.update(latest.current);
@@ -111,7 +142,7 @@ export function useLatticeLyricCanvas(hostRef: RefObject<HTMLDivElement | null>,
 
     useEffect(() => { if (input) runtimeRef.current?.update(input); }, [input]);
     // Dragging the window onto a display of another density: same box, different pixel budget.
-    useEffect(() => { runtimeRef.current?.resize(box.current.width, box.current.height, devicePixelRatio); }, [devicePixelRatio]);
+    useEffect(() => { runtimeRef.current?.resize(box.current.width, box.current.height, Math.min(devicePixelRatio, densityCap)); }, [devicePixelRatio, densityCap]);
     useEffect(() => {
         if (!input || !document.fonts) return;
         const primary = `${resolveThemeFontWeight(input.theme, 600)} 36px ${resolveThemeFontStack(input.theme)}`;

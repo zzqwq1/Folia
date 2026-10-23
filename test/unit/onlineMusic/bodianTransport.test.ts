@@ -23,11 +23,12 @@ describe('Bodian page-size adaptation', () => {
 });
 
 describe('Bodian transport failures', () => {
-    it('reports a missing desktop bridge as a persistent unavailable runtime', async () => {
+    it('falls back to the web fetch path when the desktop bridge is missing and surfaces network errors', async () => {
         vi.stubGlobal('window', { electron: {} });
+        vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network down')));
         const error = await rejectionOf(requestBodian('audio', { id: '1' }));
         expect(error).toBeInstanceOf(OnlineProviderError);
-        expect(error).toMatchObject({ code: 'unavailable', providerId: 'bodian', details: { stage: 'runtime', transient: false } });
+        expect(error).toMatchObject({ code: 'network', providerId: 'bodian' });
     });
 
     it('reports a rejected IPC call as a local unavailable failure and keeps the cause', async () => {

@@ -1310,6 +1310,8 @@ export default {
     "loginTitleQq": "扫码登录QQ音乐",
     "loginTitleBodian": "使用波点音乐 App 扫码",
     "loginNoteBodian": "打开波点音乐 App 扫描二维码并确认登录",
+    "loginTitleSoda": "使用汽水音乐 App 扫码登录",
+    "loginNoteSoda": "打开汽水音乐 App → 扫一扫 → 确认登录（用抖音 App 扫会 404）",
     "loginNoteQq": "请选择与账号一致的登录方式：QQ 扫码或微信扫码",
     "qqLoginMethodTitle": "选择登录方式",
     "qqLoginMethodHint": "请选择与 QQ 音乐账号一致的登录方式\nQQ 账号请选择 QQ 扫码，微信账号请选择微信扫码",
@@ -1588,6 +1590,8 @@ export default {
     "lyricMatchPriorityDesc": "在多个歌词源都存在高置信度匹配时，优先选择该歌词源的结果。"
   },
   "options": {
+        "resetPlaybackEngine": "重置播放引擎",
+        "resetPlaybackEngineDesc": "点了播放没反应 / 一直没声音时用：清掉播放缓存并重载一次，强制重建音频通道。",
     "ponderHints": "思索教程提示",
     "ponderHintsDesc": "把指针停在可教学的控件上会提示长按 G，松手后打开一段演示该手势的动画教程。",
     "ponderHintsAlways": "始终显示",

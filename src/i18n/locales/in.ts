@@ -1306,6 +1306,8 @@ export default {
     "loginTitleQq": "Pindai untuk masuk ke QQ Music",
     "loginTitleBodian": "Pindai dengan Bodian Music",
     "loginNoteBodian": "Pindai kode ini dengan aplikasi Bodian Music dan konfirmasi masuk",
+    "loginTitleSoda": "Pindai dengan aplikasi Soda Music",
+    "loginNoteSoda": "Buka aplikasi Soda Music, ketuk Pindai lalu konfirmasi (aplikasi Douyin 404)",
     "loginNoteQq": "Pilih metode masuk yang sesuai: pindai QQ atau pindai WeChat",
     "qqLoginMethodTitle": "Pilih metode masuk",
     "qqLoginMethodHint": "Gunakan pindai QQ untuk akun QQ, atau pindai WeChat untuk akun WeChat",
@@ -1582,6 +1584,8 @@ export default {
     "lyricMatchPriorityDesc": "Saat beberapa sumber lirik memiliki kecocokan berkualitas tinggi, utamakan sumber ini terlebih dahulu."
   },
   "options": {
+        "resetPlaybackEngine": "Setel ulang mesin pemutaran",
+        "resetPlaybackEngineDesc": "Pakai saat menekan putar tidak bereaksi atau tidak ada suara: hapus cache lalu muat ulang untuk membangun ulang jalur audio.",
     "ponderHints": "Petunjuk tutorial Ponder",
     "ponderHintsDesc": "Mengarahkan kursor ke kontrol yang bisa dipelajari akan memunculkan petunjuk untuk menahan G, yang membuka panduan animasi gerakan tersebut.",
     "ponderHintsAlways": "Selalu tampilkan",

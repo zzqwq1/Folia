@@ -1311,6 +1311,8 @@ export default {
     "loginTitleQq": "Scan to sign in to QQ Music",
     "loginTitleBodian": "Scan with Bodian Music",
     "loginNoteBodian": "Scan this code with the Bodian Music app and confirm sign-in",
+    "loginTitleSoda": "Scan with the Soda Music app",
+    "loginNoteSoda": "Open the Soda Music app, tap Scan and confirm (the Douyin app returns 404)",
     "loginNoteQq": "Choose the sign-in method matching your account: QQ scan or WeChat scan",
     "qqLoginMethodTitle": "Choose sign-in method",
     "qqLoginMethodHint": "Use QQ scan for a QQ account, or WeChat scan for a WeChat account",
@@ -1589,6 +1591,8 @@ export default {
     "lyricMatchPriorityDesc": "When multiple lyric sources have high-confidence matches, prefer this source first."
   },
   "options": {
+        "resetPlaybackEngine": "Reset playback engine",
+        "resetPlaybackEngineDesc": "Use when pressing play does nothing or there is no sound: clears caches and reloads once to rebuild the audio pipeline.",
     "ponderHints": "Ponder tutorial hints",
     "ponderHintsDesc": "Hovering a teachable control shows a hint to hold G, which opens an animated walkthrough of that gesture.",
     "ponderHintsAlways": "Always show",

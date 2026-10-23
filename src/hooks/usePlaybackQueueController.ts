@@ -973,7 +973,19 @@ export function usePlaybackQueueController({
         onAddNavidromeSongsToQueue,
     ]);
 
+    // 连点「上一首/下一首」时，iOS 会在解码器还没释放的情况下连续重建音源，
+    // 偶发把整个 WebView 拖崩（用户报「切歌太频繁偶尔闪退」）。
+    // 这里给切歌加一个最小间隔：比人手连点更快，但能挡住长按连发与双击误触。
+    const lastTrackSwitchAtRef = useRef(0);
+    const allowTrackSwitch = () => {
+        const now = Date.now();
+        if (now - lastTrackSwitchAtRef.current < 350) return false;
+        lastTrackSwitchAtRef.current = now;
+        return true;
+    };
+
     const handleNextTrack = useCallback(async (options?: NextTrackOptions) => {
+        if (!allowTrackSwitch()) return;
         if (isNowPlayingStageActive) return;
 
         const stopAtQueueEnd = () => {
@@ -1049,6 +1061,7 @@ export function usePlaybackQueueController({
     }, [audioRef, currentSong, endHeldTransition, getDisplaySong, isFmMode, isNowPlayingStageActive, loopMode, playQueue, playSong, setPlayQueue, setPlayerState, shouldNavigateToPlayerOnTrackChange]);
 
     const handlePrevTrack = useCallback(() => {
+        if (!allowTrackSwitch()) return;
         if (isNowPlayingStageActive) return;
         if (!currentSong || playQueue.length === 0) return;
 

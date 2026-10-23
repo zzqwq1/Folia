@@ -1455,8 +1455,7 @@ export const GridView: React.FC<GridViewProps> = ({
                     className="absolute inset-0 pointer-events-none overflow-hidden select-none z-0"
                     style={{ opacity: isDaylight ? 0.18 : 0.12 }}
                 >
-                    <img
-                        src={toHttps(getLowResCoverUrl(coverUrl))}
+                    <img loading="lazy" decoding="async"                         src={toHttps(getLowResCoverUrl(coverUrl))}
                         alt=""
                         className="w-full h-full object-cover scale-110 filter blur-[30px]"
                     />
@@ -1615,7 +1614,7 @@ export const GridView: React.FC<GridViewProps> = ({
                             {/* Cover Image */}
                             <div className="w-full aspect-square rounded-2xl overflow-hidden shadow-lg mb-4 bg-zinc-800/20 relative shrink-0">
                                 {infoPanelCoverUrl ? (
-                                    <img src={getSizedCoverUrl(toHttps(infoPanelCoverUrl), 512)} alt={infoCollection?.name || title} decoding="async" className="w-full h-full object-cover select-none pointer-events-none" />
+                                    <img loading="lazy" decoding="async" src={getSizedCoverUrl(toHttps(infoPanelCoverUrl), 512)} alt={infoCollection?.name || title} decoding="async" className="w-full h-full object-cover select-none pointer-events-none" />
                                 ) : (
                                     <Disc size={64} className="opacity-20 absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2" />
                                 )}
@@ -1675,7 +1674,7 @@ export const GridView: React.FC<GridViewProps> = ({
                                     {infoCollection?.creator && (
                                         <div className="flex items-center gap-2 mt-2 text-xs opacity-60">
                                             <div className="w-5 h-5 rounded-full overflow-hidden">
-                                                <img src={toHttps(infoCollection.creator.avatarUrl)} alt="avatar" className="w-full h-full object-cover" />
+                                                <img loading="lazy" decoding="async" src={toHttps(infoCollection.creator.avatarUrl)} alt="avatar" className="w-full h-full object-cover" />
                                             </div>
                                             <span className="font-semibold">{infoCollection.creator.nickname}</span>
                                         </div>

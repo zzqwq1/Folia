@@ -140,6 +140,24 @@ export function usePlaybackAudioBridge({
             const AudioContextClass = window.AudioContext || (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
             const ctx = new AudioContextClass();
             audioContextRef.current = ctx;
+            // 抖音等 App 抢走音频会话后 iOS 把 ctx 置为 interrupted（图整体静音）。
+            // 回到前台或状态恢复时自动 resume，避免“显示播放中却没有声音”。
+            const resumeInterrupted = () => {
+                if (ctx.state === 'suspended' || ctx.state === 'interrupted') {
+                    ctx.resume().catch(() => { /* 等下一次手势 */ });
+                }
+            };
+            ctx.addEventListener('statechange', resumeInterrupted);
+            document.addEventListener('visibilitychange', () => {
+                if (document.visibilityState === 'visible') resumeInterrupted();
+            });
+            // iOS 把 ctx 置成 interrupted 之后，只有「用户手势」能把它恢复回来（statechange 里
+            // resume 往往被拒绝）。用户报「点了播放没反应、一直没声音」时，多半就是这个状态：
+            // 所以在任意一次点击/触摸/按键上顺手 resume，一次点击就能把音频通道救回来。
+            const unlockOnGesture = () => resumeInterrupted();
+            document.addEventListener('pointerdown', unlockOnGesture, true);
+            document.addEventListener('touchend', unlockOnGesture, true);
+            document.addEventListener('keydown', unlockOnGesture, true);
 
             const analyser = ctx.createAnalyser();
             analyser.fftSize = 2048;

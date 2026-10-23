@@ -268,6 +268,20 @@ export default async function viteConfig(_config: ConfigEnv): Promise<UserConfig
       commandPinyinPlugin(),
       icuFoliaDataPlugin(),
       react(),
+      // 启动包清单：bootstrap 的产物文件名带哈希，运行时要可靠地拿到它才能「预取 + 超时重试」。
+      // 这里在打包结束时把名字写成一个稳定路径的小 JSON。
+      {
+        name: 'folia-boot-manifest',
+        generateBundle(_options, bundle) {
+          const bootName = Object.keys(bundle).find(file => /(^|\/)bootstrap-[A-Za-z0-9_-]+\.js$/.test(file));
+          if (!bootName) return;
+          this.emitFile({
+            type: 'asset',
+            fileName: 'boot-manifest.json',
+            source: JSON.stringify({ bootstrap: `/${bootName.replace(/\\/g, '/')}` }),
+          });
+        },
+      },
       VitePWA({
         registerType: 'autoUpdate',
         includeAssets: ['icon.svg'],
@@ -275,12 +289,28 @@ export default async function viteConfig(_config: ConfigEnv): Promise<UserConfig
           enabled: true
         },
         workbox: {
+          // 新版本一上线就接管：否则用户 Service Worker 会继续用旧缓存，
+          // 旧 HTML 引用的 chunk 已经被新构建替换掉，点播放/切页面时直接白屏或闪退。
+          skipWaiting: true,
+          clientsClaim: true,
+          cleanupOutdatedCaches: true,
           maximumFileSizeToCacheInBytes: 5000000,
           importScripts: [localCoverWorkerImport],
           // Docker serves this file dynamically; it must never be pinned in the PWA precache.
           // The cover route is stored with the worker script itself, so precaching it is redundant.
-          globIgnores: ['**/runtime-config.js', '**/assets/folium-icons/**', '**/folia-cover-sw.js'],
+          globIgnores: ['**/runtime-config.js', '**/assets/folium-icons/**', '**/folia-cover-sw.js', '**/index.html', '**/assets/bootstrap-*.js'],
+          // 导航请求必须走网络：预缓存过的旧 index.html 会引用已经被新构建替换掉的 chunk，
+          // 那份 HTML 一旦被 Service Worker 直接返回，页面就永远停在白屏（换网络也没用）。
+          // 这里只让 HTML 走 NetworkFirst，离线时才回退缓存。
+          navigateFallback: null,
           runtimeCaching: [{
+            // 导航请求一律走网络：NetworkFirst 在弱网下会「超时回落旧 HTML」，
+            // 而旧 HTML 引用的 chunk 已被新构建替换 → 启动直接卡在「页面没能加载完成」，
+            // 且用户怎么重载都回不来（今晚有多个用户卡在这个状态）。
+            // 这个前端本来就是远端加载的、离线也没法用，所以直接 NetworkOnly 更安全。
+            urlPattern: ({ request }: { request: Request }) => request.mode === 'navigate',
+            handler: 'NetworkOnly' as const,
+          }, {
             // Per-icon chunks load on demand. Their names are content-hashed, so an icon cached on
             // first use can be served as-is when the app later starts offline.
             urlPattern: /\/assets\/folium-icons\/[^/]+\.js$/,

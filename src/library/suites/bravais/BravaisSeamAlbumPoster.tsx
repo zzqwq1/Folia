@@ -162,7 +162,7 @@ const BravaisSeamAlbumPoster: React.FC<{ layer: BravaisLayer; actions: BravaisSe
 
                 <div className="bravais-album-stage">
                     <figure ref={coverRef} className="bravais-album-cover" data-bravais-album-cover data-flight={coverFlight}>
-                        {coverUrl ? <img src={coverUrl} alt="" draggable={false} /> : <span className="bravais-album-cover-empty" />}
+                        {coverUrl ? <img loading="lazy" decoding="async" src={coverUrl} alt="" draggable={false} /> : <span className="bravais-album-cover-empty" />}
                         <span className="bravais-album-tape" aria-hidden />
                     </figure>
                     <div className="bravais-album-scrap" aria-hidden>

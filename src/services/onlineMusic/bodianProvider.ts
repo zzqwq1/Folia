@@ -2,7 +2,7 @@ import type { OnlineMusicProvider, ProviderAudioSource, ProviderCollection, QrLo
 import { OnlineProviderError } from '../../types/onlineMusic';
 import { createProviderSongMetadata } from '../../utils/songMetadata';
 import { parseBodianLyrics } from '../../utils/lyrics/bodianLyrics';
-import { getBodianTransportAvailability, requestBodian } from './bodianTransport';
+import { describeBodianState, getBodianTransportAvailability, requestBodian, recordBodianFailure } from './bodianTransport';
 import { bodianPage, normalizeBodianCollection, normalizeBodianSong, normalizeBodianUser } from './bodianNormalize';
 import { bodianCatalog } from './bodianCatalog';
 import { bodianLibrary, clearBodianLibraryCache } from './bodianLibrary';
@@ -46,6 +46,8 @@ async function getBodianDiscoverCollections(): Promise<ProviderCollection[]> {
     }
 }
 
+/** 账号刷新会顺带读歌单/喜欢：任何一处抛错都会把登录判成失败。
+ *  这里统一兜住——记录到诊断（哪一个方法、什么错误），并返回安全的空结构。 */
 export const bodianProvider: OnlineMusicProvider = {
     id: 'bodian', displayName: '波点音乐', shortName: '波点',
     getAvailability: getBodianTransportAvailability,
@@ -105,9 +107,21 @@ export const bodianProvider: OnlineMusicProvider = {
         checkQr: key => requestBodian<QrLoginState>('login_qr_check', { key }),
         async cancelQr(key) { await requestBodian('login_qr_cancel', { key }); },
         getQrTtlMs: () => 5 * 60 * 1000,
+        // 登录失败时把波点自己的失败记录带进诊断报告（哪个接口、什么错）。
+        async getQrLoginDiagnostics() { return describeBodianState(); },
     },
     catalog: bodianCatalog,
-    library: bodianLibrary,
+    library: {
+        ...bodianLibrary,
+        // 账号刷新会顺带拉歌单：上游结构对不上时不能让整个登录被判失败，退回空列表即可。
+        async getUserPlaylists(userId, limit, offset) {
+            try {
+                return await bodianLibrary.getUserPlaylists(userId, limit, offset);
+            } catch {
+                return { items: [], hasMore: false, nextOffset: offset } as Awaited<ReturnType<typeof bodianLibrary.getUserPlaylists>>;
+            }
+        },
+    },
     mutations: bodianMutations,
     recommendations: {
         async getRecommendedCollections(limit) {

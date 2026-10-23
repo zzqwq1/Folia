@@ -110,6 +110,13 @@ export async function searchQQLyrics(keyword: string, page = 1, pageSize = 20): 
     nqc_flag: 0,
     page_id: 1,
     grp: 1,
+    // 缺这些字段时 QQ 服务端会以风控 code 2001 拒绝（已实测对比）；补齐后返回 code 0。
+    format: 'json',
+    inCharset: 'utf-8',
+    outCharset: 'utf-8',
+    notice: 0,
+    platform: 'yqq.json',
+    needNewCode: 0,
   };
 
   try {

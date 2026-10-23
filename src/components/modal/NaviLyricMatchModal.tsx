@@ -328,7 +328,7 @@ const NaviLyricMatchModal: React.FC<NaviLyricMatchModalProps> = ({ song, onClose
                                             <div key={resultKey} onClick={() => setSelectedResult(result)} className={`flex items-center gap-3 p-3 rounded-lg cursor-pointer transition-all border ${selectedKey === resultKey ? resultItemSelected : resultItemBg}`}>
                                                 <div className="w-10 h-10 rounded-lg overflow-hidden flex-shrink-0 bg-zinc-800">
                                                     {resultCoverUrl ? (
-                                                        <img src={getSizedCoverUrl(resultCoverUrl, 512)} alt={result.name} loading="lazy" decoding="async" className="w-full h-full object-cover" />
+                                                        <img loading="lazy" decoding="async" src={getSizedCoverUrl(resultCoverUrl, 512)} alt={result.name} loading="lazy" decoding="async" className="w-full h-full object-cover" />
                                                     ) : (
                                                         <div className="w-full h-full flex items-center justify-center">
                                                             <Music size={16} className="opacity-20" />
@@ -360,7 +360,7 @@ const NaviLyricMatchModal: React.FC<NaviLyricMatchModalProps> = ({ song, onClose
                             {/* Cover Image */}
                             <div className="w-32 h-32 min-h-[64px] rounded-2xl overflow-hidden bg-zinc-800 shadow-md flex-shrink transition-all duration-300">
                                 {selectedCoverUrl || coverUrl ? (
-                                    <img src={getSizedCoverUrl(selectedCoverUrl || coverUrl, 512)} alt="Cover" decoding="async" className="w-full h-full object-cover" />
+                                    <img loading="lazy" decoding="async" src={getSizedCoverUrl(selectedCoverUrl || coverUrl, 512)} alt="Cover" decoding="async" className="w-full h-full object-cover" />
                                 ) : (
                                     <div className="w-full h-full flex items-center justify-center">
                                         <Music size={28} className="opacity-10" />
