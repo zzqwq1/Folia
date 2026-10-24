@@ -15,6 +15,7 @@ targets:
       - path: Sources/Player
       - path: Sources/Services
       - path: Sources/Views
+      - path: Sources/Wall
     info:
       path: Info.plist
     settings:

@@ -1,42 +1,93 @@
 import SwiftUI
 
-/// 根视图：对齐网页版的「无 tab bar」结构 —— 全屏页切换 + 右下 SwitcherPill + 底部浮动播放胶囊。
+/// 根视图：bravais 卡片墙首页 + 底部浮动播放胶囊 + 全屏播放页。
 struct RootView: View {
     @EnvironmentObject var session: AppSession
     @EnvironmentObject var player: PlayerModel
     @State private var currentProvider: Provider = .netease
     @State private var showPlayer = false
-    @State private var showSwitcher = false
+    @State private var showLogin = false
+    @State private var playlists: [Playlist] = []
+    @State private var isLoading = false
+    @State private var selectedPlaylist: Playlist?
+    @State private var isShowingDetail = false
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
             FoliaTheme.bg.ignoresSafeArea()
 
-            // 主内容
             NavigationStack {
-                ProviderView(provider: currentProvider)
-                    .navigationBarHidden(true)
+                BravaisHomeView(
+                    provider: currentProvider,
+                    playlists: playlists,
+                    isLoading: isLoading,
+                    onConnect: { showLogin = true },
+                    onOpenPlaylist: { p in
+                        selectedPlaylist = p
+                        isShowingDetail = true
+                    }
+                )
+                .navigationBarHidden(true)
+                .background(
+                    NavigationLink(
+                        destination: Group {
+                            if let p = selectedPlaylist {
+                                PlaylistDetailView(playlist: p)
+                            } else {
+                                EmptyView()
+                            }
+                        },
+                        isActive: $isShowingDetail
+                    ) { EmptyView() }
+                    .hidden()
+                )
             }
 
-            // 底部浮动播放胶囊（对齐 FloatingPlayerControls.tsx）
             if let current = player.current, !showPlayer {
                 FloatingPlayerCapsule(track: current, showPlayer: $showPlayer)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                     .zIndex(10)
             }
-
-            // 右下 SwitcherPill（对齐 SwitcherPill.tsx）
-            SwitcherPill(current: $currentProvider, showSwitcher: $showSwitcher)
-                .padding(.trailing, 16)
-                .padding(.bottom, player.current != nil && !showPlayer ? 96 : 32)
-                .zIndex(11)
         }
         .preferredColorScheme(.dark)
+        .task { await load() }
+        .onChange(of: session.isLoggedIn(currentProvider)) { _ in
+            Task { await load() }
+        }
+        .sheet(isPresented: $showLogin) {
+            NeteaseLoginView(onDone: { cookie in
+                Task { @MainActor in
+                    await session.setCookie(cookie, for: currentProvider)
+                    showLogin = false
+                    await load()
+                }
+            })
+        }
         .fullScreenCover(isPresented: $showPlayer) {
             if let current = player.current {
                 PlayerView(track: current, isPresented: $showPlayer)
             }
         }
+    }
+
+    private func load() async {
+        guard currentProvider == .netease else { return }
+        isLoading = true
+        defer { isLoading = false }
+
+        let cookie = session.cookie(for: currentProvider) ?? ""
+        let profile = session.profile(for: currentProvider)
+
+        var result: [Playlist] = []
+        if let profile {
+            if let mine = try? await FoliaAPI.neteaseUserPlaylists(userId: profile.userId, cookie: cookie) {
+                result.append(contentsOf: mine)
+            }
+        }
+        if let rec = try? await FoliaAPI.neteaseRecommendPlaylists(cookie: cookie.isEmpty ? nil : cookie) {
+            result.append(contentsOf: rec)
+        }
+        playlists = result
     }
 }
 
@@ -91,60 +142,5 @@ struct FloatingPlayerCapsule: View {
             .padding(.horizontal, 16)
         }
         .buttonStyle(.plain)
-    }
-}
-
-/// 右下角平台切换胶囊：对齐 SwitcherPill.tsx
-struct SwitcherPill: View {
-    @Binding var current: Provider
-    @Binding var showSwitcher: Bool
-    @EnvironmentObject var session: AppSession
-
-    var body: some View {
-        VStack(alignment: .trailing, spacing: 10) {
-            if showSwitcher {
-                VStack(spacing: 6) {
-                    ForEach(Provider.allCases) { p in
-                        Button {
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                                current = p
-                                showSwitcher = false
-                            }
-                        } label: {
-                            HStack(spacing: 8) {
-                                PlatformMark(provider: p, size: 26)
-                                Text(p.shortName)
-                                    .font(FoliaFont.sans(13, .medium))
-                                    .foregroundStyle(FoliaTheme.t1)
-                            }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(
-                                current == p ? FoliaTheme.fill2 : Color.clear,
-                                in: Capsule()
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .opacity(p.isAvailable ? 1 : 0.42)
-                        .disabled(!p.isAvailable)
-                    }
-                }
-                .padding(8)
-                .background(FoliaTheme.card2.opacity(0.96), in: RoundedRectangle(cornerRadius: 22))
-                .overlay(RoundedRectangle(cornerRadius: 22).stroke(FoliaTheme.line, lineWidth: 1))
-                .shadow(color: .black.opacity(0.5), radius: 16, y: 6)
-                .transition(.scale(scale: 0.9, anchor: .bottomTrailing).combined(with: .opacity))
-            }
-
-            Button {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                    showSwitcher.toggle()
-                }
-            } label: {
-                PlatformMark(provider: current, size: 40)
-                    .shadow(color: Color(hex: current.accentColorHex).opacity(0.5), radius: 12, y: 4)
-            }
-            .buttonStyle(.plain)
-        }
     }
 }
