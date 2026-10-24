@@ -1,6 +1,7 @@
 import Combine
 import CoreGraphics
 import SwiftUI
+import UIKit
 
 // MARK: - 常量
 
@@ -227,6 +228,17 @@ final class BravaisCamera: ObservableObject {
 
 // MARK: - 墙（世界层 + 底板遮罩 + 卡片）
 
+/// 墙面（对应网页 bravais.css 的 `--bravais-wall-surface`）：
+/// 底色 + 两团定位在视口上的主题光晕（左上 accent 16%，右下 secondary 20%）。底板画不出这两团，
+/// 所以底板用纯 bg，光晕由上面一层屏幕固定的叠加层补；这里只把同一套底色铺给墙用。
+enum BravaisWallSurface {
+    static let accentGlow: (point: UnitPoint, radius: CGFloat, opacity: Double) = (.init(x: 0.14, y: 0.12), 760, 0.16)
+    static let secondaryGlow: (point: UnitPoint, radius: CGFloat, opacity: Double) = (.init(x: 0.86, y: 0.82), 820, 0.20)
+}
+
+/// 墙：每块一块底板（evenodd 路径 = 外框减窗洞），窗里是空画框。
+/// 直译 bravais.css 的 `.bravais-block-plate` + `.lattice-poster`（空态）：海报底是
+/// color-mix(bg 88%, ink)，空画框再叠一道底部压暗与极淡的 accent 光晕。
 struct BravaisWall: View {
     @ObservedObject var camera: BravaisCamera
     /// 当前横缝的锚点（世界坐标 y），nil 表示没有横缝参与底板边界。
@@ -271,23 +283,24 @@ struct BravaisWall: View {
     private func drawBlock(context: inout GraphicsContext, col: Int, row: Int, plate: GraphicsContext.Shading) {
         let slots = BravaisMetrics.slots(column: col, row: row)
         let frame = BravaisPlate.frame(column: col, row: row, anchorY: anchorY)
-        // 实色档无窗：不挖洞，只画底板 + 卡片。
+        // 实色档无窗：不挖洞，只画底板。
         context.fill(Path(BravaisPlate.path(frame: frame, holes: [])), with: plate, style: FillStyle(eoFill: true))
 
-        for (index, slot) in slots.enumerated() {
-            drawSlot(context: &context, slot: slot, index: index, col: col, row: row)
+        for slot in slots {
+            drawSlot(context: &context, slot: slot)
         }
     }
 
-    private func drawSlot(context: inout GraphicsContext, slot: CGRect, index: Int, col: Int, row: Int) {
+    /// 空画框：底 = color-mix(bg 88%, 主文字)。web 端这是 #232325（网页 bg #070707）；底色跟 FoliaTheme.bg
+    /// 走，混合比例不变，≈ #2a2a2e。
+    private func drawSlot(context: inout GraphicsContext, slot: CGRect) {
         var card = context
         card.translateBy(x: slot.minX, y: slot.minY)
 
         let rect = CGRect(origin: .zero, size: slot.size)
-        // 卡片底：color-mix(bg 88%, ink) ≈ #232325
-        card.fill(Path(rect), with: .color(Color(hex: "#232325")))
+        card.fill(Path(rect), with: .color(Self.posterBackground))
 
-        // 底部压暗，让空位有「窗」的纵深
+        // 底部压暗，让空位有「窗」的纵深（.lattice-poster-shade）
         card.fill(
             Path(rect),
             with: .linearGradient(
@@ -302,15 +315,36 @@ struct BravaisWall: View {
             )
         )
 
-        // 未登录：所有槽位都是空窗（径向微光）
+        // 空窗的窗光：--bravais-window-glow，radial-gradient(ellipse at 50% 40%, accent 9%, transparent 70%)
         card.fill(
             Path(rect),
             with: .radialGradient(
                 Gradient(colors: [FoliaTheme.accent.opacity(0.09), .clear]),
-                center: CGPoint(x: rect.midX, y: rect.midY + rect.height * 0.1),
+                center: CGPoint(x: rect.midX, y: rect.minY + rect.height * 0.4),
                 startRadius: 0,
-                endRadius: max(rect.width, rect.height) * 0.75
+                endRadius: max(rect.width, rect.height) * 0.58
             )
         )
+    }
+
+    /// color-mix(in srgb, bg 88%, 主文字) —— 与网页同一个公式。
+    static let posterBackground: Color = {
+        let bg = UIColor(FoliaTheme.bg).rgba
+        let ink = UIColor(Color(hex: "#f7f4ee")).rgba
+        return Color(
+            .sRGB,
+            red: bg.r * 0.88 + ink.r * 0.12,
+            green: bg.g * 0.88 + ink.g * 0.12,
+            blue: bg.b * 0.88 + ink.b * 0.12,
+            opacity: 1
+        )
+    }()
+}
+
+private extension UIColor {
+    var rgba: (r: Double, g: Double, b: Double, a: Double) {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        getRed(&r, green: &g, blue: &b, alpha: &a)
+        return (Double(r), Double(g), Double(b), Double(a))
     }
 }

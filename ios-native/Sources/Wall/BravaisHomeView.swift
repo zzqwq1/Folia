@@ -9,6 +9,8 @@ struct BravaisHomeView: View {
     let isLoading: Bool
     let onConnect: () -> Void
     let onOpenPlaylist: (Playlist) -> Void
+    let onSettings: () -> Void
+    let onSearch: () -> Void
 
     @EnvironmentObject private var session: AppSession
 
@@ -70,18 +72,18 @@ struct BravaisHomeView: View {
         FoliaTheme.bg
             .overlay(
                 RadialGradient(
-                    colors: [FoliaTheme.accent.opacity(0.16), .clear],
-                    center: UnitPoint(x: 0.14, y: 0.12),
+                    colors: [FoliaTheme.accent.opacity(BravaisWallSurface.accentGlow.opacity), .clear],
+                    center: BravaisWallSurface.accentGlow.point,
                     startRadius: 0,
-                    endRadius: 760
+                    endRadius: BravaisWallSurface.accentGlow.radius
                 )
             )
             .overlay(
                 RadialGradient(
-                    colors: [FoliaTheme.accent.opacity(0.20), .clear],
-                    center: UnitPoint(x: 0.86, y: 0.82),
+                    colors: [FoliaTheme.accent.opacity(BravaisWallSurface.secondaryGlow.opacity), .clear],
+                    center: BravaisWallSurface.secondaryGlow.point,
                     startRadius: 0,
-                    endRadius: 820
+                    endRadius: BravaisWallSurface.secondaryGlow.radius
                 )
             )
     }
@@ -119,6 +121,7 @@ struct BravaisHomeView: View {
         return BravaisSeamHomeRow(
             compact: compact,
             collapsed: level == .hidden || geometry.collapsed,
+            height: w,
             playlists: playlists,
             isLoading: isLoading,
             isLoggedIn: isLoggedIn,
@@ -126,10 +129,34 @@ struct BravaisHomeView: View {
             onFold: { setLevel(.hidden) },
             onExpand: { setLevel(isNarrow ? .home : .full) },
             onConnect: onConnect,
+            onSettings: onSettings,
+            onStage: { if let first = playlists.first { onOpenPlaylist(first) } },
+            onSearch: onSearch,
+            canStage: !playlists.isEmpty,
             onOpenPlaylist: onOpenPlaylist
         )
         .frame(width: size.width, height: max(w, 1))
+        // 缝纸 = 与墙面同一底色（--bravais-seam-paper = color-mix(bg 90%, ink)），叠同样两团主题光晕，
+        // 让横条不像一块浮在墙上的浅色面板。
         .background(FoliaTheme.seamPaper)
+        .overlay(
+            RadialGradient(
+                colors: [FoliaTheme.accent.opacity(BravaisWallSurface.accentGlow.opacity), .clear],
+                center: BravaisWallSurface.accentGlow.point,
+                startRadius: 0,
+                endRadius: BravaisWallSurface.accentGlow.radius
+            )
+            .allowsHitTesting(false)
+        )
+        .overlay(
+            RadialGradient(
+                colors: [FoliaTheme.accent.opacity(BravaisWallSurface.secondaryGlow.opacity), .clear],
+                center: BravaisWallSurface.secondaryGlow.point,
+                startRadius: 0,
+                endRadius: BravaisWallSurface.secondaryGlow.radius
+            )
+            .allowsHitTesting(false)
+        )
         .overlay(alignment: .top) { hairline }
         .overlay(alignment: .bottom) { hairline }
         .shadow(color: .black.opacity(0.55), radius: 24, y: 10)

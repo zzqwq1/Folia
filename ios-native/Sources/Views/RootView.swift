@@ -11,6 +11,8 @@ struct RootView: View {
     @State private var isLoading = false
     @State private var selectedPlaylist: Playlist?
     @State private var isShowingDetail = false
+    @State private var showSettings = false
+    @State private var showSearch = false
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
@@ -25,7 +27,9 @@ struct RootView: View {
                     onOpenPlaylist: { p in
                         selectedPlaylist = p
                         isShowingDetail = true
-                    }
+                    },
+                    onSettings: { showSettings = true },
+                    onSearch: { showSearch = true }
                 )
                 .navigationBarHidden(true)
                 .background(
@@ -66,6 +70,16 @@ struct RootView: View {
         .fullScreenCover(isPresented: $showPlayer) {
             if let current = player.current {
                 PlayerView(track: current, isPresented: $showPlayer)
+            }
+        }
+        .fullScreenCover(isPresented: $showSettings) {
+            FoliaSettingsView(provider: currentProvider, onConnect: { showLogin = true })
+        }
+        .fullScreenCover(isPresented: $showSearch) {
+            FoliaSearchView(playlists: playlists) { p in
+                showSearch = false
+                selectedPlaylist = p
+                isShowingDetail = true
             }
         }
     }
