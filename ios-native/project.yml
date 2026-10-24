@@ -41,6 +41,8 @@ targets:
 
           # 2. 编译 Assets.car：先输出到独立目录，再拷进 app bundle（--compile 直接指 bundle 目录
           #    曾出现退出码 0 但 bundle 里没有 Assets.car 的情况，改成显式 cp + 校验）
+          #    注意：--app-icon 编译图标时 actool 强制要求 --output-partial-info-plist，
+          #    否则 actool 只告警不产出 Assets.car。
           ACTOOL_OUT="$TMPDIR_BUILD/actool-out"
           mkdir -p "$ACTOOL_OUT"
           set +e
@@ -51,6 +53,7 @@ targets:
             --target-device iphone \
             --target-device ipad \
             --app-icon AppIcon \
+            --output-partial-info-plist "$TMPDIR_BUILD/partial-info.plist" \
             --output-format human-readable-text 2>&1)
           ACTOOL_RC=$?
           set -e
