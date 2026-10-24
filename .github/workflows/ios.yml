@@ -91,6 +91,24 @@ jobs:
           cat errors.txt
           exit 1
 
+      # 把关键构建事实通过 ::notice:: 写进 check-run 注解（公开可读），
+      # 便于在没有 Mac / 不登录的情况下排查资源没进包的问题。
+      - name: Inspect build output
+        if: always()
+        working-directory: ios-native
+        run: |
+          set -e
+          echo "::notice title=inspect::pbx-xcassets-refs=$(grep -ci 'xcassets' FoliaNative.xcodeproj/project.pbxproj || true)"
+          echo "::notice title=inspect::pbx-resources-phase=$(grep -c 'PBXResourcesBuildPhase' FoliaNative.xcodeproj/project.pbxproj || true)"
+          echo "::notice title=inspect::pbx-embed-script=$(grep -ci 'Embed web dist' FoliaNative.xcodeproj/project.pbxproj || true)"
+          echo "::notice title=inspect::dist-file-count=$(ls dist 2>/dev/null | wc -l | tr -d ' ')"
+          APP=$(find . -type d -name '*.app' -path '*Products/Applications*' | head -n 1)
+          echo "::notice title=inspect::app-path=$APP"
+          if [ -n "$APP" ]; then
+            echo "::notice title=inspect::app-contents=$(ls "$APP" | tr '\n' ' ')"
+            echo "::notice title=inspect::app-dist-size=$(du -sh "$APP/dist" 2>/dev/null | cut -f1 || echo none)"
+          fi
+
       - name: Package as ipa
         working-directory: ios-native
         run: |
