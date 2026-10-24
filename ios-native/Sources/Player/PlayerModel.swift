@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import MediaPlayer
+import Combine
 
 /// 全局播放器：单实例 AVPlayer + NowPlaying + RemoteCommand。
 @MainActor
@@ -11,16 +12,10 @@ final class PlayerModel: ObservableObject {
     @Published private(set) var errorMessage: String?
 
     private var player: AVPlayer?
-    private var timeObserver: Any?
+    private var cancellables = Set<AnyCancellable>()
 
     init() {
         setupRemoteCommands()
-    }
-
-    deinit {
-        if let obs = timeObserver, let player {
-            player.removeTimeObserver(obs)
-        }
     }
 
     func play(_ track: Track, cookie: String?) async {
@@ -68,8 +63,9 @@ final class PlayerModel: ObservableObject {
 
     private func startPlayback(url: URL, track: Track) {
         let item = AVPlayerItem(url: url)
-        player?.replaceCurrentItem(with: item)
-        if player == nil {
+        if let player {
+            player.replaceCurrentItem(with: item)
+        } else {
             player = AVPlayer(playerItem: item)
         }
         player?.play()

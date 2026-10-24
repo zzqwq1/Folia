@@ -26,7 +26,7 @@ struct HomeView: View {
                                 .fill(Color(hex: provider.accentColorHex))
                                 .frame(width: 32, height: 32)
                                 .overlay(
-                                    Text(provider.shortName.prefix(1))
+                                    Text(String(provider.shortName.prefix(1)))
                                         .foregroundStyle(.white)
                                         .font(.headline)
                                 )
@@ -92,14 +92,19 @@ extension Color {
         let s = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
         var v: UInt64 = 0
         Scanner(string: s).scanHexInt64(&v)
-        let r, g, b: UInt64
-        switch s.count {
-        case 3:
-            (r, g, b) = ((v >> 8) * 17, (v >> 4 & 0xF) * 17, (v & 0xF) * 17)
-        case 6:
-            (r, g, b) = (v >> 16, v >> 8 & 0xFF, v & 0xFF)
-        default:
-            (r, g, b) = (0, 0, 0)
+        let r: UInt64
+        let g: UInt64
+        let b: UInt64
+        if s.count == 6 {
+            r = v >> 16
+            g = v >> 8 & 0xFF
+            b = v & 0xFF
+        } else if s.count == 3 {
+            r = (v >> 8) * 17
+            g = (v >> 4 & 0xF) * 17
+            b = (v & 0xF) * 17
+        } else {
+            r = 0; g = 0; b = 0
         }
         self.init(
             .sRGB,

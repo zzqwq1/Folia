@@ -28,7 +28,7 @@ struct ProviderView: View {
                         }
                         Spacer()
                         Button("退出") {
-                            Task { await session.logout(provider) }
+                            session.logout(provider)
                         }
                         .buttonStyle(.borderless)
                         .foregroundStyle(.red)
@@ -77,7 +77,7 @@ struct ProviderView: View {
         .refreshable { await load() }
         .sheet(isPresented: $showLogin) {
             NeteaseLoginView(onDone: { cookie in
-                Task {
+                Task { @MainActor in
                     await session.setCookie(cookie, for: provider)
                     showLogin = false
                     await load()
@@ -92,17 +92,19 @@ struct ProviderView: View {
         errorMessage = nil
         defer { isLoading = false }
 
+        let cookie = session.cookie(for: provider) ?? ""
+        let profile = session.profile(for: provider)
+
         do {
-            let cookie = session.cookie(for: provider) ?? ""
-            async let recs = FoliaAPI.neteaseRecommendPlaylists(cookie: cookie.isEmpty ? nil : cookie)
-            async let user: [Playlist] = {
-                guard let profile = session.profile(for: provider) else { return [] }
-                return (try? await FoliaAPI.neteaseUserPlaylists(userId: profile.userId, cookie: cookie)) ?? []
-            }()
-            recommendPlaylists = try await recs
-            userPlaylists = await user
+            recommendPlaylists = try await FoliaAPI.neteaseRecommendPlaylists(cookie: cookie.isEmpty ? nil : cookie)
         } catch {
             errorMessage = "加载失败：\(error.localizedDescription)"
+        }
+
+        if let profile {
+            userPlaylists = (try? await FoliaAPI.neteaseUserPlaylists(userId: profile.userId, cookie: cookie)) ?? []
+        } else {
+            userPlaylists = []
         }
     }
 }

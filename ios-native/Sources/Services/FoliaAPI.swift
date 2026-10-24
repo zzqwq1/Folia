@@ -103,15 +103,17 @@ enum FoliaAPI {
             cookie: cookie
         )
         let decoded = try APIClient.decodeJSON(Resp.self, from: data)
-        return (decoded.playlist?.tracks ?? []).map {
-            Track(
-                id: String($0.id),
+        let tracks = decoded.playlist?.tracks ?? []
+        return tracks.map { t -> Track in
+            let artists = (t.ar ?? []).compactMap { $0.name }.joined(separator: " / ")
+            return Track(
+                id: String(t.id),
                 provider: .netease,
-                title: $0.name,
-                artist: ($0.ar ?? []).compactMap { $0.name }.joined(separator: " / "),
-                album: $0.al?.name,
-                coverUrl: $0.al?.picUrl,
-                durationMs: $0.dt
+                title: t.name,
+                artist: artists,
+                album: t.al?.name,
+                coverUrl: t.al?.picUrl,
+                durationMs: t.dt
             )
         }
     }

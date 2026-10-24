@@ -1,15 +1,14 @@
 import Foundation
 
 /// 用户登录态：每个平台一份 Cookie，存在 UserDefaults 里（原型期够用，之后挪到 Keychain）。
+@MainActor
 final class AppSession: ObservableObject {
-    static let shared = AppSession()
-
     @Published private(set) var cookies: [Provider: String] = [:]
     @Published private(set) var profiles: [Provider: UserProfile] = [:]
 
     private let cookieStoreKey = "folia.cookies.v1"
 
-    private init() {
+    init() {
         load()
     }
 
@@ -26,7 +25,6 @@ final class AppSession: ObservableObject {
     }
 
     /// 登录成功后调用：保存 Cookie，并把用户信息拉下来。
-    @MainActor
     func setCookie(_ cookie: String, for provider: Provider) async {
         cookies[provider] = cookie
         persist()
@@ -43,7 +41,6 @@ final class AppSession: ObservableObject {
         }
     }
 
-    @MainActor
     func logout(_ provider: Provider) {
         cookies[provider] = nil
         profiles[provider] = nil
