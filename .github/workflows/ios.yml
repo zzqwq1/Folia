@@ -40,7 +40,9 @@ jobs:
           PY
 
       - name: Sync Capacitor
-        run: npx cap sync ios
+        run: |
+          if [ ! -d ios ]; then npx cap add ios; fi
+          npx cap sync ios
 
       - name: Show ios folder structure
         run: find ios -maxdepth 3 | head -n 100
