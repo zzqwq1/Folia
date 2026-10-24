@@ -8,6 +8,11 @@ on:
       - 'ios-native/**'
       - '.github/workflows/ios.yml'
 
+# 同一分支上新提交会取消还在跑的旧构建，避免排队和重复产出。
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: macos-latest
@@ -21,9 +26,6 @@ jobs:
       - name: Generate Xcode project
         working-directory: ios-native
         run: xcodegen generate
-
-      - name: Show generated project
-        run: ls -la ios-native/
 
       - name: Archive unsigned
         id: archive
@@ -39,18 +41,17 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGN_ENTITLEMENTS="" \
-            2>&1 | tee build.log
+            | tee build.log
 
+      # 失败时把 .swift 的诊断行写成 check-run 注解。Actions 日志页是前端渲染、artifact 下载要 token，
+      # 但注解和 check-run API 是公开可读的，这样没有 Mac / 没登录也能看到确切错误。
       - name: Surface compile errors
         if: steps.archive.outcome == 'failure'
         working-directory: ios-native
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
           grep -E '\.swift:[0-9]+:[0-9]+: (error|warning|note):|^\*\* .* (FAILED|error)' build.log > errors.txt || true
           if [ ! -s errors.txt ]; then tail -n 80 build.log > errors.txt; fi
-          # Write the diagnostics into a check annotation so they are readable without auth.
           while IFS= read -r line; do
             echo "::error::$line"
           done < errors.txt
@@ -71,3 +72,12 @@ jobs:
         with:
           name: App-unsigned
           path: ios-native/App-unsigned.ipa
+          if-no-files-found: error
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: ios-native/build.log
+          if-no-files-found: ignore
