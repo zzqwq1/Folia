@@ -12,9 +12,6 @@ targets:
       - path: Sources/FoliaNativeApp.swift
       - path: Sources/Audio
       - path: Sources/Web
-    resources:
-      - path: Assets.xcassets
-        buildPhase: resources
     postBuildScripts:
       # 前端 dist 体积大且内容多变，用 folder reference 依赖 Xcode 的复制行为不够可控；
       # 改在构建最后阶段直接把 dist 复制进 app bundle，FoliaLocalServer 从 bundle 的 dist 目录读取。
@@ -22,6 +19,40 @@ targets:
         script: |
           mkdir -p "$TARGET_BUILD_DIR/$FULL_PRODUCT_NAME/dist"
           cp -R "$SRCROOT/dist/." "$TARGET_BUILD_DIR/$FULL_PRODUCT_NAME/dist/"
+      # xcodegen 对 xcassets 的 resources 支持不可靠（生成的 pbxproj 里没有 xcassets 引用，
+      # actool 根本不会跑 -> Assets.car / AppIcon 缺失），所以手动编译：
+      #   1) actool 要求应用图标不含 alpha，先用 sips 经 JPEG 中转去掉 alpha；
+      #   2) xcrun actool 编译 Assets.car 到 app bundle 根目录；
+      #   3) 用 PlistBuddy 把图标名写进 Info.plist（iOS 从 Assets.car 按该名字取图标）。
+      - name: Compile app icon asset catalog
+        script: |
+          set -e
+          APP_DIR="$TARGET_BUILD_DIR/$FULL_PRODUCT_NAME"
+          ICON_SET="$SRCROOT/Assets.xcassets/AppIcon.appiconset"
+
+          # 1. 去掉 AppIcon.png 的 alpha 通道（经 JPEG 中转），产出临时副本
+          TMP_XCASSETS="$TARGET_TEMP_DIR/Assets-noalpha.xcassets"
+          rm -rf "$TMP_XCASSETS" "$TARGET_TEMP_DIR/icon-flat.jpg"
+          cp -R "$SRCROOT/Assets.xcassets" "$TMP_XCASSETS"
+          sips -s format jpeg "$ICON_SET/AppIcon.png" --out "$TARGET_TEMP_DIR/icon-flat.jpg" > /dev/null
+          sips -s format png "$TARGET_TEMP_DIR/icon-flat.jpg" --out "$TMP_XCASSETS/AppIcon.appiconset/AppIcon.png" > /dev/null
+
+          # 2. 编译 Assets.car（输出到 app bundle 根目录）
+          xcrun actool "$TMP_XCASSETS" \
+            --compile "$APP_DIR" \
+            --platform iphoneos \
+            --minimum-deployment-target 16.0 \
+            --target-device iphone \
+            --target-device ipad \
+            --app-icon AppIcon \
+            --output-format human-readable-text
+
+          # 3. 登记图标名
+          ICON_PLIST="$APP_DIR/Info.plist"
+          /usr/libexec/PlistBuddy -c "Delete :CFBundleIcons" "$ICON_PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :CFBundleIcons dict" "$ICON_PLIST"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleIcons:CFBundlePrimaryIcon dict" "$ICON_PLIST"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconName string AppIcon" "$ICON_PLIST"
     info:
       path: Info.plist
     settings:

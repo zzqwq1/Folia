@@ -107,6 +107,8 @@ jobs:
           if [ -n "$APP" ]; then
             echo "::notice title=inspect::app-contents=$(ls "$APP" | tr '\n' ' ')"
             echo "::notice title=inspect::app-dist-size=$(du -sh "$APP/dist" 2>/dev/null | cut -f1 || echo none)"
+            echo "::notice title=inspect::app-assets-car=$(ls "$APP/Assets.car" >/dev/null 2>&1 && echo yes || echo no)"
+            echo "::notice title=inspect::app-icon-name=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconName' "$APP/Info.plist" 2>/dev/null || echo none)"
           fi
 
       - name: Package as ipa
