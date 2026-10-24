@@ -26,9 +26,11 @@ jobs:
         run: ls -la ios-native/
 
       - name: Archive unsigned
+        id: archive
         working-directory: ios-native
+        continue-on-error: true
         run: |
-          set -e
+          set -o pipefail
           xcodebuild -project FoliaNative.xcodeproj \
             -scheme FoliaNative \
             -configuration Release \
@@ -36,7 +38,18 @@ jobs:
             archive \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY="" \
-            CODE_SIGN_ENTITLEMENTS=""
+            CODE_SIGN_ENTITLEMENTS="" \
+            2>&1 | tee build.log
+
+      - name: Surface compile errors
+        if: steps.archive.outcome == 'failure'
+        working-directory: ios-native
+        run: |
+          echo '--- errors and notes ---'
+          grep -E '\.swift:[0-9]+:[0-9]+: (error|warning|note):|^\*\* .* (FAILED|error)' build.log || true
+          echo '--- tail ---'
+          tail -n 60 build.log
+          exit 1
 
       - name: Package as ipa
         working-directory: ios-native
@@ -52,3 +65,10 @@ jobs:
         with:
           name: App-unsigned
           path: ios-native/App-unsigned.ipa
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: ios-native/build.log
