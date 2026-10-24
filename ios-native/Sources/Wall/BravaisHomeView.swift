@@ -11,6 +11,7 @@ struct BravaisHomeView: View {
     let onOpenPlaylist: (Playlist) -> Void
     let onSettings: () -> Void
     let onSearch: () -> Void
+    let onQueue: () -> Void
 
     @EnvironmentObject private var session: AppSession
 
@@ -21,7 +22,7 @@ struct BravaisHomeView: View {
     @State private var restoreLevel: BravaisSeamLevel = .home
     /// 当前横缝锚点（世界 y），nil 表示还没规划过。
     @State private var anchorY: CGFloat?
-    @State private var targetOpenWidth: CGFloat = BravaisWallMetrics.rowFullHeight
+    @State private var targetOpenWidth: CGFloat = BravaisWallMetrics.rowSpineHeight
     @State private var initialised = false
     @State private var lastDrag: CGSize = .zero
     @State private var dragStart = Date()
@@ -116,24 +117,24 @@ struct BravaisHomeView: View {
         let w = widthAnim.value
         let visible = geometry.width >= 1
         let compact = level == .spine
-        let content = BravaisSeamPlan.contentOpacity(width: w, contentWidth: BravaisWallMetrics.rowFullHeight)
+        // 排版高度 = 当前档位的开口高度（首页层 full/home 都是 72、书脊 52）。
+        // 网页 contentOpacity 就是拿「开口高度 / 排版高度」算的，两者相等时恒为 1；开口动画途中才渐显。
+        let content = BravaisSeamPlan.contentOpacity(width: w, contentWidth: openWidth(for: level))
 
         return BravaisSeamHomeRow(
             compact: compact,
             collapsed: level == .hidden || geometry.collapsed,
-            height: w,
-            playlists: playlists,
             isLoading: isLoading,
             isLoggedIn: isLoggedIn,
             profile: session.profile(for: provider),
             onFold: { setLevel(.hidden) },
-            onExpand: { setLevel(isNarrow ? .home : .full) },
+            onExpand: { setLevel(.full) },
             onConnect: onConnect,
             onSettings: onSettings,
             onStage: { if let first = playlists.first { onOpenPlaylist(first) } },
             onSearch: onSearch,
-            canStage: !playlists.isEmpty,
-            onOpenPlaylist: onOpenPlaylist
+            onQueue: onQueue,
+            canStage: !playlists.isEmpty
         )
         .frame(width: size.width, height: max(w, 1))
         // 缝纸 = 与墙面同一底色（--bravais-seam-paper = color-mix(bg 90%, ink)），叠同样两团主题光晕，
@@ -208,7 +209,7 @@ struct BravaisHomeView: View {
     private var edgeTab: some View {
         HStack {
             Button {
-                setLevel(isNarrow ? .home : .full)
+                setLevel(isNarrow ? .spine : .full)
             } label: {
                 Text("书库")
                     .font(.system(size: 13, weight: .heavy))
@@ -271,7 +272,9 @@ struct BravaisHomeView: View {
 
     private func openWidth(for level: BravaisSeamLevel) -> CGFloat {
         switch level {
-        case .full: return BravaisWallMetrics.rowFullHeight
+        // 首页层（surface=home）的 full 与 home 是同一档：网页在首页满档也用它自己的窄缝 72，
+        // 212 只给集合页那类非首页层，首页这里用不到。
+        case .full: return BravaisWallMetrics.rowHomeHeight
         case .home: return BravaisWallMetrics.rowHomeHeight
         case .spine: return BravaisWallMetrics.rowSpineHeight
         case .hidden: return 0
@@ -282,7 +285,8 @@ struct BravaisHomeView: View {
         let wasNarrow = oldWidth < BravaisWallMetrics.narrowViewport
         let nowNarrow = size.width < BravaisWallMetrics.narrowViewport
         if wasNarrow != nowNarrow, level != .hidden {
-            level = nowNarrow ? .home : .full
+            // 网页 bravaisSeamLevel：窄屏默认书脊，宽屏默认满档。
+            level = nowNarrow ? .spine : .full
             let target = openWidth(for: level)
             targetOpenWidth = target
             widthAnim.value = target
@@ -293,7 +297,7 @@ struct BravaisHomeView: View {
     private func bootstrap(size: CGSize) {
         guard !initialised, size.width > 0 else { return }
         initialised = true
-        level = isNarrow ? .home : .full
+        level = isNarrow ? .spine : .full
         targetOpenWidth = openWidth(for: level)
         widthAnim.value = targetOpenWidth
         // 首帧：把第 0 条缝放到正中

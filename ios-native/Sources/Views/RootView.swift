@@ -29,7 +29,8 @@ struct RootView: View {
                         isShowingDetail = true
                     },
                     onSettings: { showSettings = true },
-                    onSearch: { showSearch = true }
+                    onSearch: { showSearch = true },
+                    onQueue: { showPlayer = true }
                 )
                 .navigationBarHidden(true)
                 .background(

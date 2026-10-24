@@ -1,20 +1,16 @@
 import SwiftUI
 
-/// 横条（axis y）里的首页窄缝 / 首页书脊。
+/// 横条（axis y）里的首页信息条 —— 对齐网页 `.bravais-seam-home-row`。
 ///
-/// 对齐网页 `BravaisSeamHomeRow` 的**横向信息条**形态：横条是横贯全宽、高 212 的一条，内容按网页竖缝的
-/// 那一套排版竖着排——最上面是折叠，下面「书库」，再下面是一排竖排页签（像一排书脊）；中段（二级切换、
-/// 状态）在剩余空间里竖直居中；账户入口贴在工具格上方；工具格（舞台 / 搜索 / ⋯）在最下。
-/// 书脊（compact，高 52）不画中段，只排页签，末尾多一个展开。
+/// 横贯全宽的一条，元素从左到右固定顺序：
+/// 折叠 → 导航段（「书库」+ 页签 歌/电/探/专，宽屏再多一排二级切换）→ 账户入口 → 工具格（舞台 / 搜索 / 设置 / 队列 / ⋯）
+/// → 展开（只有书脊态才画）。
 ///
-/// 退让顺序与网页一致（useBravaisSeamRowFit 的竖缝版）：先藏「书库」→ 页签缩成一个字 → 还放不下，
-/// 导航区在里面滚。这里按可用高度简单折算：低于标题所需的余量就藏标题，再低就缩字。
+/// 窄屏（横条宽 < 600px，手机竖屏）按网页的容器查询退让：间距 8、左右内边距 12、工具格间距 2、页签只留一个字。
+/// 书脊态（compact）再把页签与图标收小一档（页签 12pt、图标 34pt），与网页 `is-compact` 一致。
 struct BravaisSeamHomeRow: View {
     let compact: Bool
     let collapsed: Bool
-    /// 横条当前高度（开口宽度）。内容按它决定退让级别。
-    let height: CGFloat
-    let playlists: [Playlist]
     let isLoading: Bool
     let isLoggedIn: Bool
     let profile: UserProfile?
@@ -22,11 +18,11 @@ struct BravaisSeamHomeRow: View {
     let onExpand: () -> Void
     let onConnect: () -> Void
     let onSettings: () -> Void
-    /// 舞台 / 搜索。没有可播的歌单时按钮置灰（不再点了没反应）。
+    /// 舞台 / 搜索 / 队列。没有可播的歌单时舞台不画（点了也没反应）。
     let onStage: () -> Void
     let onSearch: () -> Void
+    let onQueue: () -> Void
     let canStage: Bool
-    let onOpenPlaylist: (Playlist) -> Void
 
     @State private var tab: HomeTab = .playlists
     @State private var section: HomeSection = .secPlaylists
@@ -68,15 +64,6 @@ struct BravaisSeamHomeRow: View {
             }
         }
 
-        var short: String {
-            switch self {
-            case .secFolders: return "夹"
-            case .secAlbums: return "专"
-            case .secArtists: return "家"
-            case .secPlaylists: return "单"
-            }
-        }
-
         var icon: String {
             switch self {
             case .secFolders: return "folder"
@@ -87,52 +74,47 @@ struct BravaisSeamHomeRow: View {
         }
     }
 
-    // MARK: - 退让
-
-    /// 藏「书库」：高度只够折叠 + 页签 + 工具格时。
-    private var titled: Bool { !compact && height >= 168 }
-    /// 页签缩成一个字。
-    private var short: Bool { compact || height < 132 }
-    /// 中段（二级切换 / 状态）只在有余量时出现；不够就让位。
-    private var showsMiddle: Bool { !compact && height >= 150 }
+    // MARK: - 尺寸
 
     private var seamInk: Color { FoliaTheme.t1 }
     private var seamInkSoft: Color { FoliaTheme.t1.opacity(0.55) }
-    private let inkColumnWidth: CGFloat = 34
+    /// 图标按钮的方框（网页 38px，compact 34px）。
+    private var iconSize: CGFloat { compact ? 34 : 38 }
+    /// 页签字号（网页 14px，compact 12px）。
+    private var tabFontSize: CGFloat { compact ? 12 : 14 }
 
     var body: some View {
-        VStack(spacing: compact ? 8 : 12) {
-            head
+        GeometryReader { geo in
+            let width = geo.size.width
+            // 网页容器查询：横条宽 < 600px（手机竖屏）收紧间距与内边距。
+            let narrow = width < 600
+            let gap: CGFloat = narrow ? 8 : (compact ? 10 : 14)
 
-            Spacer(minLength: 0)
+            HStack(spacing: gap) {
+                iconButton(system: "arrow.down.right.and.arrow.up.left", label: "折叠信息条", action: onFold)
 
-            if showsMiddle {
-                middle
+                nav(width: width, narrow: narrow)
+
+                accountSlot
+
+                tools(narrow: narrow)
+
+                if compact {
+                    iconButton(system: "arrow.up.left.and.arrow.down.right", label: "展开信息条", action: onExpand)
+                }
             }
-
-            Spacer(minLength: 0)
-
-            accountSlot
-
-            tools
-
-            if compact {
-                iconButton(system: "arrow.up.left.and.arrow.down.right", label: "展开信息条", action: onExpand)
-            }
+            .padding(.horizontal, narrow ? 12 : max(20, width * 0.024))
+            .frame(width: width, height: geo.size.height)
         }
-        .padding(.top, compact ? 10 : 14)
-        .padding(.bottom, compact ? 8 : 12)
         .opacity(collapsed ? 0 : 1)
     }
 
-    // MARK: - 页头（折叠 → 书库 → 页签列）
+    // MARK: - 导航段（书库 + 页签 + 二级切换）
 
-    private var head: some View {
-        VStack(spacing: compact ? 6 : 8) {
-            iconButton(system: compact ? "arrow.down.right.and.arrow.up.left" : "rectangle.compress.vertical",
-                       label: "折叠信息条", action: onFold)
-
-            if titled {
+    private func nav(width: CGFloat, narrow: Bool) -> some View {
+        let shortTabs = compact || narrow
+        return HStack(spacing: narrow ? 8 : 16) {
+            if !compact && width >= 560 {
                 Text("书库")
                     .font(.system(size: 15, weight: .bold))
                     .kerning(15 * 0.3)
@@ -140,56 +122,45 @@ struct BravaisSeamHomeRow: View {
                     .fixedSize()
             }
 
-            VStack(spacing: short ? 4 : 6) {
+            HStack(spacing: 4) {
                 ForEach(HomeTab.allCases, id: \.self) { item in
-                    tabButton(item)
+                    tabButton(item, short: shortTabs)
+                }
+            }
+
+            if !compact && width >= 700 {
+                HStack(spacing: 2) {
+                    ForEach(HomeSection.allCases, id: \.self) { item in
+                        sectionButton(item)
+                    }
                 }
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func tabButton(_ item: HomeTab) -> some View {
+    private func tabButton(_ item: HomeTab, short: Bool) -> some View {
         let active = tab == item
-        let text = short ? item.short : item.label
         return Button {
             tab = item
         } label: {
-            VerticalLabel(
-                text: text,
-                font: .system(size: compact ? 12 : 14, weight: .bold),
-                kerning: short ? 0 : 14 * 0.18
-            )
-            .foregroundStyle(active ? seamInk : seamInkSoft)
-            .padding(.vertical, compact ? 7 : 9)
-            .padding(.horizontal, short ? 4 : 6)
-            .background(
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(active ? seamInk.opacity(0.14) : .clear)
-            )
+            Text(short ? item.short : item.label)
+                .font(.system(size: tabFontSize, weight: .bold))
+                .kerning(short ? 0 : tabFontSize * 0.12)
+                .foregroundStyle(active ? seamInk : seamInkSoft)
+                .lineLimit(1)
+                .fixedSize()
+                .padding(.horizontal, short ? 8 : 12)
+                // 网页 .bravais-seam-home-tab short：min-width 34px。
+                .frame(minWidth: short ? 34 : 0, minHeight: iconSize)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(active ? seamInk.opacity(0.14) : Color.clear)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
         .accessibilityLabel(item.label)
-    }
-
-    // MARK: - 中段（二级切换 + 状态）
-
-    private var middle: some View {
-        VStack(spacing: 12) {
-            VStack(spacing: 2) {
-                ForEach(HomeSection.allCases, id: \.self) { item in
-                    sectionButton(item)
-                }
-            }
-
-            if isLoading || !isLoggedIn {
-                Text(isLoading ? "正在读取歌单…" : "尚未连接")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(seamInkSoft.opacity(0.8))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-                    .padding(.horizontal, 4)
-            }
-        }
     }
 
     private func sectionButton(_ item: HomeSection) -> some View {
@@ -197,64 +168,48 @@ struct BravaisSeamHomeRow: View {
         return Button {
             section = item
         } label: {
-            VStack(spacing: 5) {
+            HStack(spacing: 6) {
                 Image(systemName: item.icon)
-                    .font(.system(size: 15, weight: .medium))
+                    .font(.system(size: 14, weight: .medium))
                 if active {
-                    VerticalLabel(
-                        text: short ? item.short : item.label,
-                        font: .system(size: 12, weight: .bold),
-                        kerning: short ? 0 : 12 * 0.14
-                    )
+                    Text(item.label)
+                        .font(.system(size: 12, weight: .bold))
+                        .fixedSize()
                 }
             }
             .foregroundStyle(active ? seamInk : seamInkSoft)
-            .padding(.horizontal, 6)
-            .padding(.vertical, active ? 7 : 8)
-            .frame(width: inkColumnWidth)
-            .background(
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(.clear)
-            )
-            .overlay(alignment: .leading) {
-                if active {
-                    RoundedRectangle(cornerRadius: 1)
-                        .fill(seamInk)
-                        .frame(width: 2)
-                        .padding(.vertical, 8)
-                }
-            }
+            .padding(.horizontal, 8)
+            .frame(minHeight: iconSize)
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
         .accessibilityLabel(item.label)
     }
 
-    // MARK: - 账户入口（贴工具格）
+    // MARK: - 账户入口
 
     private var accountSlot: some View {
         Button(action: onConnect) {
-            VStack(spacing: 5) {
+            HStack(spacing: 8) {
                 avatar
                 if !compact {
                     Text(isLoggedIn ? (profile?.nickname ?? "已连接") : "连接在线平台")
-                        .font(.system(size: 11, weight: .bold))
+                        .font(.system(size: 12, weight: .bold))
                         .foregroundStyle(seamInk.opacity(0.9))
-                        .multilineTextAlignment(.center)
-                        .lineLimit(2)
-                        .minimumScaleFactor(0.75)
-                        .frame(width: inkColumnWidth + 12)
+                        .lineLimit(1)
+                        .fixedSize()
                 }
             }
-            .padding(.vertical, 6)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(isLoggedIn ? (profile?.nickname ?? "已连接") : "连接在线平台")
     }
 
     private var avatar: some View {
-        let size: CGFloat = compact ? 26 : 30
+        let size: CGFloat = compact ? 32 : 34
         return ZStack {
-            Circle().fill(seamInk.opacity(0.10))
+            Circle().fill(seamInk.opacity(isLoggedIn ? 0.10 : 0.05))
+            Circle().stroke(seamInk.opacity(isLoggedIn ? 0.10 : 0.22), lineWidth: 1)
             if isLoggedIn, let urlString = profile?.avatarUrl, let url = URL(string: urlString) {
                 AsyncImage(url: url) { phase in
                     if case .success(let img) = phase {
@@ -263,12 +218,12 @@ struct BravaisSeamHomeRow: View {
                         placeholderMark(size: size)
                     }
                 }
-                .frame(width: size, height: size)
+                .frame(width: size - 4, height: size - 4)
                 .clipShape(Circle())
             } else {
                 Image(systemName: "powerplug")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(seamInk.opacity(0.75))
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(seamInk.opacity(0.78))
             }
         }
         .frame(width: size, height: size)
@@ -280,18 +235,24 @@ struct BravaisSeamHomeRow: View {
             .foregroundStyle(seamInk.opacity(0.8))
     }
 
-    // MARK: - 工具格（一列）
+    // MARK: - 工具格（一排）
 
-    private var tools: some View {
-        VStack(spacing: compact ? 2 : 6) {
-            iconButton(system: "display", label: "舞台播放器", disabled: !canStage, action: onStage)
-            iconButton(system: "magnifyingglass", label: "搜索在线平台", disabled: !canStage, action: onSearch)
+    private func tools(narrow: Bool) -> some View {
+        HStack(spacing: narrow ? 2 : 6) {
+            if canStage {
+                iconButton(system: "display", label: "舞台播放器", action: onStage)
+            }
+            iconButton(system: "magnifyingglass", label: "搜索在线平台", action: onSearch)
+            iconButton(system: "gearshape", label: "设置", action: onSettings)
+            iconButton(system: "sidebar.left", label: "播放队列", action: onQueue)
+
             Button {
                 showMenu.toggle()
             } label: {
                 toolIcon(system: "ellipsis")
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("更多")
             .popover(isPresented: $showMenu, arrowEdge: .bottom) {
                 FoliaSeamMenu(
                     provider: profile?.provider ?? .netease,
@@ -320,24 +281,9 @@ struct BravaisSeamHomeRow: View {
 
     private func toolIcon(system: String, disabled: Bool = false) -> some View {
         Image(systemName: system)
-            .font(.system(size: 15, weight: .semibold))
+            .font(.system(size: compact ? 15 : 16, weight: .semibold))
             .foregroundStyle(seamInk.opacity(disabled ? 0.26 : 0.72))
-            .frame(width: compact ? 28 : 32, height: compact ? 28 : 32)
-    }
-}
-
-/// 竖排文字（writing-mode: vertical-rl 的近似）：逐字竖着垒，可选字距。
-/// 拉丁字母 / 数字不适合竖排，这里只用于中文页签名，与网页一致。
-struct VerticalLabel: View {
-    let text: String
-    var font: Font = .system(size: 14, weight: .bold)
-    var kerning: CGFloat = 0
-
-    var body: some View {
-        VStack(spacing: kerning) {
-            ForEach(Array(text.enumerated()), id: \.offset) { _, ch in
-                Text(String(ch)).font(font)
-            }
-        }
+            .frame(width: iconSize, height: iconSize)
+            .contentShape(Rectangle())
     }
 }
