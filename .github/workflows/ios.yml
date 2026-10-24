@@ -8,6 +8,11 @@ on:
       - 'ios-native/**'
       - '.github/workflows/ios.yml'
 
+# 发布 ipa 到 Release 需要 contents: write，否则 GITHUB_TOKEN 默认 read-only 时 gh release create 会 403。
+permissions:
+  contents: write
+  checks: write
+
 # 同一分支上新提交会取消还在跑的旧构建，避免排队和重复产出。
 concurrency:
   group: ios-${{ github.ref }}
@@ -78,11 +83,14 @@ jobs:
       # 方便全能签等签名工具直接下载，签名后即可装到 iPhone。
       - name: Publish ipa to GitHub Release
         run: |
-          gh release delete nightly-unsigned --yes || true
-          gh release create nightly-unsigned ios-native/App-unsigned.ipa \
-            --title "未签名构建 $(date '+%Y-%m-%d %H:%M')" \
-            --notes "自动构建的未签名 ipa，可用全能签等签名工具签名后安装到 iPhone。bundle id: app.folia.major.native" \
-            --prerelease
+          gh release delete nightly-unsigned --yes 2>&1 || true
+          if ! gh release create nightly-unsigned ios-native/App-unsigned.ipa \
+              --title "未签名构建 $(date '+%Y-%m-%d %H:%M')" \
+              --notes "自动构建的未签名 ipa，可用全能签等签名工具签名后安装到 iPhone。bundle id: app.folia.major.native" \
+              --prerelease > release-create.log 2>&1; then
+            sed 's/^/::error::/' release-create.log
+            exit 1
+          fi
         env:
           GH_TOKEN: ${{ github.token }}
 
