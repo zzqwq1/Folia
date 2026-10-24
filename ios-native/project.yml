@@ -24,28 +24,49 @@ targets:
       #   1) actool 要求应用图标不含 alpha，先用 sips 经 JPEG 中转去掉 alpha；
       #   2) xcrun actool 编译 Assets.car 到 app bundle 根目录；
       #   3) 用 PlistBuddy 把图标名写进 Info.plist（iOS 从 Assets.car 按该名字取图标）。
+      # 脚本 stdout 会被 Archive 步骤 tee 进 build.log，因此可用 ::notice:: 输出诊断注解。
       - name: Compile app icon asset catalog
         script: |
           set -e
           APP_DIR="$TARGET_BUILD_DIR/$FULL_PRODUCT_NAME"
           ICON_SET="$SRCROOT/Assets.xcassets/AppIcon.appiconset"
+          echo "::notice title=icon::script-ran app-dir=$APP_DIR"
 
           # 1. 去掉 AppIcon.png 的 alpha 通道（经 JPEG 中转），产出临时副本
-          TMP_XCASSETS="$TARGET_TEMP_DIR/Assets-noalpha.xcassets"
-          rm -rf "$TMP_XCASSETS" "$TARGET_TEMP_DIR/icon-flat.jpg"
+          TMPDIR_BUILD=$(mktemp -d "${TMPDIR:-/tmp}/folia-icon.XXXXXX")
+          TMP_XCASSETS="$TMPDIR_BUILD/Assets-noalpha.xcassets"
           cp -R "$SRCROOT/Assets.xcassets" "$TMP_XCASSETS"
-          sips -s format jpeg "$ICON_SET/AppIcon.png" --out "$TARGET_TEMP_DIR/icon-flat.jpg" > /dev/null
-          sips -s format png "$TARGET_TEMP_DIR/icon-flat.jpg" --out "$TMP_XCASSETS/AppIcon.appiconset/AppIcon.png" > /dev/null
+          sips -s format jpeg "$ICON_SET/AppIcon.png" --out "$TMPDIR_BUILD/icon-flat.jpg" > /dev/null
+          sips -s format png "$TMPDIR_BUILD/icon-flat.jpg" --out "$TMP_XCASSETS/AppIcon.appiconset/AppIcon.png" > /dev/null
 
-          # 2. 编译 Assets.car（输出到 app bundle 根目录）
-          xcrun actool "$TMP_XCASSETS" \
-            --compile "$APP_DIR" \
+          # 2. 编译 Assets.car：先输出到独立目录，再拷进 app bundle（--compile 直接指 bundle 目录
+          #    曾出现退出码 0 但 bundle 里没有 Assets.car 的情况，改成显式 cp + 校验）
+          ACTOOL_OUT="$TMPDIR_BUILD/actool-out"
+          mkdir -p "$ACTOOL_OUT"
+          set +e
+          ACTOOL_LOG=$(xcrun actool "$TMP_XCASSETS" \
+            --compile "$ACTOOL_OUT" \
             --platform iphoneos \
             --minimum-deployment-target 16.0 \
             --target-device iphone \
             --target-device ipad \
             --app-icon AppIcon \
-            --output-format human-readable-text
+            --output-format human-readable-text 2>&1)
+          ACTOOL_RC=$?
+          set -e
+          echo "::notice title=icon::actool-rc=$ACTOOL_RC"
+          echo "$ACTOOL_LOG" | tail -n 8 | sed 's/^/::notice title=icon-actool::/'
+          if [ $ACTOOL_RC -ne 0 ]; then
+            echo "$ACTOOL_LOG" >&2
+            exit $ACTOOL_RC
+          fi
+          if [ ! -f "$ACTOOL_OUT/Assets.car" ]; then
+            echo "::error::actool produced no Assets.car in $ACTOOL_OUT"
+            ls -la "$ACTOOL_OUT" >&2
+            exit 1
+          fi
+          cp "$ACTOOL_OUT/Assets.car" "$APP_DIR/Assets.car"
+          echo "::notice title=icon::assets-car-ok size=$(stat -f %z "$APP_DIR/Assets.car" 2>/dev/null || echo ?)"
 
           # 3. 登记图标名
           ICON_PLIST="$APP_DIR/Info.plist"
@@ -53,6 +74,7 @@ targets:
           /usr/libexec/PlistBuddy -c "Add :CFBundleIcons dict" "$ICON_PLIST"
           /usr/libexec/PlistBuddy -c "Add :CFBundleIcons:CFBundlePrimaryIcon dict" "$ICON_PLIST"
           /usr/libexec/PlistBuddy -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconName string AppIcon" "$ICON_PLIST"
+          echo "::notice title=icon::plist-icon-set"
     info:
       path: Info.plist
     settings:
