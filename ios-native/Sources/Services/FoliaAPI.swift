@@ -160,4 +160,28 @@ enum FoliaAPI {
         }
         return url
     }
+
+    /// 歌词结果：主歌词 + 翻译（Worker /lyric 返回 lrc / tlyric 两轨）。
+    struct LyricResult {
+        let lrc: String?
+        let tlyric: String?
+    }
+
+    /// 单曲歌词（公开接口，无需 Cookie）。
+    static func neteaseLyric(id: String) async throws -> LyricResult {
+        struct Resp: Decodable {
+            struct Branch: Decodable { let lyric: String? }
+            let code: Int?
+            let lrc: Branch?
+            let tlyric: Branch?
+        }
+        let data = try await APIClient.get(
+            "/api/native/netease/lyric",
+            query: ["id": id],
+            provider: .netease,
+            cookie: nil
+        )
+        let decoded = try APIClient.decodeJSON(Resp.self, from: data)
+        return LyricResult(lrc: decoded.lrc?.lyric, tlyric: decoded.tlyric?.lyric)
+    }
 }

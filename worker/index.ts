@@ -557,6 +557,11 @@ const foliaFetch = async (request: Request, env: Env): Promise<Response> => {
           if (native) return native;
           return new Response(JSON.stringify({ code: 500, message: "native song failed" }), { status: 502, headers: jsonHeaders });
         }
+        if (subPath === "/lyric" || subPath === "/lyric/") {
+          const native = await nativeNetease(subPath, params);
+          if (native) return native;
+          return new Response(JSON.stringify({ code: 500, message: "native lyric failed" }), { status: 502, headers: jsonHeaders });
+        }
         return new Response(JSON.stringify({ code: 404, message: `unknown native netease path: ${subPath}` }), { status: 404, headers: jsonHeaders });
       } catch (error) {
         console.error("[worker] native netease route failed:", error);

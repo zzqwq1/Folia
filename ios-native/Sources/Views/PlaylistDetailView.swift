@@ -63,7 +63,7 @@ struct PlaylistDetailView: View {
                             if let first = tracks.first {
                                 Task {
                                     let cookie = session.cookie(for: first.provider) ?? ""
-                                    await player.play(first, cookie: cookie)
+                                    await player.play(first, cookie: cookie, queue: tracks)
                                 }
                             }
                         } label: {
@@ -114,7 +114,7 @@ struct PlaylistDetailView: View {
                                 ) {
                                     Task {
                                         let cookie = session.cookie(for: track.provider) ?? ""
-                                        await player.play(track, cookie: cookie)
+                                        await player.play(track, cookie: cookie, queue: tracks)
                                     }
                                 }
                                 if index < tracks.count - 1 {

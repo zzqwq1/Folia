@@ -68,9 +68,7 @@ struct RootView: View {
             })
         }
         .fullScreenCover(isPresented: $showPlayer) {
-            if let current = player.current {
-                PlayerView(track: current, isPresented: $showPlayer)
-            }
+            PlayerView(isPresented: $showPlayer)
         }
         .fullScreenCover(isPresented: $showSettings) {
             FoliaSettingsView(provider: currentProvider, onConnect: { showLogin = true })
