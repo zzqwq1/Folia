@@ -44,11 +44,17 @@ jobs:
       - name: Surface compile errors
         if: steps.archive.outcome == 'failure'
         working-directory: ios-native
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo '--- errors and notes ---'
-          grep -E '\.swift:[0-9]+:[0-9]+: (error|warning|note):|^\*\* .* (FAILED|error)' build.log || true
-          echo '--- tail ---'
-          tail -n 60 build.log
+          set -e
+          grep -E '\.swift:[0-9]+:[0-9]+: (error|warning|note):|^\*\* .* (FAILED|error)' build.log > errors.txt || true
+          if [ ! -s errors.txt ]; then tail -n 80 build.log > errors.txt; fi
+          # Write the diagnostics into a check annotation so they are readable without auth.
+          while IFS= read -r line; do
+            echo "::error::$line"
+          done < errors.txt
+          cat errors.txt
           exit 1
 
       - name: Package as ipa
@@ -65,10 +71,3 @@ jobs:
         with:
           name: App-unsigned
           path: ios-native/App-unsigned.ipa
-
-      - name: Upload build log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log
-          path: ios-native/build.log
