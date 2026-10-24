@@ -11,6 +11,8 @@ const LYRIC_ORIGIN = 'https://mlyric.kuwo.cn';
 const SALT = 'kuwotest';
 // 稳定的设备标识（32 位小写 hex）。同一实例共用一个，够用；要隔离可以改成按客户端生成。
 const DEVICE_ID = '3f7c1a9d52b84e0fa6c3d81b4e2f7a95';
+// 上游请求超时：酷我有时挂起不回，无限等会让前端一直转圈。8s 内没回就明确报错。
+const UPSTREAM_TIMEOUT_MS = 8000;
 
 // ── 歌词解码（复刻 bodian-music-api 的 lyrics.cjs） ──────────────────────
 const decodeBodianWordTiming = (content: string): string | null => {
@@ -150,6 +152,17 @@ const json = (body: unknown, status = 200): Response => new Response(JSON.string
 
 const errorJson = (message: string, status = 502): Response => json({ error: message }, status);
 
+/** 把酷我上游的错误码翻译成前端看得懂的原因（不再是无脑「连接失败」）。 */
+const bodianUpstreamFailure = (code: number | undefined, msg?: string): Error => {
+    const message = typeof msg === 'string' && msg.trim() ? msg.trim() : '';
+    switch (code) {
+        case 407: return new Error(`region-restricted: ${message || '该内容仅限中国大陆地区使用'}`);
+        case 11012: return new Error(`auth-required: ${message || '需要登录'}`);
+        case 20018: return new Error(`not-playable: ${message || '该歌曲不可播放'}`);
+        default: return new Error(message ? `bodian upstream code ${code ?? 'missing'} ${message}` : `bodian upstream code ${code ?? 'missing'}`);
+    }
+};
+
 const callBd = async (
     path: string,
     options: { params?: Record<string, string | number>; body?: unknown; method?: string; signed?: boolean; uid?: string; token?: string; deviceId?: string } = {},
@@ -163,14 +176,25 @@ const callBd = async (
     }
     const url = new URL(path, API_ORIGIN);
     for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value);
-    const response = await fetch(url.toString(), {
-        method,
-        headers: desktopHeaders(deviceId, uid, token),
-        body: bodyText || undefined,
-    });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+    let response: Response;
+    try {
+        response = await fetch(url.toString(), {
+            method,
+            headers: desktopHeaders(deviceId, uid, token),
+            body: bodyText || undefined,
+            signal: controller.signal,
+        });
+    } catch (error) {
+        clearTimeout(timer);
+        if ((error as Error)?.name === 'AbortError') throw new Error('bodian upstream timed out');
+        throw error;
+    }
+    clearTimeout(timer);
     const payload = await response.json().catch(() => null) as any;
     if (Number(payload?.code) !== 200) {
-        throw new Error(`bodian upstream code ${payload?.code ?? 'missing'} ${payload?.msg || ''}`.trim());
+        throw bodianUpstreamFailure(Number(payload?.code), payload?.msg ?? payload?.message);
     }
     return payload;
 };
@@ -183,6 +207,26 @@ const pageParams = (limit: number, offset: number, firstPage = 1) => {
 const searchBody = (keyword: string, limit: number, offset: number) => {
     const { pn, rn } = pageParams(limit, offset, 0);
     return { keyword, correct: 1, pn, rn };
+};
+
+/** 对齐官方 SDK 的 pageData：给分页结果补上 bodianPagination（前端据此翻页/判定 hasMore）。 */
+const pageResult = (data: any, field: string, limit: number, offset: number) => {
+    const safe = data && typeof data === 'object' ? data : {};
+    const raw = Array.isArray(safe[field]) ? safe[field] : [];
+    const rn = Math.min(Math.max(limit || 50, 1), 100);
+    const items = raw.slice(offset % rn);
+    const pageEnd = (Math.floor(offset / rn) + 1) * rn;
+    const total = Number(safe.total);
+    const knownTotal = safe.total != null && Number.isSafeInteger(total) && total >= 0;
+    const hasMore = raw.length > 0 && (knownTotal ? pageEnd < total : raw.length === rn);
+    return {
+        ...safe,
+        [field]: items,
+        bodianPagination: {
+            nextOffset: hasMore ? pageEnd : Math.max(offset + items.length, knownTotal ? Math.min(pageEnd, total) : offset + items.length),
+            hasMore,
+        },
+    };
 };
 
 const audioOf = async (musicId: string, quality: string, freeSign: string, uid: string, token: string, deviceId: string) => {
@@ -232,10 +276,9 @@ export const handleBodian = async (request: Request, url: URL): Promise<Response
         switch (op) {
             case 'search': {
                 const keyword = (url.searchParams.get('query') || '').trim();
-                if (!keyword) return json({ resultList: [], total: 0 });
+                if (!keyword) return json({ resultList: [], total: 0, bodianPagination: { nextOffset: 0, hasMore: false } });
                 const data = (await callBd('/api/search/music/list', { params: searchBody(keyword, limit, offset) })).data;
-                const list = Array.isArray(data?.resultList) ? data.resultList : [];
-                return json({ ...data, resultList: list });
+                return json(pageResult(data ?? {}, 'resultList', limit, offset));
             }
             case 'song_detail':
                 return json((await callBd('/api/service/music/info', { params: { musicId: id } })).data);
@@ -344,23 +387,27 @@ export const handleBodian = async (request: Request, url: URL): Promise<Response
             case 'playlist_tracks': {
                 const source = Number(url.searchParams.get('source') || 4);
                 const { pn, rn } = pageParams(limit, offset, 1);
-                return json((await callBd(`/api/service/playlist/${id}/musicList`, { params: { pn, rn, source }, uid, token, deviceId })).data);
+                const data = (await callBd(`/api/service/playlist/${id}/musicList`, { params: { pn, rn, source }, uid, token, deviceId })).data;
+                return json(pageResult(data ?? {}, 'list', limit, offset));
             }
             case 'album_detail':
                 return json((await callBd(`/api/service/album/${id}`, { uid, token, deviceId })).data);
             case 'album_tracks': {
                 const { pn, rn } = pageParams(limit, offset, 0);
-                return json((await callBd(`/api/service/album/music/${id}`, { params: { pn, rn }, uid, token, deviceId })).data);
+                const data = (await callBd(`/api/service/album/music/${id}`, { params: { pn, rn }, uid, token, deviceId })).data;
+                return json(pageResult(data ?? {}, 'resultList', limit, offset));
             }
             case 'artist_detail':
                 return json((await callBd(`/api/service/artist/${id}`, { uid, token, deviceId })).data);
             case 'artist_songs': {
                 const { pn, rn } = pageParams(limit, offset, 0);
-                return json((await callBd(`/api/service/artist/music/${id}`, { params: { pn, rn }, uid, token, deviceId })).data);
+                const data = (await callBd(`/api/service/artist/music/${id}`, { params: { pn, rn }, uid, token, deviceId })).data;
+                return json(pageResult(data ?? {}, 'resultList', limit, offset));
             }
             case 'artist_albums': {
                 const { pn, rn } = pageParams(limit, offset, 0);
-                return json((await callBd(`/api/service/artist/album/${id}`, { params: { pn, rn }, uid, token, deviceId })).data);
+                const data = (await callBd(`/api/service/artist/album/${id}`, { params: { pn, rn }, uid, token, deviceId })).data;
+                return json(pageResult(data ?? {}, 'resultList', limit, offset));
             }
             case 'like_song': {
                 // 找到"我喜欢"歌单，再往里面加/删歌曲。

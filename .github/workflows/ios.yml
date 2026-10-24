@@ -47,6 +47,46 @@ jobs:
       - name: Show ios folder structure
         run: find ios -maxdepth 3 | head -n 100
 
+      - name: Enable background audio
+        run: |
+          python3 - <<'PY'
+          import io, plistlib
+
+          # 1) Info.plist —— 声明 audio 后台模式，锁屏 / 切后台时音频继续。
+          plist_path = 'ios/App/App/Info.plist'
+          with open(plist_path, 'rb') as f:
+              plist = plistlib.load(f)
+          modes = list(plist.get('UIBackgroundModes') or [])
+          if 'audio' not in modes:
+              plist['UIBackgroundModes'] = modes + ['audio']
+          with open(plist_path, 'wb') as f:
+              plistlib.dump(plist, f, fmt=plistlib.FMT_XML)
+          print('patched ' + plist_path + ' with UIBackgroundModes audio')
+
+          # 2) AppDelegate.swift —— 把 AVAudioSession 设为 playback，让 web 音频后台 / 锁屏继续。
+          app_path = 'ios/App/App/AppDelegate.swift'
+          src = io.open(app_path, encoding='utf-8').read()
+          assert 'import Capacitor' in src, 'AppDelegate: Capacitor import not found'
+          if 'import AVFoundation' not in src:
+              src = src.replace('import Capacitor', 'import Capacitor\nimport AVFoundation', 1)
+          marker = '        // Override point for customization after application launch.\n        return true'
+          assert marker in src, 'AppDelegate: didFinishLaunchingWithOptions override marker not found'
+          setup_lines = [
+              '        // Keep web audio playing in the background and on the lock screen.',
+              '        let session = AVAudioSession.sharedInstance()',
+              '        do {',
+              '            try session.setCategory(.playback, mode: .default, options: [])',
+              '            try session.setActive(true)',
+              '        } catch {',
+              '            print(error)',
+              '        }',
+              '        return true',
+          ]
+          src = src.replace(marker, '\n'.join(setup_lines), 1)
+          io.open(app_path, 'w', encoding='utf-8').write(src)
+          print('patched ' + app_path + ' with AVAudioSession playback')
+          PY
+
       - name: Archive unsigned
         run: |
           set -e
