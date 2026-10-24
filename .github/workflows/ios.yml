@@ -98,9 +98,10 @@ jobs:
         working-directory: ios-native
         run: |
           set -e
-          echo "::notice title=inspect::pbx-xcassets-refs=$(grep -ci 'xcassets' FoliaNative.xcodeproj/project.pbxproj || true)"
+          echo "::notice title=inspect::pbx-buildfile-xcassets=$(grep -c 'Assets.xcassets in Resources' FoliaNative.xcodeproj/project.pbxproj || true)"
           echo "::notice title=inspect::pbx-resources-phase=$(grep -c 'PBXResourcesBuildPhase' FoliaNative.xcodeproj/project.pbxproj || true)"
           echo "::notice title=inspect::pbx-embed-script=$(grep -ci 'Embed web dist' FoliaNative.xcodeproj/project.pbxproj || true)"
+          echo "::notice title=inspect::pbx-xcassets-keys=$(grep -n 'Assets.xcassets' FoliaNative.xcodeproj/project.pbxproj | head -n 12 | tr '\n' ';')"
           echo "::notice title=inspect::dist-file-count=$(ls dist 2>/dev/null | wc -l | tr -d ' ')"
           APP=$(find . -type d -name '*.app' -path '*Products/Applications*' | head -n 1)
           echo "::notice title=inspect::app-path=$APP"
