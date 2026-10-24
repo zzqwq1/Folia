@@ -39,15 +39,13 @@ targets:
           sips -s format jpeg "$ICON_SET/AppIcon.png" --out "$TMPDIR_BUILD/icon-flat.jpg" > /dev/null
           sips -s format png "$TMPDIR_BUILD/icon-flat.jpg" --out "$TMP_XCASSETS/AppIcon.appiconset/AppIcon.png" > /dev/null
 
-          # 2. 编译 Assets.car：先输出到独立目录，再拷进 app bundle（--compile 直接指 bundle 目录
-          #    曾出现退出码 0 但 bundle 里没有 Assets.car 的情况，改成显式 cp + 校验）
+          # 2. 编译 Assets.car：直接编译进 app bundle（与 Xcode 原生 actool 调用一致），
+          #    再用 find 兜底确认 .car 位置并复制进 bundle。
           #    注意：--app-icon 编译图标时 actool 强制要求 --output-partial-info-plist，
           #    否则 actool 只告警不产出 Assets.car。
-          ACTOOL_OUT="$TMPDIR_BUILD/actool-out"
-          mkdir -p "$ACTOOL_OUT"
           set +e
           ACTOOL_LOG=$(xcrun actool "$TMP_XCASSETS" \
-            --compile "$ACTOOL_OUT" \
+            --compile "$APP_DIR" \
             --platform iphoneos \
             --minimum-deployment-target 16.0 \
             --target-device iphone \
@@ -58,17 +56,20 @@ targets:
           ACTOOL_RC=$?
           set -e
           echo "::notice title=icon::actool-rc=$ACTOOL_RC"
-          echo "$ACTOOL_LOG" | tail -n 8 | sed 's/^/::notice title=icon-actool::/'
+          echo "$ACTOOL_LOG" | tail -n 6 | sed 's/^/::notice title=icon-actool::/'
           if [ $ACTOOL_RC -ne 0 ]; then
             echo "$ACTOOL_LOG" >&2
             exit $ACTOOL_RC
           fi
-          if [ ! -f "$ACTOOL_OUT/Assets.car" ]; then
-            echo "::error::actool produced no Assets.car in $ACTOOL_OUT"
-            ls -la "$ACTOOL_OUT" >&2
+          echo "::notice title=icon::cars=$(find "$APP_DIR" "$TMPDIR_BUILD" -name '*.car' 2>/dev/null | tr '\n' ' ')"
+          CAR=$(find "$APP_DIR" "$TMPDIR_BUILD" -name 'Assets.car' 2>/dev/null | head -n 1)
+          if [ -z "$CAR" ]; then
+            echo "::error::no Assets.car produced anywhere"
             exit 1
           fi
-          cp "$ACTOOL_OUT/Assets.car" "$APP_DIR/Assets.car"
+          if [ "$CAR" != "$APP_DIR/Assets.car" ]; then
+            cp "$CAR" "$APP_DIR/Assets.car"
+          fi
           echo "::notice title=icon::assets-car-ok size=$(stat -f %z "$APP_DIR/Assets.car" 2>/dev/null || echo ?)"
 
           # 3. 登记图标名
