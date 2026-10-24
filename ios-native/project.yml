@@ -9,8 +9,12 @@ targets:
     platform: iOS
     deploymentTarget: "16.0"
     sources:
-      - path: Sources
-        excludes: []
+      - path: Sources/FoliaNativeApp.swift
+      - path: Sources/Audio
+      - path: Sources/Models
+      - path: Sources/Player
+      - path: Sources/Services
+      - path: Sources/Views
     info:
       path: Info.plist
     settings:
