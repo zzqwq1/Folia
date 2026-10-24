@@ -24,11 +24,12 @@ final class FoliaLocalServer {
         guard listener == nil else { return }
         do {
             let params = NWParameters.tcp
-            let listener = try NWListener(using: params, on: port)
+            guard let endpointPort = NWEndpoint.Port(rawValue: port) else { return }
+            let listener = try NWListener(using: params, on: endpointPort)
             listener.newConnectionHandler = { [weak self] connection in
                 self?.accept(connection)
             }
-            listener.stateUpdateHandler = { state in
+            listener.stateUpdateHandler = { (state: NWListener.State) in
                 if case .failed(let error) = state {
                     NSLog("[FoliaLocalServer] listener failed: %@", String(describing: error))
                 }
