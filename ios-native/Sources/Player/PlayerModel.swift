@@ -59,7 +59,7 @@ final class PlayerModel: ObservableObject {
         } catch {
             errorMessage = "播放失败：\(error.localizedDescription)"
             current = nil
-            queue = []
+            self.queue = []
         }
     }
 
@@ -232,7 +232,7 @@ final class PlayerModel: ObservableObject {
             info[MPMediaItemPropertyPlaybackDuration] = duration
         }
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = currentTime
-        info[MPMediaItemPropertyPlaybackRate] = isPlaying ? 1.0 : 0.0
+        info[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? 1.0 : 0.0
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
     }
 
