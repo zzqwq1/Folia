@@ -32,3 +32,12 @@ export const isSecondaryModifierPressed = (event: KeyboardEvent): boolean => (
 
 /** Label for the primary modifier, for shortcut hints shown in the UI. */
 export const PRIMARY_MODIFIER_LABEL = isMacPlatform ? 'Cmd' : 'Ctrl';
+
+/**
+ * Whether this runs inside iOS (the Capacitor WKWebView shell, or iOS Safari). iOS's WebKit gives the
+ * Web content process a much smaller memory/GPU budget than Electron or desktop browsers. On iOS we
+ * degrade the heaviest consumers (cover image resolution, see utils/coverUrl.ts) so the content
+ * process is not killed mid-scroll and the WebView reloaded.
+ */
+export const isIOS = typeof navigator !== 'undefined'
+    && /iPhone|iPad|iPod/i.test(navigator.userAgent);

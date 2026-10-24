@@ -1,6 +1,11 @@
 // src/utils/coverUrl.ts
 
+import { isIOS } from './platform';
+
 const NON_RESIZABLE_COVER_PROTOCOLS = new Set(['blob:', 'data:', 'file:', 'filesystem:']);
+// iOS 的 WKWebView 内容进程内存预算小，进歌单一次解码几十张 512/1024 封面是把它打爆的主因；
+// 卡片在 256 上视觉几乎无损，解码内存降到 1/4–1/16。
+const IOS_COVER_MAX_SIZE = 256;
 const KUGOU_COVER_HOST_PATTERN = /(?:^|\.)(?:kugou\.com|kgimg\.com)$/i;
 const KUGOU_COVER_PATH_PATTERN = /(\/stdmusic\/)(\d+)(\/)/;
 const KUWO_COVER_HOST_PATTERN = /^img\d*\.kuwo\.cn$/i;
@@ -106,7 +111,8 @@ export const getSizedCoverUrl = (url: string | null | undefined, size: number): 
     const trimmedUrl = url?.trim() ?? '';
     if (!trimmedUrl) return '';
 
-    const normalizedSize = Math.max(1, Math.round(size));
+    const cappedSize = isIOS ? Math.min(IOS_COVER_MAX_SIZE, size) : size;
+    const normalizedSize = Math.max(1, Math.round(cappedSize));
 
     try {
         const urlObj = new URL(trimmedUrl);
