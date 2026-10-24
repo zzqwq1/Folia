@@ -26,12 +26,31 @@ enum Provider: String, CaseIterable, Identifiable {
         }
     }
 
+    /// 圆形徽章上的单字（与网页版 PlatformMark 一致）
+    var markLetter: String {
+        switch self {
+        case .netease: return "云"
+        case .qq:      return "Q"
+        case .kugou:   return "K"
+        case .bodian:  return "波"
+        }
+    }
+
+    /// 品牌色（对齐网页版 src/services/onlineMusic/*/*Provider.ts）
     var accentColorHex: String {
         switch self {
-        case .netease: return "#E60026"
-        case .qq:      return "#31C27C"
-        case .kugou:   return "#2BA1E0"
-        case .bodian:  return "#7B61FF"
+        case .netease: return "#dc2626"
+        case .qq:      return "#16a34a"
+        case .kugou:   return "#2563eb"
+        case .bodian:  return "#0d9488"
+        }
+    }
+
+    /// 是否已实装
+    var isAvailable: Bool {
+        switch self {
+        case .netease: return true
+        default: return false
         }
     }
 }
