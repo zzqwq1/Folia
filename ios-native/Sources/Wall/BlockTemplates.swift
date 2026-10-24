@@ -108,8 +108,8 @@ enum BlockTemplates {
         }
         var value = imul(Int32(truncatingIfNeeded: blockColumn), 0x9e37_79b1)
             ^ imul(Int32(truncatingIfNeeded: blockRow), 0x85eb_ca6b)
-        value = imul(value ^ (value >>> 15), 0x2c1b_3c6d)
-        value ^= value >>> 12
+        value = imul(value ^ Int32(bitPattern: UInt32(bitPattern: value) >> 15), 0x2c1b_3c6d)
+        value ^= Int32(bitPattern: UInt32(bitPattern: value) >> 12)
         return UInt32(bitPattern: value)
     }
 
@@ -148,11 +148,11 @@ enum BravaisMetrics {
     static func seamBoundaryY(_ row: Int) -> CGFloat { CGFloat(row) * blockHeight - gap / 2 }
 
     static func nearestSeamBoundaryX(_ x: CGFloat) -> CGFloat {
-        seamBoundaryX(Int((x + gap / 2) / blockWidth).rounded())
+        seamBoundaryX(Int(((x + gap / 2) / blockWidth).rounded()))
     }
 
     static func nearestSeamBoundaryY(_ y: CGFloat) -> CGFloat {
-        seamBoundaryY(Int((y + gap / 2) / blockHeight).rounded())
+        seamBoundaryY(Int(((y + gap / 2) / blockHeight).rounded()))
     }
 
     /// 一个 slot 的世界矩形。

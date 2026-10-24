@@ -182,7 +182,7 @@ final class BravaisCamera: ObservableObject {
     }
 
     /// 松手后的惯性：速度按 0.3 次幂衰减，时间常数 280ms。
-    func inertialPan(velocity: CGPoint, limit: CGRect?) {
+    func inertialPan(velocity: CGPoint, limit: CGRect? = nil) {
         stopAll()
         var vx = velocity.x
         var vy = velocity.y
@@ -213,7 +213,7 @@ final class BravaisCamera: ObservableObject {
     }
 
     /// 拖动平移；limit 为相机允许区间（nil 表示自由）。
-    func pan(dx: CGFloat, dy: CGFloat, limit: CGRect?) {
+    func pan(dx: CGFloat, dy: CGFloat, limit: CGRect? = nil) {
         var nx = x - dx
         var ny = y - dy
         if let limit {
@@ -272,7 +272,7 @@ struct BravaisWall: View {
         let slots = BravaisMetrics.slots(column: col, row: row)
         let frame = BravaisPlate.frame(column: col, row: row, anchorY: anchorY)
         // 实色档无窗：不挖洞，只画底板 + 卡片。
-        context.fill(BravaisPlate.path(frame: frame, holes: []), with: plate, style: FillStyle(eoFill: true))
+        context.fill(Path(BravaisPlate.path(frame: frame, holes: [])), with: plate, style: FillStyle(eoFill: true))
 
         for (index, slot) in slots.enumerated() {
             drawSlot(context: &context, slot: slot, index: index, col: col, row: row)
