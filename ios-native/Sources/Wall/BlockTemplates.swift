@@ -124,12 +124,6 @@ enum BlockTemplates {
     }
 }
 
-private extension Int32 {
-    static func >>> (lhs: Int32, rhs: Int32) -> Int32 {
-        Int32(bitPattern: UInt32(bitPattern: lhs) >> UInt32(rhs))
-    }
-}
-
 /// 直译 src/library/suites/bravais/bravaisConstants.ts 的几何参数。
 enum BravaisMetrics {
     static let cellSize: CGFloat = 128
