@@ -1,91 +1,113 @@
 import Foundation
 
-/// 各平台归一化后的 API。底层都打 app.folia-api.top，原生 App 只关心业务模型。
+/// 各平台归一化后的 API。原生 App 走 Worker 的 /api/native/netease 路径：
+/// 不依赖家用/服务器隧道（这两条只有电脑开着才通），全走 Worker 自带的 weapi，
+/// 保证 iPhone 上「电脑关机也能登录/拿数据」。
 enum FoliaAPI {
 
     // MARK: - 网易云
 
-    /// 拿当前登录用户信息（基于 Cookie）。
+    /// 拿当前登录用户信息（基于 Cookie）。返回空表示未登录或 Cookie 失效。
     static func neteaseAccount(cookie: String) async throws -> UserProfile {
         struct Resp: Decodable {
+            let code: Int?
             struct Profile: Decodable {
                 let userId: Int
-                let nickname: String
+                let nickname: String?
                 let avatarUrl: String?
             }
             let profile: Profile?
             let account: Profile?
         }
-        let data = try await APIClient.get("/api/netease/user/account", provider: .netease, cookie: cookie)
+        let data = try await APIClient.get(
+            "/api/native/netease/user/account",
+            query: ["cookie": cookie],
+            provider: .netease,
+            cookie: nil
+        )
         let decoded = try APIClient.decodeJSON(Resp.self, from: data)
-        guard let p = decoded.profile ?? decoded.account else {
-            throw APIClient.APIError.badStatus(401, "not logged in")
+        guard let p = decoded.profile ?? decoded.account, let name = p.nickname else {
+            throw APIClient.APIError.notLoggedIn
         }
-        return UserProfile(provider: .netease, userId: String(p.userId), nickname: p.nickname, avatarUrl: p.avatarUrl)
+        return UserProfile(provider: .netease, userId: String(p.userId), nickname: name, avatarUrl: p.avatarUrl)
     }
 
-    /// 拿用户的歌单（收藏的 + 创建的）。
+    /// 拿用户的歌单（创建的 + 收藏的）。
     static func neteaseUserPlaylists(userId: String, cookie: String) async throws -> [Playlist] {
         struct Resp: Decodable {
             struct P: Decodable {
                 let id: Int
-                let name: String
+                let name: String?
                 let coverImgUrl: String?
                 let trackCount: Int?
                 let creator: C?
                 struct C: Decodable { let nickname: String? }
             }
+            let code: Int?
             let playlist: [P]?
         }
-        let data = try await APIClient.get("/api/netease/user/playlist", query: ["uid": userId], provider: .netease, cookie: cookie)
+        let data = try await APIClient.get(
+            "/api/native/netease/user/playlist",
+            query: ["uid": userId, "cookie": cookie],
+            provider: .netease,
+            cookie: nil
+        )
         let decoded = try APIClient.decodeJSON(Resp.self, from: data)
-        return (decoded.playlist ?? []).map {
+        let list = decoded.playlist ?? []
+        return list.map { p in
             Playlist(
-                id: String($0.id),
+                id: String(p.id),
                 provider: .netease,
-                title: $0.name,
-                coverUrl: $0.coverImgUrl,
-                trackCount: $0.trackCount ?? 0,
-                creator: $0.creator?.nickname
+                title: p.name ?? "未命名",
+                coverUrl: p.coverImgUrl,
+                trackCount: p.trackCount ?? 0,
+                creator: p.creator?.nickname
             )
         }
     }
 
-    /// 推荐歌单（未登录也能用）。
+    /// 推荐歌单（无需登录）。
     static func neteaseRecommendPlaylists(cookie: String?) async throws -> [Playlist] {
         struct Resp: Decodable {
             struct P: Decodable {
                 let id: Int
-                let name: String
+                let name: String?
                 let picUrl: String?
-                let playCount: Int?
-                let trackCount: Int?
+                let copywriter: String?
             }
+            let code: Int?
             let result: [P]?
             let recommend: [P]?
         }
-        let data = try await APIClient.get("/api/netease/personalized", provider: .netease, cookie: cookie)
+        var query: [String: String] = [:]
+        if let cookie, !cookie.isEmpty { query["cookie"] = cookie }
+        let data = try await APIClient.get(
+            "/api/native/netease/personalized",
+            query: query,
+            provider: .netease,
+            cookie: nil
+        )
         let decoded = try APIClient.decodeJSON(Resp.self, from: data)
         let list = decoded.result ?? decoded.recommend ?? []
-        return list.map {
+        return list.map { p in
             Playlist(
-                id: String($0.id),
+                id: String(p.id),
                 provider: .netease,
-                title: $0.name,
-                coverUrl: $0.picUrl,
-                trackCount: $0.trackCount ?? 0,
+                title: p.name ?? "未命名",
+                coverUrl: p.picUrl,
+                trackCount: 0,
                 creator: nil
             )
         }
     }
 
-    /// 歌单详情里的所有曲目。
+    /// 歌单详情（含全部曲目）。
     static func neteasePlaylistTracks(id: String, cookie: String) async throws -> [Track] {
         struct Resp: Decodable {
             struct P: Decodable {
                 struct T: Decodable {
                     let id: Int
-                    let name: String
+                    let name: String?
                     let ar: [A]?
                     let al: AL?
                     let dt: Int?
@@ -94,23 +116,24 @@ enum FoliaAPI {
                 }
                 let tracks: [T]?
             }
+            let code: Int?
             let playlist: P?
         }
         let data = try await APIClient.get(
-            "/api/netease/playlist/detail",
-            query: ["id": id],
+            "/api/native/netease/playlist/detail",
+            query: ["id": id, "cookie": cookie],
             provider: .netease,
-            cookie: cookie
+            cookie: nil
         )
         let decoded = try APIClient.decodeJSON(Resp.self, from: data)
         let tracks = decoded.playlist?.tracks ?? []
-        return tracks.map { t -> Track in
+        return tracks.map { t in
             let artists = (t.ar ?? []).compactMap { $0.name }.joined(separator: " / ")
             return Track(
                 id: String(t.id),
                 provider: .netease,
-                title: t.name,
-                artist: artists,
+                title: t.name ?? "未知",
+                artist: artists.isEmpty ? "未知艺人" : artists,
                 album: t.al?.name,
                 coverUrl: t.al?.picUrl,
                 durationMs: t.dt
@@ -122,52 +145,19 @@ enum FoliaAPI {
     static func neteaseSongUrl(id: String, cookie: String) async throws -> URL {
         struct Resp: Decodable {
             struct D: Decodable { let url: String? }
+            let code: Int?
             let data: [D]?
         }
         let data = try await APIClient.get(
-            "/api/netease/song/url",
+            "/api/native/netease/song/url",
             query: ["id": id],
             provider: .netease,
             cookie: cookie
         )
         let decoded = try APIClient.decodeJSON(Resp.self, from: data)
-        guard let urlStr = decoded.data?.first?.url, let url = URL(string: urlStr) else {
-            throw APIClient.APIError.badStatus(404, "no url")
+        guard let urlStr = decoded.data?.first?.url, !urlStr.isEmpty, let url = URL(string: urlStr) else {
+            throw APIClient.APIError.badStatus(404, "song url not available")
         }
         return url
     }
-
-    // MARK: - 波点
-
-    static func bodianRecommendPlaylists(cookie: String?) async throws -> [Playlist] {
-        struct Resp: Decodable {
-            struct P: Decodable {
-                let id: String?
-                let name: String?
-                let img: String?
-                let count: Int?
-            }
-            let list: [P]?
-        }
-        let data = try await APIClient.get(
-            "/api/bodian",
-            query: ["op": "playlists"],
-            provider: .bodian,
-            cookie: cookie
-        )
-        let decoded = try APIClient.decodeJSON(Resp.self, from: data)
-        return (decoded.list ?? []).map {
-            Playlist(
-                id: $0.id ?? UUID().uuidString,
-                provider: .bodian,
-                title: $0.name ?? "未命名",
-                coverUrl: $0.img,
-                trackCount: $0.count ?? 0,
-                creator: nil
-            )
-        }
-    }
-
-    // MARK: - 酷狗 / QQ 暂用占位（这些平台在 Worker 上还不全）
-    // 第一版只让入口「存在但提示敬请期待」，避免承诺做不到的功能。
 }

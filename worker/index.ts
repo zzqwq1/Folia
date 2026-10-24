@@ -203,6 +203,9 @@ const NETEASE_BACKUP_BASE = "https://enclosure-sailing-senate-taken.trycloudflar
 // 用户已把电脑长开（QQ 音乐回退也依赖它），登录优先走这条，其次才是云服务器。
 const HOME_NETEASE_BASE = "https://lion-asks-latinas-paul.trycloudflare.com";
 
+// SPA 真正允许返回 index.html 的路径；其余路径被兜底成 HTML 时一律 404。
+const HTML_ROUTES = new Set(["/", "/index.html"]);
+
 /**
  * 依次尝试主、备基址取数。
  *
@@ -494,6 +497,78 @@ const foliaFetch = async (request: Request, env: Env): Promise<Response> => {
       }
     };
 
+    // 原生 App 专用网易云路由。
+    // 与 /api/netease 的关键差别：不依赖家用/服务器隧道（这两条链路只有用户电脑开着才通），
+    // 全部走 Worker 自带的 weapi 实现，保证 iPhone 上「不打开家里电脑也能登录/拿数据」。
+    // 客户端把 cookie 当 ?cookie=MUSIC_U=xxx 查询参数带过来，这里转进 weapi 的 Cookie 头，
+    // 让原生 App 登录后取「我的歌单」「歌单详情」能拿到用户数据。
+    const nativeNeteaseRoute = async (url: URL): Promise<Response> => {
+      const subPath = url.pathname.slice("/api/native/netease".length) || "/";
+      const params = new URLSearchParams(url.searchParams);
+      const clientCookie = params.get("cookie") ?? "";
+      const jsonHeaders = { "content-type": "application/json; charset=utf-8" };
+      const weapiWithCookie = async (path: string, payload: Record<string, unknown>) => {
+        const { params: p, encSecKey } = await neteaseWeapi({ ...payload, csrf_token: "" });
+        const res = await fetch(`https://music.163.com${path}`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/x-www-form-urlencoded",
+            "referer": "https://music.163.com/",
+            "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+            "cookie": (clientCookie ? clientCookie + "; " : "") + "os=pc; appver=2.9.7; channel=netease;",
+          },
+          body: new URLSearchParams({ params: p, encSecKey }).toString(),
+        });
+        return res.json();
+      };
+
+      try {
+        if (subPath === "/user/account") {
+          const data: any = await weapiWithCookie("/weapi/w/nuser/account/get", {});
+          return new Response(JSON.stringify(data ?? { code: 500, message: "empty" }), { headers: jsonHeaders });
+        }
+        if (subPath === "/user/playlist") {
+          const uid = params.get("uid") ?? "";
+          const data: any = await weapiWithCookie("/weapi/user/playlist", {
+            uid, limit: 1000, offset: 0, includeVideo: true,
+          });
+          return new Response(JSON.stringify(data ?? { code: 500, message: "empty" }), { headers: jsonHeaders });
+        }
+        if (subPath === "/playlist/detail") {
+          const id = params.get("id") ?? "";
+          const data: any = await weapiWithCookie("/weapi/v6/playlist/detail", {
+            id, n: 100000, s: 8,
+          });
+          return new Response(JSON.stringify(data ?? { code: 500, message: "empty" }), { headers: jsonHeaders });
+        }
+        if (subPath === "/personalized") {
+          const data: any = await weapiWithCookie("/weapi/personalized/playlist", {
+            limit: 30, total: true, n: 1000,
+          });
+          return new Response(JSON.stringify(data ?? { code: 500, message: "empty" }), { headers: jsonHeaders });
+        }
+        if (subPath === "/login/qr/key" || subPath === "/login/qr/create" || subPath === "/login/qr/check") {
+          const native = await nativeNetease(subPath, params);
+          if (native) return native;
+          return new Response(JSON.stringify({ code: 500, message: "native qr failed" }), { status: 502, headers: jsonHeaders });
+        }
+        if (subPath === "/song/url" || subPath === "/song/detail") {
+          const native = await nativeNetease(subPath, params);
+          if (native) return native;
+          return new Response(JSON.stringify({ code: 500, message: "native song failed" }), { status: 502, headers: jsonHeaders });
+        }
+        return new Response(JSON.stringify({ code: 404, message: `unknown native netease path: ${subPath}` }), { status: 404, headers: jsonHeaders });
+      } catch (error) {
+        console.error("[worker] native netease route failed:", error);
+        return new Response(JSON.stringify({ code: 500, message: String((error as Error)?.message || error) }), { status: 502, headers: jsonHeaders });
+      }
+    };
+
+    // 原生 App 专用网易云路由挂载点。放在 nativeNeteaseRoute 定义之后。
+    if (url.pathname === "/api/native/netease" || url.pathname.startsWith("/api/native/netease/")) {
+      return await nativeNeteaseRoute(url);
+    }
+
     // 网易云：后端在本机（NeteaseCloudMusicApi）+ Cloudflare Tunnel，前端统一走同源 /api/netease。
     if (url.pathname === "/api/netease" || url.pathname.startsWith("/api/netease/")) {
       const NETEASE_BASE = "https://personals-viewed-bradford-kings.trycloudflare.com/netease";
@@ -643,14 +718,34 @@ const foliaFetch = async (request: Request, env: Env): Promise<Response> => {
     }
 
     const contentType = assetResponse.headers.get("content-type") || "";
+    // 静态资源目录里没有、又被 SPA 兜底成 index.html 的路径（/boot-manifest.json 这种历史残留）：
+    // 必须给 404，不能把 HTML 当资源返回——否则客户端按 JSON 解析直接炸。
+    const spaFallback = contentType.includes("text/html") && !HTML_ROUTES.has(url.pathname);
+    if (spaFallback) {
+      return new Response("Not Found", {
+        status: 404,
+        headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" },
+      });
+    }
+
     // boot-manifest.json 里的文件名每次构建都会变，必须不缓存，否则客户端会预取旧地址。
     if (contentType.includes("text/html") || url.pathname === "/boot-manifest.json") {
       const headers = new Headers(assetResponse.headers);
       headers.set("cache-control", "no-store, no-cache, must-revalidate");
       headers.set("pragma", "no-cache");
+      // 只设 Cache-Control 时 Cloudflare 仍会按默认 TTL 在边缘缓存 HTML（响应头会显示 CF-Cache-Status: HIT），
+      // 用户拿到的还是上一版 index。cdn-cache-control 才是边缘缓存的实际开关。
+      headers.set("cdn-cache-control", "no-store");
+      headers.set("cloudflare-cdn-cache-control", "no-store");
       return new Response(assetResponse.body, { status: assetResponse.status, headers });
     }
-    return assetResponse;
+
+    // 其余静态文件（icon.svg、二维码图片、manifest.webmanifest 等）同文件名内容会变：
+    // 必须让浏览器与边缘每次都回源校验，否则换掉图片/图标后用户永远看到旧的那张。
+    const headers = new Headers(assetResponse.headers);
+    headers.set("cache-control", "no-cache");
+    headers.set("cdn-cache-control", "no-cache");
+    return new Response(assetResponse.body, { status: assetResponse.status, headers });
 };
 
 export default {
