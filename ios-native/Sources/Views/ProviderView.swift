@@ -10,6 +10,7 @@ struct ProviderView: View {
     @State private var errorMessage: String?
     @State private var showLogin = false
     @State private var selectedPlaylist: Playlist?
+    @State private var isShowingDetail = false
 
     private let columns = [
         GridItem(.flexible(), spacing: 16),
@@ -41,6 +42,7 @@ struct ProviderView: View {
                             ForEach(userPlaylists) { p in
                                 PlaylistCard(playlist: p) {
                                     selectedPlaylist = p
+                                    isShowingDetail = true
                                 }
                             }
                         }
@@ -65,6 +67,7 @@ struct ProviderView: View {
                             ForEach(recommendPlaylists) { p in
                                 PlaylistCard(playlist: p) {
                                     selectedPlaylist = p
+                                    isShowingDetail = true
                                 }
                             }
                         }
@@ -76,6 +79,19 @@ struct ProviderView: View {
                 .padding(.top, 8)
             }
             .refreshable { await load() }
+
+            // iOS 16 兼容的 NavigationLink
+            NavigationLink(
+                destination: Group {
+                    if let p = selectedPlaylist {
+                        PlaylistDetailView(playlist: p)
+                    } else {
+                        EmptyView()
+                    }
+                },
+                isActive: $isShowingDetail
+            ) { EmptyView() }
+            .hidden()
         }
         .task { await load() }
         .sheet(isPresented: $showLogin) {
@@ -86,9 +102,6 @@ struct ProviderView: View {
                     await load()
                 }
             })
-        }
-        .navigationDestination(item: $selectedPlaylist) { p in
-            PlaylistDetailView(playlist: p)
         }
     }
 
