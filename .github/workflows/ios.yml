@@ -103,6 +103,8 @@ jobs:
           echo "::notice title=inspect::pbx-embed-script=$(grep -ci 'Embed web dist' FoliaNative.xcodeproj/project.pbxproj || true)"
           echo "::notice title=inspect::pbx-xcassets-keys=$(grep -n 'Assets.xcassets' FoliaNative.xcodeproj/project.pbxproj | head -n 12 | tr '\n' ';')"
           echo "::notice title=inspect::dist-file-count=$(ls dist 2>/dev/null | wc -l | tr -d ' ')"
+          echo "::notice title=inspect::buildlog-actool=$(grep -in 'actool\|AssetCatalog' build.log 2>/dev/null | head -n 25 | tr '\n' ';' || echo none)"
+          echo "::notice title=inspect::buildlog-car=$(grep -in 'Assets.car' build.log 2>/dev/null | head -n 10 | tr '\n' ';' || echo none)"
           APP=$(find . -type d -name '*.app' -path '*Products/Applications*' | head -n 1)
           echo "::notice title=inspect::app-path=$APP"
           if [ -n "$APP" ]; then
