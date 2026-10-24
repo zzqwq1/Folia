@@ -106,9 +106,9 @@ enum BlockTemplates {
         func imul(_ a: Int32, _ b: Int32) -> Int32 {
             a &* b
         }
-        var value = imul(Int32(truncatingIfNeeded: blockColumn), 0x9e37_79b1)
-            ^ imul(Int32(truncatingIfNeeded: blockRow), 0x85eb_ca6b)
-        value = imul(value ^ Int32(bitPattern: UInt32(bitPattern: value) >> 15), 0x2c1b_3c6d)
+        var value = imul(Int32(truncatingIfNeeded: blockColumn), Int32(bitPattern: 0x9e37_79b1))
+            ^ imul(Int32(truncatingIfNeeded: blockRow), Int32(bitPattern: 0x85eb_ca6b))
+        value = imul(value ^ Int32(bitPattern: UInt32(bitPattern: value) >> 15), Int32(bitPattern: 0x2c1b_3c6d))
         value ^= Int32(bitPattern: UInt32(bitPattern: value) >> 12)
         return UInt32(bitPattern: value)
     }
