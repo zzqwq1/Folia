@@ -321,8 +321,8 @@ struct CollectionView: View {
         }
         .padding(.top, 72)
         .transition(.asymmetric(
-            insertion: .opacity.combined(with: .offset(x: -60)).combined(with: .scale(0.95, anchor: .leading)),
-            removal: .opacity.combined(with: .offset(x: -60)).combined(with: .scale(0.95, anchor: .leading))
+            insertion: .opacity.combined(with: .offset(x: -60)).combined(with: .scale(scale: 0.95, anchor: .leading)),
+            removal: .opacity.combined(with: .offset(x: -60)).combined(with: .scale(scale: 0.95, anchor: .leading))
         ))
         .zIndex(8)
     }
@@ -455,8 +455,8 @@ struct CollectionView: View {
         }
         .padding(.top, 72)
         .transition(.asymmetric(
-            insertion: .opacity.combined(with: .offset(x: 60)).combined(with: .scale(0.95, anchor: .trailing)),
-            removal: .opacity.combined(with: .offset(x: 60)).combined(with: .scale(0.95, anchor: .trailing))
+            insertion: .opacity.combined(with: .offset(x: 60)).combined(with: .scale(scale: 0.95, anchor: .trailing)),
+            removal: .opacity.combined(with: .offset(x: 60)).combined(with: .scale(scale: 0.95, anchor: .trailing))
         ))
         .zIndex(8)
     }

@@ -118,9 +118,7 @@ struct HomeView: View {
             if showQueueIsland {
                 QueueIsland()
                     .frame(width: 296)
-                    .transition(
-                        .opacity.combined(with: .scale(0.96, anchor: .bottomTrailing))
-                    )
+                    .transition(.opacity)
             }
             VStack(alignment: .trailing, spacing: 8) {
                 WallToolsPanel(
