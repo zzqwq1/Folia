@@ -9,17 +9,13 @@ targets:
     platform: iOS
     deploymentTarget: "16.0"
     sources:
-      - path: Sources/FoliaNativeApp.swift
-      - path: Sources/Audio
-      - path: Sources/Web
+      - path: Sources
       - path: Assets.xcassets
+    dependencies:
+      - sdk: AVFoundation.framework
+      - sdk: MediaPlayer.framework
+      - sdk: Security.framework
     postBuildScripts:
-      # 前端 dist 体积大且内容多变，用 folder reference 依赖 Xcode 的复制行为不够可控；
-      # 改在构建最后阶段直接把 dist 复制进 app bundle，FoliaLocalServer 从 bundle 的 dist 目录读取。
-      - name: Embed web dist
-        script: |
-          mkdir -p "$TARGET_BUILD_DIR/$FULL_PRODUCT_NAME/dist"
-          cp -R "$SRCROOT/dist/." "$TARGET_BUILD_DIR/$FULL_PRODUCT_NAME/dist/"
       # AppIcon：优先让 Xcode 原生编译 Assets.xcassets（sources 已显式引用）。
       # 若 xcodegen 生成的 resources phase 仍不可靠（历史问题），postBuildScript 兜底手动 actool。
       # 源 AppIcon.png 已去除 alpha（24bpp RGB）。手动 actool 必须传 --output-partial-info-plist，

@@ -7,12 +7,6 @@ on:
     paths:
       - 'ios-native/**'
       - '.github/workflows/ios.yml'
-      - 'vite.config.ts'
-      - 'package.json'
-      - 'package-lock.json'
-      - 'index.html'
-      - 'src/**'
-      - 'public/**'
 
 # 发布 ipa 到 Release 需要 contents: write，否则 GITHUB_TOKEN 默认 read-only 时 gh release create 会 403。
 permissions:
@@ -31,28 +25,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # package.json engines 要求 node >=24；构建前端（原版 1.8.5 界面 + iOS 本地 API 代理 env）。
-      - name: Set up Node.js 24
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-
-      - name: Install frontend dependencies
-        run: npm ci
-
-      - name: Build frontend (iOS)
-        run: npm run build
-        env:
-          IOS_BUILD: '1'
-          VITE_NETEASE_API_BASE: 'http://127.0.0.1:48231/api/netease'
-          VITE_QQ_API_BASE: 'http://127.0.0.1:48231/api/qq'
-          VITE_KUGOU_API_BASE: 'http://127.0.0.1:48231/api/kugou'
-
-      # dist 作为 folder reference 打进 app bundle（project.yml resources 引用 ios-native/dist）。
-      - name: Copy dist into app bundle source
-        run: mkdir -p ios-native/dist && cp -r dist/* ios-native/dist/
-
+      # 纯原生 App：界面是 SwiftUI，音频 AVPlayer，网络直接 URLSession，不再打包前端 dist。
       - name: Install XcodeGen
         run: brew install xcodegen
 
@@ -101,8 +74,6 @@ jobs:
           echo "::notice title=inspect::pbx-buildfile-xcassets=$(grep -c 'Assets.xcassets in Resources' FoliaNative.xcodeproj/project.pbxproj || true)"
           echo "::notice title=inspect::pbx-resources-phase=$(grep -c 'PBXResourcesBuildPhase' FoliaNative.xcodeproj/project.pbxproj || true)"
           echo "::notice title=inspect::pbx-embed-script=$(grep -ci 'Embed web dist' FoliaNative.xcodeproj/project.pbxproj || true)"
-          echo "::notice title=inspect::pbx-xcassets-keys=$(grep -n 'Assets.xcassets' FoliaNative.xcodeproj/project.pbxproj | head -n 12 | tr '\n' ';')"
-          echo "::notice title=inspect::dist-file-count=$(ls dist 2>/dev/null | wc -l | tr -d ' ')"
           echo "::notice title=inspect::buildlog-actool=$(grep -in 'actool\|AssetCatalog' build.log 2>/dev/null | head -n 25 | tr '\n' ';' || echo none)"
           echo "::notice title=inspect::buildlog-car=$(grep -in 'Assets.car' build.log 2>/dev/null | head -n 10 | tr '\n' ';' || echo none)"
           APP=$(find . -type d -name '*.app' -path '*Products/Applications*' | head -n 1)
