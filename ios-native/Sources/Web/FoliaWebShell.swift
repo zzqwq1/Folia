@@ -40,6 +40,9 @@ final class FoliaWebHostController: UIViewController, WKScriptMessageHandler, WK
         webView.backgroundColor = background
         webView.scrollView.backgroundColor = background
         webView.scrollView.bounces = false
+        // 安全区由页面自己按 --folia-safe-* 留白（index.html）：WebKit 若再自动缩一次，
+        // 就成了两份，界面显得被整个顶下去一截。
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
         webView.navigationDelegate = self
         view.addSubview(webView)
 

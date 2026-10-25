@@ -1390,6 +1390,7 @@ export default {
     "caseUnreachable": "Cannot connect to {{provider}}",
     "caseNoAnswer": "{{provider}} not responding",
     "caseRefused": "Sign-in refused by {{provider}}",
+    "noteVerifyInBrowser": "{{provider}} wants a security check first: sign in once at {{url}} in a browser, then come back and scan",
     "caseRetryLater": "{{provider}}: try again later",
     "caseDeviceLimit": "{{provider}}: too many devices signed in",
     "caseWrongScanApp": "The code was scanned with the wrong app",

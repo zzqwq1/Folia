@@ -1390,6 +1390,7 @@ export default {
     "caseUnreachable": "无法连接{{provider}}",
     "caseNoAnswer": "{{provider}}无响应",
     "caseRefused": "登录请求被{{provider}}拒绝",
+    "noteVerifyInBrowser": "网易云要求先完成安全验证：请在浏览器打开 {{url}} 登录一次，再回来扫码",
     "caseRetryLater": "{{provider}}要求稍后再试",
     "caseDeviceLimit": "{{provider}}账号登录的设备已达上限",
     "caseWrongScanApp": "扫码用的 App 和登录方式对不上",

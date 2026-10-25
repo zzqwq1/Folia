@@ -1390,6 +1390,7 @@ export default {
     "caseUnreachable": "Tidak dapat terhubung ke {{provider}}",
     "caseNoAnswer": "{{provider}} tidak merespons",
     "caseRefused": "Proses masuk ditolak oleh {{provider}}",
+    "noteVerifyInBrowser": "{{provider}} meminta verifikasi keamanan: masuk sekali di {{url}} lewat browser, lalu kembali dan pindai lagi",
     "caseRetryLater": "{{provider}}: coba lagi nanti",
     "caseDeviceLimit": "{{provider}}: terlalu banyak perangkat yang masuk",
     "caseWrongScanApp": "Kode dipindai dengan aplikasi yang salah",

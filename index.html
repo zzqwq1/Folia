@@ -316,27 +316,21 @@
         padding-bottom: var(--folia-safe-bottom, env(safe-area-inset-bottom, 0px));
         padding-left: var(--folia-safe-left, env(safe-area-inset-left, 0px));
       }
+      /* 界面本身按桌面版的 pt 尺寸排，在手机上显得太大。整页缩到 86%，再按放大的倍数把尺寸要回来：
+         元素都还是原来的版式，只是所有 px 尺寸一起变小。没有设置 overflow 的滚动容器要靠这多出来的一截，
+         否则 14% 的内容会被裁掉，所以显式写滚动容器的宽度会一并收在下面。 */
+      html[data-folia-ios='1'][data-folia-compact='1'] #root > div {
+        box-sizing: border-box;
+        width: calc(100% / 0.86);
+        height: calc(100% / 0.86);
+        transform: scale(0.86);
+      }
       html[data-folia-ios='1'] #root {
         background: #09090b;
       }
       /* 扫码登录的二维码：接口没给 data: 前缀时只有裸 base64，补上前缀，否则是一片空白 */
       html[data-folia-ios='1'] img[data-folia-b64='1'] {
         background: #fff;
-      }
-    </style>
-    <style>
-      /* 手机上的排版密度：桌面版的字号、间距按大屏排，440pt 宽的屏上显得「太大了」。这里只收密度、不动版式，
-         并且只在「根视口宽度小于 560pt、且没有被页面自己的缩放放大过」的 iPhone 上生效：
-         页面若自带按窗口缩放的倍率（root 的 font-size 与 16px 不同），说明尺寸已经由它定，这里不再动。
-         点按区域仍不小于 44px。 */
-      @media (max-width: 559px) {
-        html[data-folia-ios='1'][data-folia-compact='1'] {
-          font-size: 88%;
-        }
-        html[data-folia-ios='1'][data-folia-compact='1'] button,
-        html[data-folia-ios='1'][data-folia-compact='1'] [role='button'] {
-          min-height: 44px;
-        }
       }
     </style>
     <script>
@@ -391,11 +385,11 @@
           };
         }
 
-        // 排版密度是否由这里定：页面自己的根字号仍是初始的 16px（例如按窗口缩放的样式表会把它改掉）。
+        // 手机上把整页缩到 86%（见上面的 CSS）：只在 iPhone 这种窄屏上做，iPad 与桌面版不动。
         function decideCompact() {
-          var base = parseFloat(window.getComputedStyle(root).fontSize);
-          var untouched = !(base > 0) || Math.abs(base - 16) < 0.6;
-          if (untouched) root.setAttribute('data-folia-compact', '1');
+          var w = window.innerWidth || root.clientWidth;
+          var phone = !/iPad/i.test(ua) && Math.min(w, window.innerHeight || root.clientHeight) < 560;
+          if (phone) root.setAttribute('data-folia-compact', '1');
           else root.removeAttribute('data-folia-compact');
         }
 

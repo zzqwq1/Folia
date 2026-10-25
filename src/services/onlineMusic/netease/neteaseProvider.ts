@@ -443,7 +443,11 @@ export const neteaseProvider: OnlineMusicProvider = {
             title: 'home.loginTitle',
             note: 'home.loginNote',
             // 扫过码却没等到确认：码在网易云那边仍有效，说清「再等一等」比说「过期了」实在。
-            caseNotes: { 'expired-after-scan': 'login.noteConfirmOnPhone' },
+            // 被拒：网易云的 -462 是风控要人先过安全验证，扫码这条路走不通，得说清去哪过。
+            caseNotes: {
+                'expired-after-scan': 'login.noteConfirmOnPhone',
+                refused: 'login.noteVerifyInBrowser',
+            },
         }),
         localService: neteaseLocalService,
         async getLoginStatus() {

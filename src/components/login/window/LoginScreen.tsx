@@ -101,7 +101,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
     if (scene === 'failed' && failure && providerId) {
         const noteKey = failureNoteKey(failure, texts?.caseNotes);
         headline = t(LOGIN_CASE_TEXTS[failure.case.id].title, { provider: label });
-        note = noteKey ? t(noteKey) : undefined;
+        note = noteKey ? t(noteKey, { provider: label, url: 'music.163.com' }) : undefined;
         const said = failureQuote(failure, service?.error ?? null);
         if (said) quote = { who: label, ...said };
         if (failure.case.action === 'reopen-browser') {
