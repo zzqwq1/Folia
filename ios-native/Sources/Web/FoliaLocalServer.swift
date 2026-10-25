@@ -13,12 +13,21 @@ final class FoliaLocalServer {
     private let queue = DispatchQueue(label: "folia.local.server")
     private var listener: NWListener?
     private let session: URLSession
+    /// 登录相关的请求单独一条会话：禁缓存、超时放宽到登录轮询能接受的范围。
+    private let loginSession: URLSession
 
     private init() {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 60
         config.timeoutIntervalForResource = 120
         session = URLSession(configuration: config)
+
+        let loginConfig = URLSessionConfiguration.ephemeral
+        loginConfig.timeoutIntervalForRequest = 20
+        loginConfig.timeoutIntervalForResource = 30
+        loginConfig.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        loginConfig.httpCookieStorage = nil
+        loginSession = URLSession(configuration: loginConfig)
     }
 
     func start() {
@@ -59,6 +68,9 @@ final class FoliaLocalServer {
         let headers: [String: String]
         let body: Data
     }
+
+    /// 同一个 URL 只建一次：登录轮询 2 秒打一次，每次新建 URL 会让底层没有机会复用连接。
+    private var targetCache: [String: URL] = [:]
 
     /// 一条响应可以带多个 `Set-Cookie`：按字典收发会把它们合成一行、后写的盖掉先写的，登录态那一枚可能就丢了。
     private struct HTTPReply {
@@ -163,14 +175,27 @@ final class FoliaLocalServer {
 
     private func proxy(_ request: HTTPRequest, on connection: NWConnection) {
         let forwardPath = request.path // path 与 query 一起原样转发，避免 query 里的转义被二次编码。
-        guard let target = URL(string: upstream + forwardPath) else {
+        let targetKey = upstream + forwardPath
+        let target: URL
+        if let cached = targetCache[targetKey] {
+            target = cached
+        } else if let built = URL(string: targetKey) {
+            target = built
+            targetCache[targetKey] = built
+        } else {
             sendResponse(status: 400, headers: ["Content-Type": "text/plain"], body: Data("bad path".utf8), on: connection)
             return
         }
 
+        // 登录三步（扫码取 key / 出图 / 轮询）最怕被缓存成旧答案：用固定 URL 再叠 no-cache，
+        // 有些网关按 URL 命中缓存，no-store 反而不起作用。
+        let isLogin = forwardPath.contains("/login")
+        let noCache = isLogin || request.headers["cache-control"]?.contains("no-cache") == true
+
         var urlRequest = URLRequest(url: target)
         urlRequest.httpMethod = request.method
         urlRequest.httpBody = request.body.isEmpty ? nil : request.body
+        urlRequest.httpShouldHandleCookies = false
         let bodyMethod = ["POST", "PUT", "PATCH"].contains(request.method)
         for (key, value) in request.headers {
             if hopByHopHeaders.contains(key) { continue }
@@ -181,14 +206,21 @@ final class FoliaLocalServer {
             if key == "origin" { continue }
             // fetch 的 keepalive / sec-* 头在代理连接上无意义。
             if key.hasPrefix("sec-") { continue }
+            // 本机的 cookie（WKWebView 存的那份）不该覆盖上游自己的会话：登录态由前端用
+            // `?cookie=` 显式带上（netease.ts 的 fetchWithCreds），这里转发 cookie 头只会串味。
+            if key == "cookie" { continue }
             urlRequest.setValue(value, forHTTPHeaderField: key)
         }
         if bodyMethod && request.headers["content-type"] == nil {
             urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
+        if noCache {
+            urlRequest.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+            urlRequest.setValue("no-cache", forHTTPHeaderField: "Pragma")
+        }
 
         let startedAt = Date()
-        session.dataTask(with: urlRequest) { [weak self] data, response, error in
+        let task = (isLogin ? loginSession : session).dataTask(with: urlRequest) { [weak self] data, response, error in
             guard let self else { return }
             let httpResponse = response as? HTTPURLResponse
             let elapsed = Int(Date().timeIntervalSince(startedAt) * 1000)
@@ -234,7 +266,8 @@ final class FoliaLocalServer {
             }
             let body = data ?? Data()
             self.sendResponse(status: status, headers: headers, cookies: cookies, body: body, on: connection)
-        }.resume()
+        }
+        task.resume()
     }
 
     /// 登录态那一枚 cookie 的名字（网易云 MUSIC_U、QQ 的 qm_keyst、酷狗 kg_mid 等），只用来打日志。

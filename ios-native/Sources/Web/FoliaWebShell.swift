@@ -177,14 +177,88 @@ final class FoliaWebHostController: UIViewController, WKScriptMessageHandler, WK
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         NSLog("[FoliaWebShell] loaded %@", webView.url?.absoluteString ?? "?")
         probeLoginApi()
+        logApiBase()
+        installLoginDiagnostics()
     }
 
-    /// 启动时打一次登录接口：从页面自己的源发一条真实的跨域请求，日志里能看到它到底通没通，
-    /// 不用等用户点开登录窗口才知道。
+    /// 只读系统日志也能看出前端实际用的 API 地址：CI 注入的是 `http://127.0.0.1:48231/api/*`。
+    private func logApiBase() {
+        let script = """
+        (function() {
+          try {
+            var cfg = window.__FOLIA_RUNTIME_CONFIG__ || {};
+            console.log('[FoliaBase] ' + JSON.stringify({ origin: location.origin, href: location.href, runtime: cfg }));
+          } catch (e) { console.log('[FoliaBase] unreadable ' + e); }
+        })();
+        """
+        webView.evaluateJavaScript(script, completionHandler: nil)
+    }
+
+    /// 登录失败时把前面的请求日志直接铺在页面上：没有 Mac 抓日志，只能让手机自己说。
+    private func installLoginDiagnostics() {
+        let source = """
+        (function() {
+          if (window.__foliaLoginDiag) return;
+          window.__foliaLoginDiag = true;
+          var log = [];
+          function now() {
+            var d = new Date();
+            return ('0' + d.getMinutes()).slice(-2) + ':' + ('0' + d.getSeconds()).slice(-2);
+          }
+          var origFetch = window.fetch;
+          window.fetch = function(input, init) {
+            var url = typeof input === 'string' ? input : (input && input.url) || '';
+            var started = Date.now();
+            var entry = { url: url, t: now() };
+            log.push(entry);
+            if (log.length > 40) log.shift();
+            return origFetch.apply(this, arguments).then(function(res) {
+              entry.status = res.status;
+              entry.ms = Date.now() - started;
+              entry.ct = res.headers.get('content-type') || '';
+              try {
+                res.clone().text().then(function(text) {
+                  entry.body = text.slice(0, 240);
+                  paint();
+                }).catch(function() {});
+              } catch (e) {}
+              paint();
+              return res;
+            }).catch(function(err) {
+              entry.status = 'ERR';
+              entry.ms = Date.now() - started;
+              entry.body = String(err && err.message ? err.message : err);
+              paint();
+              throw err;
+            });
+          };
+          var box = null;
+          function paint() {
+            if (!box || !box.isConnected) {
+              box = document.createElement('pre');
+              box.setAttribute('data-folia-diag', '1');
+              box.style.cssText = 'position:fixed;left:0;right:0;bottom:0;max-height:45%;overflow:auto;'
+                + 'margin:0;padding:8px 10px;z-index:2147483647;font:10px/1.35 -apple-system,Menlo,monospace;'
+                + 'background:rgba(0,0,0,.88);color:#9ae6b4;white-space:pre-wrap;word-break:break-all;';
+              box.addEventListener('dblclick', function() { box.remove(); box = null; });
+              document.body.appendChild(box);
+            }
+            box.textContent = log.map(function(e) {
+              return e.t + ' ' + (e.status === undefined ? '…' : e.status) + ' ' + (e.ms || 0) + 'ms '
+                + e.url.replace('http://127.0.0.1:48231', '') + (e.body ? '\\n    ' + e.body : '');
+            }).join('\\n') + '\\n\\n(双击关闭)';
+          }
+        })();
+        """
+        webView.evaluateJavaScript(source, completionHandler: nil)
+    }
+
+    /// 启动时打一次登录接口：从页面自己的源发一条真实的请求，日志里能看到它到底通没通，
+    /// 不用等用户点开登录窗口才知道。直连代理本机地址，不经过前端的 base 拼接。
     private func probeLoginApi() {
         let script = """
         (function() {
-          fetch('/api/netease/login/qr/key?timestamp=' + Date.now(), { credentials: 'include' })
+          fetch('http://127.0.0.1:48231/api/netease/login/qr/key?timestamp=' + Date.now())
             .then(function(r) {
               console.log('[FoliaProbe] netease qr key HTTP ' + r.status);
               return r.text();
