@@ -45,9 +45,9 @@ jobs:
         run: npm run build
         env:
           IOS_BUILD: '1'
-          VITE_NETEASE_API_BASE: 'http://127.0.0.1:48231/netease'
-          VITE_QQ_API_BASE: 'http://127.0.0.1:48231/qq'
-          VITE_KUGOU_API_BASE: 'http://127.0.0.1:48231/kugou'
+          VITE_NETEASE_API_BASE: 'http://127.0.0.1:48231/api/netease'
+          VITE_QQ_API_BASE: 'http://127.0.0.1:48231/api/qq'
+          VITE_KUGOU_API_BASE: 'http://127.0.0.1:48231/api/kugou'
 
       # dist 作为 folder reference 打进 app bundle（project.yml resources 引用 ios-native/dist）。
       - name: Copy dist into app bundle source
