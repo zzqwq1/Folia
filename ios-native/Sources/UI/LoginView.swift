@@ -15,6 +15,8 @@ struct LoginView: View {
     @State private var scene: Scene = .preparing
     /// 失败原因（原版平台或本地服务的原话）
     @State private var failureText = ""
+    /// 失败时平台给的码（网易云 -462 这类风控码要据此给「去浏览器验证」）
+    @State private var failureCode: Int = 0
     @State private var pollTask: Task<Void, Never>?
 
     /// 原版登录的几种样子（loginView.ts 里跟扫码有关的那几个）
@@ -264,6 +266,24 @@ struct LoginView: View {
     private var actions: some View {
         HStack(spacing: 8) {
             if scene == .expired || scene == .failed {
+                if needsWebVerification {
+                    Button {
+                        if let url = URL(string: "https://music.163.com") {
+                            UIApplication.shared.open(url)
+                        }
+                    } label: {
+                        Text("在浏览器登录一次")
+                            .font(.system(size: M.actionSize))
+                            .foregroundStyle(C.win)
+                            .padding(.horizontal, M.actionInset)
+                            .frame(height: M.actionH)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(C.accent)
+                            )
+                    }
+                    .buttonStyle(LoginActionPressStyle())
+                }
                 Button {
                     start()
                 } label: {
@@ -319,9 +339,21 @@ struct LoginView: View {
         case .scanned: return nil
         case .success: return nil
         case .expired: return "点中间的圆钮换一张新的二维码。"
-        case .failed: return failureText
+        case .failed:
+            if needsWebVerification {
+                return "网易云要求先完成安全验证：请在浏览器打开 music.163.com 登录一次，再回来扫码。\n\(failureText)"
+            }
+            return failureText
         }
     }
+
+    /// 网易云的风控拒绝（-462 请完成验证操作 / -460 / 8821）：扫码这条路走不通，得先去网页版过一次安全验证。
+    /// 与桌面端一致（neteaseProvider.ts 的 caseNotes.refused → login.noteVerifyInBrowser）。
+    private var needsWebVerification: Bool {
+        scene == .failed && Self.riskControlCodes.contains(failureCode)
+    }
+
+    private static let riskControlCodes: Set<Int> = [-462, -460, 8821]
 
     // MARK: - 扫码流程
 
@@ -374,6 +406,7 @@ struct LoginView: View {
                 return
             case .failed(let reason):
                 failureText = reason
+                failureCode = await NeteaseAPI.shared.lastQRCode()
                 scene = .failed
                 return
             }

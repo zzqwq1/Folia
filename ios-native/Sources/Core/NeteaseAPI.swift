@@ -175,11 +175,16 @@ actor NeteaseAPI {
         case failed(String)
     }
 
+    /// 最近一次扫码轮询里网易云给的码（-462 风控等要据此提示「先去浏览器验证」）
+    private var lastQRCodeValue = 0
+    func lastQRCode() -> Int { lastQRCodeValue }
+
     /// 扫码第三步：轮询。803 时把 cookie 存下来，后续请求带上。
     func checkQR(key: String) async -> QRState {
         guard let json = try? await get("/login/qr/check", query: ["key": key], needsTimestamp: true, allowAnonymous: false) else {
             return .failed("网络异常，稍后重试")
         }
+        lastQRCodeValue = (json["code"] as? NSNumber)?.intValue ?? 0
         switch (json["code"] as? NSNumber)?.intValue {
         case 800: return .expired
         case 801: return .waiting
