@@ -233,6 +233,7 @@ final class FoliaWebHostController: UIViewController, WKScriptMessageHandler, WK
             });
           };
           var box = null;
+          var server = [];
           function paint() {
             if (!box || !box.isConnected) {
               box = document.createElement('pre');
@@ -246,8 +247,28 @@ final class FoliaWebHostController: UIViewController, WKScriptMessageHandler, WK
             box.textContent = log.map(function(e) {
               return e.t + ' ' + (e.status === undefined ? '…' : e.status) + ' ' + (e.ms || 0) + 'ms '
                 + e.url.replace('http://127.0.0.1:48231', '') + (e.body ? '\\n    ' + e.body : '');
-            }).join('\\n') + '\\n\\n(双击关闭)';
+            }).join('\\n')
+              + '\\n\\n--- 本机代理（原生侧日志）---\\n'
+              + (server.length ? server.join('\\n') : '(空：请求没有到达本机服务器)')
+              + '\\n\\n(双击关闭)';
           }
+          // 本机代理自己的记录：能看到请求到没到、上游回了什么、失败在哪个错误码。
+          function pollServer() {
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', '/__folia/diag?t=' + Date.now(), true);
+            xhr.onload = function() {
+              try {
+                var json = JSON.parse(xhr.responseText);
+                if (json && json.events) {
+                  server = json.events.slice(-40);
+                  paint();
+                }
+              } catch (e) {}
+            };
+            xhr.send();
+          }
+          setInterval(pollServer, 2000);
+          pollServer();
         })();
         """
         webView.evaluateJavaScript(source, completionHandler: nil)

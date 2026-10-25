@@ -29,6 +29,9 @@ const isMisplacedLoopbackApi = (remoteBase: string): boolean => {
     try {
         const api = new URL(remoteBase, window.location.href);
         if (!isLoopbackHost(api.hostname)) return false;
+        // 页面自己就由同一个本机地址提供：那是 App 内置的本地代理（iOS 原生壳里 dist 与 /api 同源），
+        // 不是照抄配置留下的错误地址。
+        if (api.origin === window.location.origin) return false;
         const userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent;
         return !isLoopbackHost(window.location.hostname) || MOBILE_UA.test(userAgent);
     } catch {

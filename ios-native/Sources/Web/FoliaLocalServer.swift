@@ -46,9 +46,50 @@ final class FoliaLocalServer {
             }
             listener.start(queue: queue)
             self.listener = listener
+            record("server listening on 127.0.0.1:\(port), upstream \(upstream)")
+            probeUpstreamOnce()
         } catch {
             NSLog("[FoliaLocalServer] failed to start on %d: %@", port, String(describing: error))
         }
+    }
+
+    // ---- 现场诊断 ----
+    // 设备上没有 Mac 抓日志：把每次请求与上游往返的结果留在内存里，页面通过 `/__folia/diag` 取走并显示。
+    // 静态文件加载成功只说明本机服务器活着，登录成败要看这里的落点。
+
+    private let diagQueue = DispatchQueue(label: "folia.local.diag")
+    private var diagEvents: [String] = []
+
+    private func record(_ line: String) {
+        NSLog("[FoliaLocalServer] %@", line)
+        diagQueue.sync {
+            diagEvents.append(line)
+            if diagEvents.count > 200 { diagEvents.removeFirst(diagEvents.count - 200) }
+        }
+    }
+
+    private func diagSnapshot() -> [String] {
+        diagQueue.sync { diagEvents }
+    }
+
+    /// 绕开 WKWebView，用原生 URLSession 直连一次上游登录接口：
+    /// 通了说明网络没问题、问题在本机代理与页面之间；不通就是这台设备到上游的路由/DNS/TLS 有问题。
+    private func probeUpstreamOnce() {
+        guard let url = URL(string: "\(upstream)/api/netease/login/qr/key") else { return }
+        let startedAt = Date()
+        var request = URLRequest(url: url)
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        session.dataTask(with: request) { [weak self] data, response, error in
+            guard let self else { return }
+            let elapsed = Int(Date().timeIntervalSince(startedAt) * 1000)
+            if let error = error as NSError? {
+                self.record("upstream probe FAILED in \(elapsed)ms: \(error.domain) \(error.code) \(error.localizedDescription)")
+                return
+            }
+            let http = response as? HTTPURLResponse
+            let encoding = http?.allHeaderFields["Content-Encoding"] as? String ?? "-"
+            self.record("upstream probe -> \(http?.statusCode ?? 0) in \(elapsed)ms bytes=\(data?.count ?? 0) contentEncoding=\(encoding)")
+        }.resume()
     }
 
     private func accept(_ connection: NWConnection) {
@@ -132,12 +173,23 @@ final class FoliaLocalServer {
     // ---- 路由 ----
 
     private func process(_ request: HTTPRequest, on connection: NWConnection) {
-        NSLog("[FoliaLocalServer] %@ %@", request.method, request.path)
+        record("\(request.method) \(request.path)")
         guard let url = URL(string: "http://127.0.0.1\(request.path)") else {
             sendResponse(status: 400, headers: ["Content-Type": "text/plain"], body: Data("bad request".utf8), on: connection)
             return
         }
         let pathOnly = url.path
+
+        // 页面取诊断用；带 `*` 的 CORS 头，页面从任意源都能读。
+        if pathOnly == "/__folia/diag" {
+            let json = (try? JSONSerialization.data(withJSONObject: ["events": diagSnapshot()], options: [])) ?? Data("{}".utf8)
+            sendResponse(status: 200, headers: [
+                "Content-Type": "application/json; charset=utf-8",
+                "Access-Control-Allow-Origin": "*",
+                "Cache-Control": "no-store",
+            ], body: json, on: connection)
+            return
+        }
 
         if request.method == "OPTIONS" {
             // 预检：页面跨源访问本服务器时，不带这几个头整个请求就会被浏览器拦下。
@@ -225,12 +277,20 @@ final class FoliaLocalServer {
             let httpResponse = response as? HTTPURLResponse
             let elapsed = Int(Date().timeIntervalSince(startedAt) * 1000)
             if let error {
-                NSLog("[FoliaLocalServer] proxy %@ %@ failed in %dms: %@", request.method, target.path, elapsed, String(describing: error))
+                let e = error as NSError
+                self.record("proxy FAILED \(request.method) \(target.path) in \(elapsed)ms: \(e.domain) \(e.code) \(e.localizedDescription)")
                 self.sendResponse(status: 502, headers: ["Content-Type": "application/json"],
                                   body: Data(#"{"code":502,"msg":"proxy failed"}"#.utf8), on: connection)
                 return
             }
             let status = httpResponse?.statusCode ?? 502
+            let rawBody = data ?? Data()
+            // URLSession 谈好压缩后会自己把体解压好，但响应头往往是上游原样：解压后的 JSON 配上
+            // `Content-Encoding: gzip`，WebKit 会再解一次压，直接 `TypeError: Load failed`。
+            // 只有确认交回来的仍是压缩体（gzip 魔数 1f 8b）时才保留这枚头。
+            let bodyIsCompressed = rawBody.count >= 2
+                && rawBody[rawBody.startIndex] == 0x1f
+                && rawBody[rawBody.startIndex + 1] == 0x8b
             var headers: [String: String] = [:]
             var cookies: [String] = []
             if let all = httpResponse?.allHeaderFields as? [String: Any] {
@@ -238,8 +298,13 @@ final class FoliaLocalServer {
                     let keyLower = key.lowercased()
                     if self.hopByHopHeaders.contains(keyLower) { continue }
                     if keyLower == "content-length" { continue }
+                    if keyLower == "content-encoding" && !bodyIsCompressed { continue }
                     if keyLower == "set-cookie" {
-                        if let one = value as? String { cookies.append(one) }
+                        if let one = value as? String {
+                            cookies.append(one)
+                        } else if let many = value as? [String] {
+                            cookies.append(contentsOf: many)
+                        }
                         continue
                     }
                     // CORS 头由下面按同源重写：上游给的是 app.folia-api.top 的那份，留着会和页面自己的源打架。
@@ -260,11 +325,13 @@ final class FoliaLocalServer {
             }
             headers["Vary"] = "Origin"
             if cookies.contains(where: { Self.isSessionCookie($0) }) {
-                NSLog("[FoliaLocalServer] proxy %@ %@ -> %d, session cookie from upstream", request.method, target.path, status)
+                self.record("proxy \(request.method) \(target.path) -> \(status) in \(elapsed)ms, session cookie from upstream")
             } else {
-                NSLog("[FoliaLocalServer] proxy %@ %@ -> %d in %dms", request.method, target.path, status, elapsed)
+                let encoding = httpResponse?.allHeaderFields["Content-Encoding"] as? String ?? "-"
+                let type = httpResponse?.allHeaderFields["Content-Type"] as? String ?? "-"
+                self.record("proxy \(request.method) \(target.path) -> \(status) in \(elapsed)ms bytes=\(data?.count ?? 0) type=\(type) enc=\(encoding)")
             }
-            let body = data ?? Data()
+            let body = rawBody
             self.sendResponse(status: status, headers: headers, cookies: cookies, body: body, on: connection)
         }
         task.resume()
