@@ -384,6 +384,7 @@ private struct QueueIsland: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+}
 
 // MARK: - 浮岛的一行
 
