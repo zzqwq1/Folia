@@ -1384,6 +1384,7 @@ export default {
     "kindUnknown": "Kesalahan tidak diketahui",
     "caseCodeExpired": "Kode QR sudah kedaluwarsa",
     "caseNotConfirmed": "Belum dikonfirmasi di ponsel",
+    "noteConfirmOnPhone": "Kode QR masih berlaku: selesaikan konfirmasi di ponsel dan biarkan jendela ini terbuka",
     "caseUnfinished": "Proses masuk belum selesai",
     "caseNotAuthorized": "Tidak diizinkan",
     "caseUnreachable": "Tidak dapat terhubung ke {{provider}}",

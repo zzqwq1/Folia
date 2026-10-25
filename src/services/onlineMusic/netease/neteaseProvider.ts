@@ -439,7 +439,12 @@ export const neteaseProvider: OnlineMusicProvider = {
     },
     lyrics: { getLyrics, getChorusRanges: getNeteaseChorusRanges },
     auth: {
-        getLoginTexts: () => ({ title: 'home.loginTitle', note: 'home.loginNote' }),
+        getLoginTexts: () => ({
+            title: 'home.loginTitle',
+            note: 'home.loginNote',
+            // 扫过码却没等到确认：码在网易云那边仍有效，说清「再等一等」比说「过期了」实在。
+            caseNotes: { 'expired-after-scan': 'login.noteConfirmOnPhone' },
+        }),
         localService: neteaseLocalService,
         async getLoginStatus() {
             cookieAskedWith = readProviderSessionValue('netease', 'cookie', ['netease_cookie']);

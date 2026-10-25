@@ -25,8 +25,9 @@ import {
 //   3. 就绪：显示二维码；在浏览器里确认的当场打开登录的页面（provider 自己打开的除外，打不开说是一种情况，登录接着等）；
 //      声明了有效期的 provider 由前端计时（到期先停轮询并 keyed 取消，再报「已过期」）；
 //   4. 轮询：上一次结算后 2 秒才发下一次，不会重叠。网络层的瞬时失败（transient，码在平台那边仍有效）连续
-//      PROVIDER_LOGIN_TRANSIENT_POLL_LIMIT 次以内照常接着轮询，超过才算失败。扫过码、停在已扫码一分钟还没确认，
-//      就当这一次没有确认、到期结束（平台不一定会自己报过期）；回到等待扫码就重新算；
+//      PROVIDER_LOGIN_TRANSIENT_POLL_LIMIT 次以内照常接着轮询，超过才算失败。扫过码、停在已扫码
+//      PROVIDER_LOGIN_SCANNED_LIMIT_MS 还没确认，就当这一次没有确认、到期结束（平台不一定会自己报过期）；
+//      回到等待扫码就重新算；
 //   5. 确认：会话已换成登录凭据，不再取消（后端要让在途轮询继续读到确认）；确认回调（读账号）返回 false
 //      记为 account-refresh-failed；
 //   6. 失败：停掉计时器，按事实分出是哪一种情况（services/onlineMusic/login/loginFailureCase），然后自动跑一次
@@ -42,10 +43,11 @@ export const PROVIDER_LOGIN_POLL_INTERVAL_MS = 2000;
 export const PROVIDER_LOGIN_TRANSIENT_POLL_LIMIT = 2;
 
 /**
- * 扫过码、停在已扫码这么久还没有确认，就当这一次没有确认、到期结束。平台不一定会自己报过期：2026-10-16
- * 的日志里，扫码之后平台一直回「已扫码」，3 分 46 秒里没有一次过期；确认只用了 2 秒。
+ * 扫过码、停在已扫码这么久还没有确认，就当这一次没有确认、到期结束。平台不一定会自己报过期，要有这一道兜底。
+ * 时限不能短：在手机上扫码之后往往要切按钮、还要过密码或验证码（2026-10-25 手机上确认得慢，一分钟就把已经
+ * 在确认的码判成了过期），而二维码本身三分钟左右才过期，等它自己报过期更准。
  */
-export const PROVIDER_LOGIN_SCANNED_LIMIT_MS = 60_000;
+export const PROVIDER_LOGIN_SCANNED_LIMIT_MS = 180_000;
 
 /** 生成诊断报告时最多等还在跑的自检多久（自检的每一项都有自己的超时，正常十秒内结束）。 */
 const SELF_CHECK_REPORT_WAIT_MS = 15_000;

@@ -308,15 +308,35 @@
         -webkit-tap-highlight-color: transparent;
         overscroll-behavior: none;
       }
+      /* 安全区交给 app 的根容器留白：顶上让出灵动岛/状态栏，底下让出 Home 条，底色和界面一致 */
       html[data-folia-ios='1'] #root > div {
+        box-sizing: border-box;
         padding-top: var(--folia-safe-top, env(safe-area-inset-top, 0px));
         padding-right: var(--folia-safe-right, env(safe-area-inset-right, 0px));
         padding-bottom: var(--folia-safe-bottom, env(safe-area-inset-bottom, 0px));
         padding-left: var(--folia-safe-left, env(safe-area-inset-left, 0px));
       }
+      html[data-folia-ios='1'] #root {
+        background: #09090b;
+      }
       /* 扫码登录的二维码：接口没给 data: 前缀时只有裸 base64，补上前缀，否则是一片空白 */
       html[data-folia-ios='1'] img[data-folia-b64='1'] {
         background: #fff;
+      }
+    </style>
+    <style>
+      /* 手机上的排版密度：桌面版的字号、间距按大屏排，440pt 宽的屏上显得「太大了」。这里只收密度、不动版式，
+         并且只在「根视口宽度小于 560pt、且没有被页面自己的缩放放大过」的 iPhone 上生效：
+         页面若自带按窗口缩放的倍率（root 的 font-size 与 16px 不同），说明尺寸已经由它定，这里不再动。
+         点按区域仍不小于 44px。 */
+      @media (max-width: 559px) {
+        html[data-folia-ios='1'][data-folia-compact='1'] {
+          font-size: 88%;
+        }
+        html[data-folia-ios='1'][data-folia-compact='1'] button,
+        html[data-folia-ios='1'][data-folia-compact='1'] [role='button'] {
+          min-height: 44px;
+        }
       }
     </style>
     <script>
@@ -371,6 +391,14 @@
           };
         }
 
+        // 排版密度是否由这里定：页面自己的根字号仍是初始的 16px（例如按窗口缩放的样式表会把它改掉）。
+        function decideCompact() {
+          var base = parseFloat(window.getComputedStyle(root).fontSize);
+          var untouched = !(base > 0) || Math.abs(base - 16) < 0.6;
+          if (untouched) root.setAttribute('data-folia-compact', '1');
+          else root.removeAttribute('data-folia-compact');
+        }
+
         function apply() {
           var envValue = probeEnv();
           var guess = measured();
@@ -383,10 +411,14 @@
         }
 
         apply();
+        decideCompact();
         window.addEventListener('resize', apply);
         window.addEventListener('orientationchange', apply);
         if (window.visualViewport) window.visualViewport.addEventListener('resize', apply);
-        document.addEventListener('DOMContentLoaded', apply);
+        document.addEventListener('DOMContentLoaded', function () {
+          apply();
+          decideCompact();
+        });
 
         // 扫码登录的图片：npm 版接口回的是完整 dataURL，某些代理/自建服务只回裸 base64，
         // <img> 拿到裸 base64 会显示空白。这里补上 data: 前缀，PNG/JPEG 按魔数判断。
