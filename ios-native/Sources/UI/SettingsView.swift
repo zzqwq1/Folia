@@ -141,7 +141,7 @@ struct SettingsView: View {
     }
 
     private func closeLogin() {
-        withAnimation(moveAnimation) { showLogin = false }
+        withAnimation(SettingsView.moveAnimation) { showLogin = false }
     }
 
     // MARK: - Sheet 页头

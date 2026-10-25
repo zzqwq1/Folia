@@ -1,5 +1,6 @@
 import Foundation
 import CommonCrypto
+import Compression
 
 /// QQ 音乐。照 `src/services/onlineMusic/qq/` 的 transport / normalize / provider 三段移植：
 ///

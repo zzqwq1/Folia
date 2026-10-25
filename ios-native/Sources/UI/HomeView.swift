@@ -99,7 +99,6 @@ struct HomeView: View {
             LatticeWallView(
                 items: items,
                 theme: theme,
-                sections: wallSections,
                 lightsOut: isLightsOut,
                 hasPosterTint: isTintEnabled,
                 autoFocusOnSongChange: mode == .queue,
@@ -107,6 +106,7 @@ struct HomeView: View {
                 emptyText: mode == .queue
                     ? "开始播放任意歌曲后，队列会在这里铺开。"
                     : "在设置里扫码登录网易云 / QQ / 酷狗 / 波点，墙面就会铺满你的收藏。",
+                sections: wallSections,
                 toolbar: AnyView(toolsStack),
                 onOpenItem: { item in
                     if case .collection(let collection) = item.source {

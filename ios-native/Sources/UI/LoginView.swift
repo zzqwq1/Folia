@@ -403,7 +403,7 @@ struct LoginView: View {
                 scene = .scanned
             case .confirmed:
                 scene = .success
-                if let account = try? await platform.loadAccount(), let account {
+                if let account = (try? await platform.loadAccount()) ?? nil {
                     library.signIn(provider: platform, session: account)
                 } else {
                     failureText = "已拿到登录凭证，但读取账号失败，请点刷新二维码重试。"

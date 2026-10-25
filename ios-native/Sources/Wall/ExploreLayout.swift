@@ -304,8 +304,8 @@ struct ExploreLayout: WallLayoutSpec {
             }
         }
         self.seatOf = seatOf
-        self.firstLotOf = sections.map { section in
-            lots.firstIndex(where: { $0.section == section.key }) ?? -1
+        self.firstLotOf = sections.indices.map { index in
+            lots.firstIndex(where: { $0.section == index }) ?? -1
         }
     }
 
