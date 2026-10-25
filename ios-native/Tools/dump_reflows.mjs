@@ -19,7 +19,7 @@ const table = globalThis.__R;
 
 const rows = table.map((perSlot, t) => {
     const slots = perSlot.map((entry, s) => {
-        const body = entry.map(slot => `(${slot.x}, ${slot.y}, ${slot.cols}, ${slot.rows})`).join(', ');
+        const body = entry.map(slot => `BlockSlot(x: ${slot.x}, y: ${slot.y}, cols: ${slot.cols}, rows: ${slot.rows})`).join(', ');
         return `        // ${t}:${s}\n        [${body}],`;
     }).join('\n');
     return `    // 变体 ${t}\n    [\n${slots}\n    ],`;

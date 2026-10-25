@@ -6,122 +6,115 @@
 
 import Foundation
 
-extension BlockSlot {
-    /// The generated table below is a literal of `(x, y, cols, rows)` tuples.
-    init(_ x: Int, _ y: Int, _ cols: Int, _ rows: Int) {
-        self.init(x: x, y: y, cols: cols, rows: rows)
-    }
-}
-
 enum BlockReflows {
     static let table: [[[BlockSlot]]] = [
     // 变体 0
     [
         // 0:0
-        [(0, 0, 6, 6), (6, 0, 4, 4), (10, 0, 2, 2), (2, 6, 2, 2), (10, 2, 2, 4), (0, 6, 2, 2), (4, 6, 2, 2), (6, 4, 2, 2), (6, 6, 2, 2), (8, 6, 2, 2), (8, 4, 2, 2), (10, 6, 2, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 6, rows: 6), BlockSlot(x: 6, y: 0, cols: 4, rows: 4), BlockSlot(x: 10, y: 0, cols: 2, rows: 2), BlockSlot(x: 2, y: 6, cols: 2, rows: 2), BlockSlot(x: 10, y: 2, cols: 2, rows: 4), BlockSlot(x: 0, y: 6, cols: 2, rows: 2), BlockSlot(x: 4, y: 6, cols: 2, rows: 2), BlockSlot(x: 6, y: 4, cols: 2, rows: 2), BlockSlot(x: 6, y: 6, cols: 2, rows: 2), BlockSlot(x: 8, y: 6, cols: 2, rows: 2), BlockSlot(x: 8, y: 4, cols: 2, rows: 2), BlockSlot(x: 10, y: 6, cols: 2, rows: 2)],
         // 0:1
-        [(0, 0, 3, 2), (3, 0, 6, 6), (9, 0, 3, 2), (0, 2, 3, 2), (9, 2, 3, 2), (0, 4, 3, 2), (3, 6, 3, 2), (6, 6, 2, 2), (0, 6, 3, 2), (8, 6, 2, 2), (10, 6, 2, 2), (9, 4, 3, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 3, rows: 2), BlockSlot(x: 3, y: 0, cols: 6, rows: 6), BlockSlot(x: 9, y: 0, cols: 3, rows: 2), BlockSlot(x: 0, y: 2, cols: 3, rows: 2), BlockSlot(x: 9, y: 2, cols: 3, rows: 2), BlockSlot(x: 0, y: 4, cols: 3, rows: 2), BlockSlot(x: 3, y: 6, cols: 3, rows: 2), BlockSlot(x: 6, y: 6, cols: 2, rows: 2), BlockSlot(x: 0, y: 6, cols: 3, rows: 2), BlockSlot(x: 8, y: 6, cols: 2, rows: 2), BlockSlot(x: 10, y: 6, cols: 2, rows: 2), BlockSlot(x: 9, y: 4, cols: 3, rows: 2)],
         // 0:2
-        [(0, 0, 3, 2), (3, 0, 3, 4), (6, 0, 6, 6), (0, 2, 3, 2), (10, 6, 2, 2), (0, 4, 2, 4), (4, 4, 2, 2), (6, 6, 2, 2), (4, 6, 2, 2), (8, 6, 2, 2), (2, 6, 2, 2), (2, 4, 2, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 3, rows: 2), BlockSlot(x: 3, y: 0, cols: 3, rows: 4), BlockSlot(x: 6, y: 0, cols: 6, rows: 6), BlockSlot(x: 0, y: 2, cols: 3, rows: 2), BlockSlot(x: 10, y: 6, cols: 2, rows: 2), BlockSlot(x: 0, y: 4, cols: 2, rows: 4), BlockSlot(x: 4, y: 4, cols: 2, rows: 2), BlockSlot(x: 6, y: 6, cols: 2, rows: 2), BlockSlot(x: 4, y: 6, cols: 2, rows: 2), BlockSlot(x: 8, y: 6, cols: 2, rows: 2), BlockSlot(x: 2, y: 6, cols: 2, rows: 2), BlockSlot(x: 2, y: 4, cols: 2, rows: 2)],
         // 0:3
-        [(2, 0, 2, 2), (4, 0, 6, 2), (8, 2, 2, 2), (0, 2, 6, 6), (10, 0, 2, 6), (0, 0, 2, 2), (6, 2, 2, 2), (6, 4, 2, 2), (6, 6, 2, 2), (8, 6, 2, 2), (8, 4, 2, 2), (10, 6, 2, 2)],
+        [BlockSlot(x: 2, y: 0, cols: 2, rows: 2), BlockSlot(x: 4, y: 0, cols: 6, rows: 2), BlockSlot(x: 8, y: 2, cols: 2, rows: 2), BlockSlot(x: 0, y: 2, cols: 6, rows: 6), BlockSlot(x: 10, y: 0, cols: 2, rows: 6), BlockSlot(x: 0, y: 0, cols: 2, rows: 2), BlockSlot(x: 6, y: 2, cols: 2, rows: 2), BlockSlot(x: 6, y: 4, cols: 2, rows: 2), BlockSlot(x: 6, y: 6, cols: 2, rows: 2), BlockSlot(x: 8, y: 6, cols: 2, rows: 2), BlockSlot(x: 8, y: 4, cols: 2, rows: 2), BlockSlot(x: 10, y: 6, cols: 2, rows: 2)],
         // 0:4
-        [(0, 0, 3, 2), (3, 0, 4, 2), (10, 0, 2, 2), (0, 2, 2, 3), (6, 2, 6, 6), (0, 5, 2, 3), (2, 4, 2, 2), (4, 4, 2, 2), (4, 6, 2, 2), (2, 6, 2, 2), (7, 0, 3, 2), (2, 2, 4, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 3, rows: 2), BlockSlot(x: 3, y: 0, cols: 4, rows: 2), BlockSlot(x: 10, y: 0, cols: 2, rows: 2), BlockSlot(x: 0, y: 2, cols: 2, rows: 3), BlockSlot(x: 6, y: 2, cols: 6, rows: 6), BlockSlot(x: 0, y: 5, cols: 2, rows: 3), BlockSlot(x: 2, y: 4, cols: 2, rows: 2), BlockSlot(x: 4, y: 4, cols: 2, rows: 2), BlockSlot(x: 4, y: 6, cols: 2, rows: 2), BlockSlot(x: 2, y: 6, cols: 2, rows: 2), BlockSlot(x: 7, y: 0, cols: 3, rows: 2), BlockSlot(x: 2, y: 2, cols: 4, rows: 2)],
         // 0:5
-        [(0, 0, 3, 2), (5, 0, 4, 2), (9, 0, 3, 2), (3, 0, 2, 2), (8, 2, 4, 2), (0, 2, 6, 6), (6, 2, 2, 2), (6, 4, 2, 2), (6, 6, 2, 2), (8, 4, 2, 4), (10, 6, 2, 2), (10, 4, 2, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 3, rows: 2), BlockSlot(x: 5, y: 0, cols: 4, rows: 2), BlockSlot(x: 9, y: 0, cols: 3, rows: 2), BlockSlot(x: 3, y: 0, cols: 2, rows: 2), BlockSlot(x: 8, y: 2, cols: 4, rows: 2), BlockSlot(x: 0, y: 2, cols: 6, rows: 6), BlockSlot(x: 6, y: 2, cols: 2, rows: 2), BlockSlot(x: 6, y: 4, cols: 2, rows: 2), BlockSlot(x: 6, y: 6, cols: 2, rows: 2), BlockSlot(x: 8, y: 4, cols: 2, rows: 4), BlockSlot(x: 10, y: 6, cols: 2, rows: 2), BlockSlot(x: 10, y: 4, cols: 2, rows: 2)],
         // 0:6
-        [(0, 0, 4, 2), (4, 0, 3, 2), (9, 0, 3, 2), (0, 2, 2, 3), (10, 2, 2, 2), (0, 5, 2, 3), (4, 2, 6, 6), (10, 4, 2, 2), (2, 6, 2, 2), (10, 6, 2, 2), (7, 0, 2, 2), (2, 2, 2, 4)],
+        [BlockSlot(x: 0, y: 0, cols: 4, rows: 2), BlockSlot(x: 4, y: 0, cols: 3, rows: 2), BlockSlot(x: 9, y: 0, cols: 3, rows: 2), BlockSlot(x: 0, y: 2, cols: 2, rows: 3), BlockSlot(x: 10, y: 2, cols: 2, rows: 2), BlockSlot(x: 0, y: 5, cols: 2, rows: 3), BlockSlot(x: 4, y: 2, cols: 6, rows: 6), BlockSlot(x: 10, y: 4, cols: 2, rows: 2), BlockSlot(x: 2, y: 6, cols: 2, rows: 2), BlockSlot(x: 10, y: 6, cols: 2, rows: 2), BlockSlot(x: 7, y: 0, cols: 2, rows: 2), BlockSlot(x: 2, y: 2, cols: 2, rows: 4)],
         // 0:7
-        [(0, 0, 4, 2), (4, 0, 4, 2), (8, 0, 2, 2), (0, 2, 2, 3), (10, 0, 2, 2), (0, 5, 2, 3), (4, 4, 2, 2), (6, 2, 6, 6), (4, 6, 2, 2), (2, 6, 2, 2), (2, 4, 2, 2), (2, 2, 4, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 4, rows: 2), BlockSlot(x: 4, y: 0, cols: 4, rows: 2), BlockSlot(x: 8, y: 0, cols: 2, rows: 2), BlockSlot(x: 0, y: 2, cols: 2, rows: 3), BlockSlot(x: 10, y: 0, cols: 2, rows: 2), BlockSlot(x: 0, y: 5, cols: 2, rows: 3), BlockSlot(x: 4, y: 4, cols: 2, rows: 2), BlockSlot(x: 6, y: 2, cols: 6, rows: 6), BlockSlot(x: 4, y: 6, cols: 2, rows: 2), BlockSlot(x: 2, y: 6, cols: 2, rows: 2), BlockSlot(x: 2, y: 4, cols: 2, rows: 2), BlockSlot(x: 2, y: 2, cols: 4, rows: 2)],
         // 0:8
-        [(0, 0, 4, 2), (4, 0, 3, 2), (9, 0, 3, 2), (0, 2, 2, 3), (10, 2, 2, 2), (0, 5, 2, 3), (2, 2, 2, 4), (10, 4, 2, 2), (4, 2, 6, 6), (2, 6, 2, 2), (10, 6, 2, 2), (7, 0, 2, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 4, rows: 2), BlockSlot(x: 4, y: 0, cols: 3, rows: 2), BlockSlot(x: 9, y: 0, cols: 3, rows: 2), BlockSlot(x: 0, y: 2, cols: 2, rows: 3), BlockSlot(x: 10, y: 2, cols: 2, rows: 2), BlockSlot(x: 0, y: 5, cols: 2, rows: 3), BlockSlot(x: 2, y: 2, cols: 2, rows: 4), BlockSlot(x: 10, y: 4, cols: 2, rows: 2), BlockSlot(x: 4, y: 2, cols: 6, rows: 6), BlockSlot(x: 2, y: 6, cols: 2, rows: 2), BlockSlot(x: 10, y: 6, cols: 2, rows: 2), BlockSlot(x: 7, y: 0, cols: 2, rows: 2)],
         // 0:9
-        [(0, 0, 4, 2), (4, 0, 4, 2), (8, 0, 2, 2), (0, 2, 2, 3), (10, 0, 2, 2), (0, 5, 2, 3), (2, 4, 2, 2), (4, 4, 2, 2), (4, 6, 2, 2), (6, 2, 6, 6), (2, 6, 2, 2), (2, 2, 4, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 4, rows: 2), BlockSlot(x: 4, y: 0, cols: 4, rows: 2), BlockSlot(x: 8, y: 0, cols: 2, rows: 2), BlockSlot(x: 0, y: 2, cols: 2, rows: 3), BlockSlot(x: 10, y: 0, cols: 2, rows: 2), BlockSlot(x: 0, y: 5, cols: 2, rows: 3), BlockSlot(x: 2, y: 4, cols: 2, rows: 2), BlockSlot(x: 4, y: 4, cols: 2, rows: 2), BlockSlot(x: 4, y: 6, cols: 2, rows: 2), BlockSlot(x: 6, y: 2, cols: 6, rows: 6), BlockSlot(x: 2, y: 6, cols: 2, rows: 2), BlockSlot(x: 2, y: 2, cols: 4, rows: 2)],
         // 0:10
-        [(0, 0, 4, 2), (4, 0, 4, 2), (8, 0, 2, 2), (0, 2, 2, 3), (10, 0, 2, 2), (0, 5, 2, 3), (2, 4, 2, 2), (4, 4, 2, 2), (4, 6, 2, 2), (2, 6, 2, 2), (6, 2, 6, 6), (2, 2, 4, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 4, rows: 2), BlockSlot(x: 4, y: 0, cols: 4, rows: 2), BlockSlot(x: 8, y: 0, cols: 2, rows: 2), BlockSlot(x: 0, y: 2, cols: 2, rows: 3), BlockSlot(x: 10, y: 0, cols: 2, rows: 2), BlockSlot(x: 0, y: 5, cols: 2, rows: 3), BlockSlot(x: 2, y: 4, cols: 2, rows: 2), BlockSlot(x: 4, y: 4, cols: 2, rows: 2), BlockSlot(x: 4, y: 6, cols: 2, rows: 2), BlockSlot(x: 2, y: 6, cols: 2, rows: 2), BlockSlot(x: 6, y: 2, cols: 6, rows: 6), BlockSlot(x: 2, y: 2, cols: 4, rows: 2)],
         // 0:11
-        [(0, 0, 4, 2), (4, 0, 4, 2), (8, 0, 2, 2), (0, 2, 2, 3), (10, 0, 2, 2), (0, 5, 2, 3), (2, 4, 2, 2), (4, 4, 2, 2), (4, 6, 2, 2), (2, 6, 2, 2), (2, 2, 4, 2), (6, 2, 6, 6)],
+        [BlockSlot(x: 0, y: 0, cols: 4, rows: 2), BlockSlot(x: 4, y: 0, cols: 4, rows: 2), BlockSlot(x: 8, y: 0, cols: 2, rows: 2), BlockSlot(x: 0, y: 2, cols: 2, rows: 3), BlockSlot(x: 10, y: 0, cols: 2, rows: 2), BlockSlot(x: 0, y: 5, cols: 2, rows: 3), BlockSlot(x: 2, y: 4, cols: 2, rows: 2), BlockSlot(x: 4, y: 4, cols: 2, rows: 2), BlockSlot(x: 4, y: 6, cols: 2, rows: 2), BlockSlot(x: 2, y: 6, cols: 2, rows: 2), BlockSlot(x: 2, y: 2, cols: 4, rows: 2), BlockSlot(x: 6, y: 2, cols: 6, rows: 6)],
     ],
     // 变体 1
     [
         // 1:0
-        [(0, 0, 6, 6), (6, 0, 2, 2), (6, 2, 2, 2), (8, 0, 4, 4), (2, 6, 2, 2), (6, 4, 2, 4), (8, 4, 2, 2), (10, 4, 2, 2), (0, 6, 2, 2), (4, 6, 2, 2), (8, 6, 2, 2), (10, 6, 2, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 6, rows: 6), BlockSlot(x: 6, y: 0, cols: 2, rows: 2), BlockSlot(x: 6, y: 2, cols: 2, rows: 2), BlockSlot(x: 8, y: 0, cols: 4, rows: 4), BlockSlot(x: 2, y: 6, cols: 2, rows: 2), BlockSlot(x: 6, y: 4, cols: 2, rows: 4), BlockSlot(x: 8, y: 4, cols: 2, rows: 2), BlockSlot(x: 10, y: 4, cols: 2, rows: 2), BlockSlot(x: 0, y: 6, cols: 2, rows: 2), BlockSlot(x: 4, y: 6, cols: 2, rows: 2), BlockSlot(x: 8, y: 6, cols: 2, rows: 2), BlockSlot(x: 10, y: 6, cols: 2, rows: 2)],
         // 1:1
-        [(0, 0, 2, 3), (2, 0, 6, 6), (8, 2, 4, 2), (8, 0, 4, 2), (0, 3, 2, 2), (6, 6, 2, 2), (8, 4, 2, 4), (10, 4, 2, 2), (0, 5, 2, 3), (2, 6, 2, 2), (4, 6, 2, 2), (10, 6, 2, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 2, rows: 3), BlockSlot(x: 2, y: 0, cols: 6, rows: 6), BlockSlot(x: 8, y: 2, cols: 4, rows: 2), BlockSlot(x: 8, y: 0, cols: 4, rows: 2), BlockSlot(x: 0, y: 3, cols: 2, rows: 2), BlockSlot(x: 6, y: 6, cols: 2, rows: 2), BlockSlot(x: 8, y: 4, cols: 2, rows: 4), BlockSlot(x: 10, y: 4, cols: 2, rows: 2), BlockSlot(x: 0, y: 5, cols: 2, rows: 3), BlockSlot(x: 2, y: 6, cols: 2, rows: 2), BlockSlot(x: 4, y: 6, cols: 2, rows: 2), BlockSlot(x: 10, y: 6, cols: 2, rows: 2)],
         // 1:2
-        [(0, 0, 2, 3), (2, 0, 2, 3), (4, 0, 6, 6), (10, 0, 2, 4), (0, 3, 4, 2), (6, 6, 2, 2), (8, 6, 2, 2), (10, 4, 2, 2), (0, 5, 2, 3), (2, 5, 2, 3), (4, 6, 2, 2), (10, 6, 2, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 2, rows: 3), BlockSlot(x: 2, y: 0, cols: 2, rows: 3), BlockSlot(x: 4, y: 0, cols: 6, rows: 6), BlockSlot(x: 10, y: 0, cols: 2, rows: 4), BlockSlot(x: 0, y: 3, cols: 4, rows: 2), BlockSlot(x: 6, y: 6, cols: 2, rows: 2), BlockSlot(x: 8, y: 6, cols: 2, rows: 2), BlockSlot(x: 10, y: 4, cols: 2, rows: 2), BlockSlot(x: 0, y: 5, cols: 2, rows: 3), BlockSlot(x: 2, y: 5, cols: 2, rows: 3), BlockSlot(x: 4, y: 6, cols: 2, rows: 2), BlockSlot(x: 10, y: 6, cols: 2, rows: 2)],
         // 1:3
-        [(0, 0, 2, 3), (2, 0, 2, 3), (4, 0, 2, 4), (6, 0, 6, 6), (0, 3, 4, 2), (6, 6, 2, 2), (8, 6, 2, 2), (10, 6, 2, 2), (0, 5, 2, 3), (2, 5, 2, 3), (4, 6, 2, 2), (4, 4, 2, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 2, rows: 3), BlockSlot(x: 2, y: 0, cols: 2, rows: 3), BlockSlot(x: 4, y: 0, cols: 2, rows: 4), BlockSlot(x: 6, y: 0, cols: 6, rows: 6), BlockSlot(x: 0, y: 3, cols: 4, rows: 2), BlockSlot(x: 6, y: 6, cols: 2, rows: 2), BlockSlot(x: 8, y: 6, cols: 2, rows: 2), BlockSlot(x: 10, y: 6, cols: 2, rows: 2), BlockSlot(x: 0, y: 5, cols: 2, rows: 3), BlockSlot(x: 2, y: 5, cols: 2, rows: 3), BlockSlot(x: 4, y: 6, cols: 2, rows: 2), BlockSlot(x: 4, y: 4, cols: 2, rows: 2)],
         // 1:4
-        [(0, 0, 2, 2), (2, 0, 2, 2), (4, 0, 4, 2), (8, 0, 4, 4), (0, 2, 6, 6), (6, 4, 2, 2), (8, 4, 2, 2), (10, 4, 2, 2), (6, 6, 2, 2), (6, 2, 2, 2), (8, 6, 2, 2), (10, 6, 2, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 2, rows: 2), BlockSlot(x: 2, y: 0, cols: 2, rows: 2), BlockSlot(x: 4, y: 0, cols: 4, rows: 2), BlockSlot(x: 8, y: 0, cols: 4, rows: 4), BlockSlot(x: 0, y: 2, cols: 6, rows: 6), BlockSlot(x: 6, y: 4, cols: 2, rows: 2), BlockSlot(x: 8, y: 4, cols: 2, rows: 2), BlockSlot(x: 10, y: 4, cols: 2, rows: 2), BlockSlot(x: 6, y: 6, cols: 2, rows: 2), BlockSlot(x: 6, y: 2, cols: 2, rows: 2), BlockSlot(x: 8, y: 6, cols: 2, rows: 2), BlockSlot(x: 10, y: 6, cols: 2, rows: 2)],
         // 1:5
-        [(0, 0, 2, 4), (2, 0, 2, 3), (4, 0, 4, 2), (8, 0, 2, 2), (2, 3, 2, 2), (6, 2, 6, 6), (4, 4, 2, 2), (10, 0, 2, 2), (0, 4, 2, 4), (2, 5, 2, 3), (4, 6, 2, 2), (4, 2, 2, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 2, rows: 4), BlockSlot(x: 2, y: 0, cols: 2, rows: 3), BlockSlot(x: 4, y: 0, cols: 4, rows: 2), BlockSlot(x: 8, y: 0, cols: 2, rows: 2), BlockSlot(x: 2, y: 3, cols: 2, rows: 2), BlockSlot(x: 6, y: 2, cols: 6, rows: 6), BlockSlot(x: 4, y: 4, cols: 2, rows: 2), BlockSlot(x: 10, y: 0, cols: 2, rows: 2), BlockSlot(x: 0, y: 4, cols: 2, rows: 4), BlockSlot(x: 2, y: 5, cols: 2, rows: 3), BlockSlot(x: 4, y: 6, cols: 2, rows: 2), BlockSlot(x: 4, y: 2, cols: 2, rows: 2)],
         // 1:6
-        [(0, 0, 2, 4), (2, 0, 2, 3), (4, 0, 4, 2), (8, 0, 2, 2), (2, 3, 2, 2), (4, 4, 2, 2), (6, 2, 6, 6), (10, 0, 2, 2), (0, 4, 2, 4), (2, 5, 2, 3), (4, 6, 2, 2), (4, 2, 2, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 2, rows: 4), BlockSlot(x: 2, y: 0, cols: 2, rows: 3), BlockSlot(x: 4, y: 0, cols: 4, rows: 2), BlockSlot(x: 8, y: 0, cols: 2, rows: 2), BlockSlot(x: 2, y: 3, cols: 2, rows: 2), BlockSlot(x: 4, y: 4, cols: 2, rows: 2), BlockSlot(x: 6, y: 2, cols: 6, rows: 6), BlockSlot(x: 10, y: 0, cols: 2, rows: 2), BlockSlot(x: 0, y: 4, cols: 2, rows: 4), BlockSlot(x: 2, y: 5, cols: 2, rows: 3), BlockSlot(x: 4, y: 6, cols: 2, rows: 2), BlockSlot(x: 4, y: 2, cols: 2, rows: 2)],
         // 1:7
-        [(0, 0, 2, 4), (2, 0, 2, 3), (4, 0, 4, 2), (8, 0, 2, 2), (2, 3, 2, 2), (4, 4, 2, 2), (4, 6, 2, 2), (6, 2, 6, 6), (0, 4, 2, 4), (2, 5, 2, 3), (4, 2, 2, 2), (10, 0, 2, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 2, rows: 4), BlockSlot(x: 2, y: 0, cols: 2, rows: 3), BlockSlot(x: 4, y: 0, cols: 4, rows: 2), BlockSlot(x: 8, y: 0, cols: 2, rows: 2), BlockSlot(x: 2, y: 3, cols: 2, rows: 2), BlockSlot(x: 4, y: 4, cols: 2, rows: 2), BlockSlot(x: 4, y: 6, cols: 2, rows: 2), BlockSlot(x: 6, y: 2, cols: 6, rows: 6), BlockSlot(x: 0, y: 4, cols: 2, rows: 4), BlockSlot(x: 2, y: 5, cols: 2, rows: 3), BlockSlot(x: 4, y: 2, cols: 2, rows: 2), BlockSlot(x: 10, y: 0, cols: 2, rows: 2)],
         // 1:8
-        [(0, 0, 2, 2), (4, 0, 2, 2), (6, 0, 2, 3), (8, 0, 4, 4), (2, 0, 2, 2), (6, 6, 2, 2), (8, 4, 2, 2), (10, 4, 2, 2), (0, 2, 6, 6), (6, 3, 2, 3), (8, 6, 2, 2), (10, 6, 2, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 2, rows: 2), BlockSlot(x: 4, y: 0, cols: 2, rows: 2), BlockSlot(x: 6, y: 0, cols: 2, rows: 3), BlockSlot(x: 8, y: 0, cols: 4, rows: 4), BlockSlot(x: 2, y: 0, cols: 2, rows: 2), BlockSlot(x: 6, y: 6, cols: 2, rows: 2), BlockSlot(x: 8, y: 4, cols: 2, rows: 2), BlockSlot(x: 10, y: 4, cols: 2, rows: 2), BlockSlot(x: 0, y: 2, cols: 6, rows: 6), BlockSlot(x: 6, y: 3, cols: 2, rows: 3), BlockSlot(x: 8, y: 6, cols: 2, rows: 2), BlockSlot(x: 10, y: 6, cols: 2, rows: 2)],
         // 1:9
-        [(0, 0, 2, 2), (2, 0, 2, 2), (4, 0, 4, 2), (8, 0, 4, 4), (0, 2, 2, 2), (8, 4, 2, 2), (8, 6, 2, 2), (10, 4, 2, 2), (0, 6, 2, 2), (2, 2, 6, 6), (0, 4, 2, 2), (10, 6, 2, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 2, rows: 2), BlockSlot(x: 2, y: 0, cols: 2, rows: 2), BlockSlot(x: 4, y: 0, cols: 4, rows: 2), BlockSlot(x: 8, y: 0, cols: 4, rows: 4), BlockSlot(x: 0, y: 2, cols: 2, rows: 2), BlockSlot(x: 8, y: 4, cols: 2, rows: 2), BlockSlot(x: 8, y: 6, cols: 2, rows: 2), BlockSlot(x: 10, y: 4, cols: 2, rows: 2), BlockSlot(x: 0, y: 6, cols: 2, rows: 2), BlockSlot(x: 2, y: 2, cols: 6, rows: 6), BlockSlot(x: 0, y: 4, cols: 2, rows: 2), BlockSlot(x: 10, y: 6, cols: 2, rows: 2)],
         // 1:10
-        [(0, 0, 2, 3), (2, 0, 2, 4), (4, 0, 4, 2), (8, 0, 4, 2), (0, 3, 2, 3), (2, 4, 2, 2), (10, 4, 2, 2), (10, 2, 2, 2), (0, 6, 2, 2), (2, 6, 2, 2), (4, 2, 6, 6), (10, 6, 2, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 2, rows: 3), BlockSlot(x: 2, y: 0, cols: 2, rows: 4), BlockSlot(x: 4, y: 0, cols: 4, rows: 2), BlockSlot(x: 8, y: 0, cols: 4, rows: 2), BlockSlot(x: 0, y: 3, cols: 2, rows: 3), BlockSlot(x: 2, y: 4, cols: 2, rows: 2), BlockSlot(x: 10, y: 4, cols: 2, rows: 2), BlockSlot(x: 10, y: 2, cols: 2, rows: 2), BlockSlot(x: 0, y: 6, cols: 2, rows: 2), BlockSlot(x: 2, y: 6, cols: 2, rows: 2), BlockSlot(x: 4, y: 2, cols: 6, rows: 6), BlockSlot(x: 10, y: 6, cols: 2, rows: 2)],
         // 1:11
-        [(0, 0, 2, 4), (2, 0, 2, 3), (4, 0, 4, 2), (8, 0, 2, 2), (2, 3, 2, 2), (4, 4, 2, 2), (4, 6, 2, 2), (10, 0, 2, 2), (0, 4, 2, 4), (2, 5, 2, 3), (4, 2, 2, 2), (6, 2, 6, 6)],
+        [BlockSlot(x: 0, y: 0, cols: 2, rows: 4), BlockSlot(x: 2, y: 0, cols: 2, rows: 3), BlockSlot(x: 4, y: 0, cols: 4, rows: 2), BlockSlot(x: 8, y: 0, cols: 2, rows: 2), BlockSlot(x: 2, y: 3, cols: 2, rows: 2), BlockSlot(x: 4, y: 4, cols: 2, rows: 2), BlockSlot(x: 4, y: 6, cols: 2, rows: 2), BlockSlot(x: 10, y: 0, cols: 2, rows: 2), BlockSlot(x: 0, y: 4, cols: 2, rows: 4), BlockSlot(x: 2, y: 5, cols: 2, rows: 3), BlockSlot(x: 4, y: 2, cols: 2, rows: 2), BlockSlot(x: 6, y: 2, cols: 6, rows: 6)],
     ],
     // 变体 2
     [
         // 2:0
-        [(0, 0, 6, 6), (6, 0, 6, 2), (8, 2, 2, 4), (10, 2, 2, 3), (0, 6, 2, 2), (6, 4, 2, 2), (10, 5, 2, 3), (2, 6, 2, 2), (4, 6, 2, 2), (6, 6, 2, 2), (8, 6, 2, 2), (6, 2, 2, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 6, rows: 6), BlockSlot(x: 6, y: 0, cols: 6, rows: 2), BlockSlot(x: 8, y: 2, cols: 2, rows: 4), BlockSlot(x: 10, y: 2, cols: 2, rows: 3), BlockSlot(x: 0, y: 6, cols: 2, rows: 2), BlockSlot(x: 6, y: 4, cols: 2, rows: 2), BlockSlot(x: 10, y: 5, cols: 2, rows: 3), BlockSlot(x: 2, y: 6, cols: 2, rows: 2), BlockSlot(x: 4, y: 6, cols: 2, rows: 2), BlockSlot(x: 6, y: 6, cols: 2, rows: 2), BlockSlot(x: 8, y: 6, cols: 2, rows: 2), BlockSlot(x: 6, y: 2, cols: 2, rows: 2)],
         // 2:1
-        [(0, 0, 4, 4), (6, 0, 6, 6), (6, 6, 2, 2), (8, 6, 2, 2), (0, 4, 2, 2), (4, 4, 2, 2), (10, 6, 2, 2), (0, 6, 2, 2), (2, 6, 2, 2), (4, 6, 2, 2), (2, 4, 2, 2), (4, 0, 2, 4)],
+        [BlockSlot(x: 0, y: 0, cols: 4, rows: 4), BlockSlot(x: 6, y: 0, cols: 6, rows: 6), BlockSlot(x: 6, y: 6, cols: 2, rows: 2), BlockSlot(x: 8, y: 6, cols: 2, rows: 2), BlockSlot(x: 0, y: 4, cols: 2, rows: 2), BlockSlot(x: 4, y: 4, cols: 2, rows: 2), BlockSlot(x: 10, y: 6, cols: 2, rows: 2), BlockSlot(x: 0, y: 6, cols: 2, rows: 2), BlockSlot(x: 2, y: 6, cols: 2, rows: 2), BlockSlot(x: 4, y: 6, cols: 2, rows: 2), BlockSlot(x: 2, y: 4, cols: 2, rows: 2), BlockSlot(x: 4, y: 0, cols: 2, rows: 4)],
         // 2:2
-        [(0, 0, 4, 4), (8, 0, 2, 2), (6, 2, 6, 6), (6, 0, 2, 2), (0, 4, 2, 2), (4, 4, 2, 2), (10, 0, 2, 2), (0, 6, 2, 2), (2, 6, 2, 2), (4, 6, 2, 2), (2, 4, 2, 2), (4, 0, 2, 4)],
+        [BlockSlot(x: 0, y: 0, cols: 4, rows: 4), BlockSlot(x: 8, y: 0, cols: 2, rows: 2), BlockSlot(x: 6, y: 2, cols: 6, rows: 6), BlockSlot(x: 6, y: 0, cols: 2, rows: 2), BlockSlot(x: 0, y: 4, cols: 2, rows: 2), BlockSlot(x: 4, y: 4, cols: 2, rows: 2), BlockSlot(x: 10, y: 0, cols: 2, rows: 2), BlockSlot(x: 0, y: 6, cols: 2, rows: 2), BlockSlot(x: 2, y: 6, cols: 2, rows: 2), BlockSlot(x: 4, y: 6, cols: 2, rows: 2), BlockSlot(x: 2, y: 4, cols: 2, rows: 2), BlockSlot(x: 4, y: 0, cols: 2, rows: 4)],
         // 2:3
-        [(0, 0, 4, 4), (8, 0, 2, 2), (4, 4, 2, 2), (6, 2, 6, 6), (0, 4, 2, 2), (4, 2, 2, 2), (10, 0, 2, 2), (0, 6, 2, 2), (2, 6, 2, 2), (4, 6, 2, 2), (2, 4, 2, 2), (4, 0, 4, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 4, rows: 4), BlockSlot(x: 8, y: 0, cols: 2, rows: 2), BlockSlot(x: 4, y: 4, cols: 2, rows: 2), BlockSlot(x: 6, y: 2, cols: 6, rows: 6), BlockSlot(x: 0, y: 4, cols: 2, rows: 2), BlockSlot(x: 4, y: 2, cols: 2, rows: 2), BlockSlot(x: 10, y: 0, cols: 2, rows: 2), BlockSlot(x: 0, y: 6, cols: 2, rows: 2), BlockSlot(x: 2, y: 6, cols: 2, rows: 2), BlockSlot(x: 4, y: 6, cols: 2, rows: 2), BlockSlot(x: 2, y: 4, cols: 2, rows: 2), BlockSlot(x: 4, y: 0, cols: 4, rows: 2)],
         // 2:4
-        [(2, 0, 4, 2), (6, 0, 6, 2), (6, 4, 2, 2), (10, 4, 2, 2), (0, 2, 6, 6), (6, 2, 2, 2), (10, 6, 2, 2), (0, 0, 2, 2), (6, 6, 2, 2), (8, 6, 2, 2), (8, 4, 2, 2), (8, 2, 4, 2)],
+        [BlockSlot(x: 2, y: 0, cols: 4, rows: 2), BlockSlot(x: 6, y: 0, cols: 6, rows: 2), BlockSlot(x: 6, y: 4, cols: 2, rows: 2), BlockSlot(x: 10, y: 4, cols: 2, rows: 2), BlockSlot(x: 0, y: 2, cols: 6, rows: 6), BlockSlot(x: 6, y: 2, cols: 2, rows: 2), BlockSlot(x: 10, y: 6, cols: 2, rows: 2), BlockSlot(x: 0, y: 0, cols: 2, rows: 2), BlockSlot(x: 6, y: 6, cols: 2, rows: 2), BlockSlot(x: 8, y: 6, cols: 2, rows: 2), BlockSlot(x: 8, y: 4, cols: 2, rows: 2), BlockSlot(x: 8, y: 2, cols: 4, rows: 2)],
         // 2:5
-        [(0, 0, 4, 4), (8, 0, 2, 2), (10, 4, 2, 2), (10, 2, 2, 2), (0, 4, 2, 2), (4, 2, 6, 6), (10, 6, 2, 2), (0, 6, 2, 2), (2, 6, 2, 2), (2, 4, 2, 2), (4, 0, 4, 2), (10, 0, 2, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 4, rows: 4), BlockSlot(x: 8, y: 0, cols: 2, rows: 2), BlockSlot(x: 10, y: 4, cols: 2, rows: 2), BlockSlot(x: 10, y: 2, cols: 2, rows: 2), BlockSlot(x: 0, y: 4, cols: 2, rows: 2), BlockSlot(x: 4, y: 2, cols: 6, rows: 6), BlockSlot(x: 10, y: 6, cols: 2, rows: 2), BlockSlot(x: 0, y: 6, cols: 2, rows: 2), BlockSlot(x: 2, y: 6, cols: 2, rows: 2), BlockSlot(x: 2, y: 4, cols: 2, rows: 2), BlockSlot(x: 4, y: 0, cols: 4, rows: 2), BlockSlot(x: 10, y: 0, cols: 2, rows: 2)],
         // 2:6
-        [(0, 0, 4, 4), (8, 0, 2, 2), (4, 4, 2, 2), (10, 0, 2, 2), (0, 4, 2, 2), (4, 2, 2, 2), (6, 2, 6, 6), (0, 6, 2, 2), (2, 6, 2, 2), (4, 6, 2, 2), (2, 4, 2, 2), (4, 0, 4, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 4, rows: 4), BlockSlot(x: 8, y: 0, cols: 2, rows: 2), BlockSlot(x: 4, y: 4, cols: 2, rows: 2), BlockSlot(x: 10, y: 0, cols: 2, rows: 2), BlockSlot(x: 0, y: 4, cols: 2, rows: 2), BlockSlot(x: 4, y: 2, cols: 2, rows: 2), BlockSlot(x: 6, y: 2, cols: 6, rows: 6), BlockSlot(x: 0, y: 6, cols: 2, rows: 2), BlockSlot(x: 2, y: 6, cols: 2, rows: 2), BlockSlot(x: 4, y: 6, cols: 2, rows: 2), BlockSlot(x: 2, y: 4, cols: 2, rows: 2), BlockSlot(x: 4, y: 0, cols: 4, rows: 2)],
         // 2:7
-        [(0, 0, 4, 2), (6, 0, 6, 2), (6, 4, 2, 2), (10, 2, 2, 3), (4, 0, 2, 2), (6, 2, 2, 2), (10, 5, 2, 3), (0, 2, 6, 6), (6, 6, 2, 2), (8, 6, 2, 2), (8, 4, 2, 2), (8, 2, 2, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 4, rows: 2), BlockSlot(x: 6, y: 0, cols: 6, rows: 2), BlockSlot(x: 6, y: 4, cols: 2, rows: 2), BlockSlot(x: 10, y: 2, cols: 2, rows: 3), BlockSlot(x: 4, y: 0, cols: 2, rows: 2), BlockSlot(x: 6, y: 2, cols: 2, rows: 2), BlockSlot(x: 10, y: 5, cols: 2, rows: 3), BlockSlot(x: 0, y: 2, cols: 6, rows: 6), BlockSlot(x: 6, y: 6, cols: 2, rows: 2), BlockSlot(x: 8, y: 6, cols: 2, rows: 2), BlockSlot(x: 8, y: 4, cols: 2, rows: 2), BlockSlot(x: 8, y: 2, cols: 2, rows: 2)],
         // 2:8
-        [(0, 0, 6, 2), (6, 0, 6, 2), (8, 4, 2, 2), (10, 2, 2, 2), (0, 4, 2, 2), (0, 2, 2, 2), (10, 6, 2, 2), (0, 6, 2, 2), (2, 2, 6, 6), (8, 6, 2, 2), (8, 2, 2, 2), (10, 4, 2, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 6, rows: 2), BlockSlot(x: 6, y: 0, cols: 6, rows: 2), BlockSlot(x: 8, y: 4, cols: 2, rows: 2), BlockSlot(x: 10, y: 2, cols: 2, rows: 2), BlockSlot(x: 0, y: 4, cols: 2, rows: 2), BlockSlot(x: 0, y: 2, cols: 2, rows: 2), BlockSlot(x: 10, y: 6, cols: 2, rows: 2), BlockSlot(x: 0, y: 6, cols: 2, rows: 2), BlockSlot(x: 2, y: 2, cols: 6, rows: 6), BlockSlot(x: 8, y: 6, cols: 2, rows: 2), BlockSlot(x: 8, y: 2, cols: 2, rows: 2), BlockSlot(x: 10, y: 4, cols: 2, rows: 2)],
         // 2:9
-        [(0, 0, 4, 4), (8, 0, 2, 2), (10, 4, 2, 2), (10, 2, 2, 2), (0, 4, 2, 2), (2, 4, 2, 2), (10, 6, 2, 2), (0, 6, 2, 2), (2, 6, 2, 2), (4, 2, 6, 6), (4, 0, 4, 2), (10, 0, 2, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 4, rows: 4), BlockSlot(x: 8, y: 0, cols: 2, rows: 2), BlockSlot(x: 10, y: 4, cols: 2, rows: 2), BlockSlot(x: 10, y: 2, cols: 2, rows: 2), BlockSlot(x: 0, y: 4, cols: 2, rows: 2), BlockSlot(x: 2, y: 4, cols: 2, rows: 2), BlockSlot(x: 10, y: 6, cols: 2, rows: 2), BlockSlot(x: 0, y: 6, cols: 2, rows: 2), BlockSlot(x: 2, y: 6, cols: 2, rows: 2), BlockSlot(x: 4, y: 2, cols: 6, rows: 6), BlockSlot(x: 4, y: 0, cols: 4, rows: 2), BlockSlot(x: 10, y: 0, cols: 2, rows: 2)],
         // 2:10
-        [(0, 0, 4, 4), (8, 0, 2, 2), (4, 4, 2, 2), (6, 0, 2, 2), (0, 4, 2, 2), (2, 4, 2, 2), (10, 0, 2, 2), (0, 6, 2, 2), (2, 6, 2, 2), (4, 6, 2, 2), (6, 2, 6, 6), (4, 0, 2, 4)],
+        [BlockSlot(x: 0, y: 0, cols: 4, rows: 4), BlockSlot(x: 8, y: 0, cols: 2, rows: 2), BlockSlot(x: 4, y: 4, cols: 2, rows: 2), BlockSlot(x: 6, y: 0, cols: 2, rows: 2), BlockSlot(x: 0, y: 4, cols: 2, rows: 2), BlockSlot(x: 2, y: 4, cols: 2, rows: 2), BlockSlot(x: 10, y: 0, cols: 2, rows: 2), BlockSlot(x: 0, y: 6, cols: 2, rows: 2), BlockSlot(x: 2, y: 6, cols: 2, rows: 2), BlockSlot(x: 4, y: 6, cols: 2, rows: 2), BlockSlot(x: 6, y: 2, cols: 6, rows: 6), BlockSlot(x: 4, y: 0, cols: 2, rows: 4)],
         // 2:11
-        [(0, 0, 4, 4), (8, 0, 2, 2), (4, 4, 2, 2), (4, 0, 4, 2), (0, 4, 2, 2), (4, 2, 2, 2), (10, 0, 2, 2), (0, 6, 2, 2), (2, 6, 2, 2), (4, 6, 2, 2), (2, 4, 2, 2), (6, 2, 6, 6)],
+        [BlockSlot(x: 0, y: 0, cols: 4, rows: 4), BlockSlot(x: 8, y: 0, cols: 2, rows: 2), BlockSlot(x: 4, y: 4, cols: 2, rows: 2), BlockSlot(x: 4, y: 0, cols: 4, rows: 2), BlockSlot(x: 0, y: 4, cols: 2, rows: 2), BlockSlot(x: 4, y: 2, cols: 2, rows: 2), BlockSlot(x: 10, y: 0, cols: 2, rows: 2), BlockSlot(x: 0, y: 6, cols: 2, rows: 2), BlockSlot(x: 2, y: 6, cols: 2, rows: 2), BlockSlot(x: 4, y: 6, cols: 2, rows: 2), BlockSlot(x: 2, y: 4, cols: 2, rows: 2), BlockSlot(x: 6, y: 2, cols: 6, rows: 6)],
     ],
     // 变体 3
     [
         // 3:0
-        [(0, 0, 6, 6), (6, 2, 2, 2), (6, 0, 2, 2), (8, 0, 2, 6), (10, 0, 2, 2), (0, 6, 2, 2), (6, 6, 2, 2), (6, 4, 2, 2), (8, 6, 2, 2), (10, 2, 2, 6), (2, 6, 2, 2), (4, 6, 2, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 6, rows: 6), BlockSlot(x: 6, y: 2, cols: 2, rows: 2), BlockSlot(x: 6, y: 0, cols: 2, rows: 2), BlockSlot(x: 8, y: 0, cols: 2, rows: 6), BlockSlot(x: 10, y: 0, cols: 2, rows: 2), BlockSlot(x: 0, y: 6, cols: 2, rows: 2), BlockSlot(x: 6, y: 6, cols: 2, rows: 2), BlockSlot(x: 6, y: 4, cols: 2, rows: 2), BlockSlot(x: 8, y: 6, cols: 2, rows: 2), BlockSlot(x: 10, y: 2, cols: 2, rows: 6), BlockSlot(x: 2, y: 6, cols: 2, rows: 2), BlockSlot(x: 4, y: 6, cols: 2, rows: 2)],
         // 3:1
-        [(0, 0, 2, 2), (2, 0, 6, 6), (8, 0, 2, 3), (8, 3, 2, 3), (10, 0, 2, 4), (0, 2, 2, 2), (6, 6, 2, 2), (4, 6, 2, 2), (8, 6, 2, 2), (10, 4, 2, 4), (0, 4, 2, 4), (2, 6, 2, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 2, rows: 2), BlockSlot(x: 2, y: 0, cols: 6, rows: 6), BlockSlot(x: 8, y: 0, cols: 2, rows: 3), BlockSlot(x: 8, y: 3, cols: 2, rows: 3), BlockSlot(x: 10, y: 0, cols: 2, rows: 4), BlockSlot(x: 0, y: 2, cols: 2, rows: 2), BlockSlot(x: 6, y: 6, cols: 2, rows: 2), BlockSlot(x: 4, y: 6, cols: 2, rows: 2), BlockSlot(x: 8, y: 6, cols: 2, rows: 2), BlockSlot(x: 10, y: 4, cols: 2, rows: 4), BlockSlot(x: 0, y: 4, cols: 2, rows: 4), BlockSlot(x: 2, y: 6, cols: 2, rows: 2)],
         // 3:2
-        [(0, 0, 2, 2), (2, 0, 2, 3), (4, 0, 6, 6), (10, 0, 2, 2), (10, 2, 2, 3), (0, 2, 2, 2), (2, 3, 2, 2), (4, 6, 6, 2), (0, 4, 2, 2), (10, 5, 2, 3), (0, 6, 2, 2), (2, 5, 2, 3)],
+        [BlockSlot(x: 0, y: 0, cols: 2, rows: 2), BlockSlot(x: 2, y: 0, cols: 2, rows: 3), BlockSlot(x: 4, y: 0, cols: 6, rows: 6), BlockSlot(x: 10, y: 0, cols: 2, rows: 2), BlockSlot(x: 10, y: 2, cols: 2, rows: 3), BlockSlot(x: 0, y: 2, cols: 2, rows: 2), BlockSlot(x: 2, y: 3, cols: 2, rows: 2), BlockSlot(x: 4, y: 6, cols: 6, rows: 2), BlockSlot(x: 0, y: 4, cols: 2, rows: 2), BlockSlot(x: 10, y: 5, cols: 2, rows: 3), BlockSlot(x: 0, y: 6, cols: 2, rows: 2), BlockSlot(x: 2, y: 5, cols: 2, rows: 3)],
         // 3:3
-        [(0, 0, 2, 2), (2, 0, 2, 2), (4, 0, 2, 4), (6, 0, 6, 6), (7, 6, 2, 2), (0, 2, 2, 4), (2, 2, 2, 2), (4, 4, 2, 2), (2, 4, 2, 4), (9, 6, 3, 2), (0, 6, 2, 2), (4, 6, 3, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 2, rows: 2), BlockSlot(x: 2, y: 0, cols: 2, rows: 2), BlockSlot(x: 4, y: 0, cols: 2, rows: 4), BlockSlot(x: 6, y: 0, cols: 6, rows: 6), BlockSlot(x: 7, y: 6, cols: 2, rows: 2), BlockSlot(x: 0, y: 2, cols: 2, rows: 4), BlockSlot(x: 2, y: 2, cols: 2, rows: 2), BlockSlot(x: 4, y: 4, cols: 2, rows: 2), BlockSlot(x: 2, y: 4, cols: 2, rows: 4), BlockSlot(x: 9, y: 6, cols: 3, rows: 2), BlockSlot(x: 0, y: 6, cols: 2, rows: 2), BlockSlot(x: 4, y: 6, cols: 3, rows: 2)],
         // 3:4
-        [(0, 0, 2, 2), (2, 0, 2, 2), (4, 0, 2, 4), (7, 6, 2, 2), (6, 0, 6, 6), (0, 2, 2, 4), (2, 2, 2, 2), (4, 4, 2, 2), (2, 4, 2, 4), (9, 6, 3, 2), (0, 6, 2, 2), (4, 6, 3, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 2, rows: 2), BlockSlot(x: 2, y: 0, cols: 2, rows: 2), BlockSlot(x: 4, y: 0, cols: 2, rows: 4), BlockSlot(x: 7, y: 6, cols: 2, rows: 2), BlockSlot(x: 6, y: 0, cols: 6, rows: 6), BlockSlot(x: 0, y: 2, cols: 2, rows: 4), BlockSlot(x: 2, y: 2, cols: 2, rows: 2), BlockSlot(x: 4, y: 4, cols: 2, rows: 2), BlockSlot(x: 2, y: 4, cols: 2, rows: 4), BlockSlot(x: 9, y: 6, cols: 3, rows: 2), BlockSlot(x: 0, y: 6, cols: 2, rows: 2), BlockSlot(x: 4, y: 6, cols: 3, rows: 2)],
         // 3:5
-        [(3, 0, 2, 2), (6, 2, 2, 2), (5, 0, 2, 2), (8, 2, 2, 3), (9, 0, 3, 2), (0, 2, 6, 6), (7, 0, 2, 2), (6, 4, 2, 2), (8, 5, 2, 3), (10, 2, 2, 6), (0, 0, 3, 2), (6, 6, 2, 2)],
+        [BlockSlot(x: 3, y: 0, cols: 2, rows: 2), BlockSlot(x: 6, y: 2, cols: 2, rows: 2), BlockSlot(x: 5, y: 0, cols: 2, rows: 2), BlockSlot(x: 8, y: 2, cols: 2, rows: 3), BlockSlot(x: 9, y: 0, cols: 3, rows: 2), BlockSlot(x: 0, y: 2, cols: 6, rows: 6), BlockSlot(x: 7, y: 0, cols: 2, rows: 2), BlockSlot(x: 6, y: 4, cols: 2, rows: 2), BlockSlot(x: 8, y: 5, cols: 2, rows: 3), BlockSlot(x: 10, y: 2, cols: 2, rows: 6), BlockSlot(x: 0, y: 0, cols: 3, rows: 2), BlockSlot(x: 6, y: 6, cols: 2, rows: 2)],
         // 3:6
-        [(0, 0, 2, 2), (2, 0, 2, 2), (4, 0, 6, 2), (8, 2, 2, 2), (10, 0, 2, 3), (0, 2, 2, 3), (2, 2, 6, 6), (8, 4, 2, 2), (10, 3, 2, 2), (10, 5, 2, 3), (0, 5, 2, 3), (8, 6, 2, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 2, rows: 2), BlockSlot(x: 2, y: 0, cols: 2, rows: 2), BlockSlot(x: 4, y: 0, cols: 6, rows: 2), BlockSlot(x: 8, y: 2, cols: 2, rows: 2), BlockSlot(x: 10, y: 0, cols: 2, rows: 3), BlockSlot(x: 0, y: 2, cols: 2, rows: 3), BlockSlot(x: 2, y: 2, cols: 6, rows: 6), BlockSlot(x: 8, y: 4, cols: 2, rows: 2), BlockSlot(x: 10, y: 3, cols: 2, rows: 2), BlockSlot(x: 10, y: 5, cols: 2, rows: 3), BlockSlot(x: 0, y: 5, cols: 2, rows: 3), BlockSlot(x: 8, y: 6, cols: 2, rows: 2)],
         // 3:7
-        [(0, 0, 2, 3), (2, 0, 2, 2), (4, 0, 3, 2), (7, 0, 3, 2), (10, 0, 2, 6), (0, 3, 2, 2), (2, 2, 2, 2), (4, 2, 6, 6), (2, 4, 2, 2), (10, 6, 2, 2), (0, 5, 2, 3), (2, 6, 2, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 2, rows: 3), BlockSlot(x: 2, y: 0, cols: 2, rows: 2), BlockSlot(x: 4, y: 0, cols: 3, rows: 2), BlockSlot(x: 7, y: 0, cols: 3, rows: 2), BlockSlot(x: 10, y: 0, cols: 2, rows: 6), BlockSlot(x: 0, y: 3, cols: 2, rows: 2), BlockSlot(x: 2, y: 2, cols: 2, rows: 2), BlockSlot(x: 4, y: 2, cols: 6, rows: 6), BlockSlot(x: 2, y: 4, cols: 2, rows: 2), BlockSlot(x: 10, y: 6, cols: 2, rows: 2), BlockSlot(x: 0, y: 5, cols: 2, rows: 3), BlockSlot(x: 2, y: 6, cols: 2, rows: 2)],
         // 3:8
-        [(0, 0, 2, 2), (2, 0, 2, 2), (4, 0, 6, 2), (8, 2, 2, 2), (10, 0, 2, 3), (0, 2, 2, 3), (10, 3, 2, 2), (8, 4, 2, 2), (2, 2, 6, 6), (10, 5, 2, 3), (0, 5, 2, 3), (8, 6, 2, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 2, rows: 2), BlockSlot(x: 2, y: 0, cols: 2, rows: 2), BlockSlot(x: 4, y: 0, cols: 6, rows: 2), BlockSlot(x: 8, y: 2, cols: 2, rows: 2), BlockSlot(x: 10, y: 0, cols: 2, rows: 3), BlockSlot(x: 0, y: 2, cols: 2, rows: 3), BlockSlot(x: 10, y: 3, cols: 2, rows: 2), BlockSlot(x: 8, y: 4, cols: 2, rows: 2), BlockSlot(x: 2, y: 2, cols: 6, rows: 6), BlockSlot(x: 10, y: 5, cols: 2, rows: 3), BlockSlot(x: 0, y: 5, cols: 2, rows: 3), BlockSlot(x: 8, y: 6, cols: 2, rows: 2)],
         // 3:9
-        [(0, 0, 2, 2), (2, 0, 3, 2), (5, 0, 3, 2), (8, 0, 2, 2), (10, 0, 2, 2), (0, 2, 2, 3), (2, 2, 2, 2), (4, 2, 2, 6), (2, 4, 2, 2), (6, 2, 6, 6), (0, 5, 2, 3), (2, 6, 2, 2)],
+        [BlockSlot(x: 0, y: 0, cols: 2, rows: 2), BlockSlot(x: 2, y: 0, cols: 3, rows: 2), BlockSlot(x: 5, y: 0, cols: 3, rows: 2), BlockSlot(x: 8, y: 0, cols: 2, rows: 2), BlockSlot(x: 10, y: 0, cols: 2, rows: 2), BlockSlot(x: 0, y: 2, cols: 2, rows: 3), BlockSlot(x: 2, y: 2, cols: 2, rows: 2), BlockSlot(x: 4, y: 2, cols: 2, rows: 6), BlockSlot(x: 2, y: 4, cols: 2, rows: 2), BlockSlot(x: 6, y: 2, cols: 6, rows: 6), BlockSlot(x: 0, y: 5, cols: 2, rows: 3), BlockSlot(x: 2, y: 6, cols: 2, rows: 2)],
         // 3:10
-        [(2, 0, 3, 2), (6, 2, 2, 2), (5, 0, 3, 2), (8, 0, 4, 3), (10, 3, 2, 2), (0, 0, 2, 2), (8, 3, 2, 3), (6, 4, 2, 2), (8, 6, 2, 2), (10, 5, 2, 3), (0, 2, 6, 6), (6, 6, 2, 2)],
+        [BlockSlot(x: 2, y: 0, cols: 3, rows: 2), BlockSlot(x: 6, y: 2, cols: 2, rows: 2), BlockSlot(x: 5, y: 0, cols: 3, rows: 2), BlockSlot(x: 8, y: 0, cols: 4, rows: 3), BlockSlot(x: 10, y: 3, cols: 2, rows: 2), BlockSlot(x: 0, y: 0, cols: 2, rows: 2), BlockSlot(x: 8, y: 3, cols: 2, rows: 3), BlockSlot(x: 6, y: 4, cols: 2, rows: 2), BlockSlot(x: 8, y: 6, cols: 2, rows: 2), BlockSlot(x: 10, y: 5, cols: 2, rows: 3), BlockSlot(x: 0, y: 2, cols: 6, rows: 6), BlockSlot(x: 6, y: 6, cols: 2, rows: 2)],
         // 3:11
-        [(0, 0, 2, 2), (2, 0, 4, 2), (6, 0, 2, 2), (8, 0, 2, 4), (10, 0, 2, 3), (0, 2, 2, 2), (0, 4, 2, 2), (8, 4, 2, 2), (10, 3, 2, 3), (8, 6, 4, 2), (0, 6, 2, 2), (2, 2, 6, 6)],
+        [BlockSlot(x: 0, y: 0, cols: 2, rows: 2), BlockSlot(x: 2, y: 0, cols: 4, rows: 2), BlockSlot(x: 6, y: 0, cols: 2, rows: 2), BlockSlot(x: 8, y: 0, cols: 2, rows: 4), BlockSlot(x: 10, y: 0, cols: 2, rows: 3), BlockSlot(x: 0, y: 2, cols: 2, rows: 2), BlockSlot(x: 0, y: 4, cols: 2, rows: 2), BlockSlot(x: 8, y: 4, cols: 2, rows: 2), BlockSlot(x: 10, y: 3, cols: 2, rows: 3), BlockSlot(x: 8, y: 6, cols: 4, rows: 2), BlockSlot(x: 0, y: 6, cols: 2, rows: 2), BlockSlot(x: 2, y: 2, cols: 6, rows: 6)],
     ],
     ]
 }
