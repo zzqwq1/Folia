@@ -6,6 +6,13 @@
 
 import Foundation
 
+extension BlockSlot {
+    /// The generated table below is a literal of `(x, y, cols, rows)` tuples.
+    init(_ x: Int, _ y: Int, _ cols: Int, _ rows: Int) {
+        self.init(x: x, y: y, cols: cols, rows: rows)
+    }
+}
+
 enum BlockReflows {
     static let table: [[[BlockSlot]]] = [
     // 变体 0
