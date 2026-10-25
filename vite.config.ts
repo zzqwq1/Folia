@@ -13,6 +13,33 @@ import fs from 'fs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+/** 本地构建时 iOS 壳的 API 地址；CI（ios.yml）另有自己的一份 env。 */
+const IOS_DEV_API_PORTS: Record<string, string> = {
+  VITE_NETEASE_API_BASE: 'http://127.0.0.1:48231/api/netease',
+  VITE_QQ_API_BASE: 'http://127.0.0.1:48231/api/qq',
+  VITE_KUGOU_API_BASE: 'http://127.0.0.1:48231/api/kugou',
+};
+
+/**
+ * iOS_BUILD=1 而没给这些地址时，补上默认值。缺了它们，构建出来的页面会退回 `/api/...`
+ * （指向本地服务器的静态目录，拿回 HTML），登录和在线内容都取不到。
+ *
+ * 用插件补而不是挂 `define`：Vite 先合并用户 define、再叠加 `import.meta.env` 的内置替换，
+ * 同一键的内置值会赢，`import.meta.env.VITE_*` 读到的仍是缺省值。插件在 config 解析时直接写进
+ * `config.define`，优先级与手写 `define` 相同，才能在 import.meta.env 里生效。
+ */
+const iosBuildEnvPlugin = () => ({
+  name: 'folia-ios-build-env',
+  config(config: UserConfig, env: ConfigEnv) {
+    if (!env.command.startsWith('build') || process.env.IOS_BUILD !== '1') return undefined;
+    const define: Record<string, string> = { ...config.define };
+    for (const [key, value] of Object.entries(IOS_DEV_API_PORTS)) {
+      if (!process.env[key]) define[`import.meta.env.${key}`] = JSON.stringify(value);
+    }
+    return { define };
+  },
+});
+
 const LYRIC_PROXY_CORS_HEADERS: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET,OPTIONS,PATCH,DELETE,POST,PUT',
@@ -265,6 +292,7 @@ export default async function viteConfig(_config: ConfigEnv): Promise<UserConfig
       },
     },
     plugins: [
+      iosBuildEnvPlugin(),
       devLyricProxyPlugin(),
       commandPinyinPlugin(),
       traditionalLocalePlugin(),

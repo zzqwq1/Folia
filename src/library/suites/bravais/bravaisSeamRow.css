@@ -439,3 +439,23 @@
     .bravais-seam .bravais-seam-home-row .bravais-seam-tools { gap: 2px; }
 }
 
+/* ---------- 首页横条：按横条自己的宽度定级（useBravaisSeamRowFit），这里只把「各级能有多宽」收回来 ----------
+   窄屏上原本靠容器查询把段间距收到 8px、工具间距收到 2px，但页签仍是全名的内边距、账户入口仍带一截名字，
+   于是 460px 左右只有 40px 余量，放不下「直达入口 + 四个全名页签 + 插头 + 四个工具 + 展开」——一量就直落到最差一级。
+   这里把各段在窄横条上收窄一些，让它先落在 untitled（全名页签 + 头像 + 名字的账户入口）这一级，与桌面版一致；
+   「⋯」菜单里仍是全名。 */
+@container bravais-seam-row (max-width: 600px) {
+    .bravais-seam .bravais-seam-home-row > .bravais-seam-home-row-nav { gap: 8px; }
+    .bravais-seam .bravais-seam-home-row .bravais-seam-home-tab { padding: 6px 9px; font-size: 13px; letter-spacing: 0.06em; }
+    .bravais-seam .bravais-seam-home-row .bravais-seam-tabs.is-short .bravais-seam-home-tab { min-width: 30px; padding-inline: 6px; }
+    .bravais-seam .bravais-seam-home-row .bravais-seam-home-jumps { min-width: 0; }
+    .bravais-seam .bravais-seam-home-row .bravais-seam-shortcuts-wrap { gap: 8px; }
+    .bravais-seam .bravais-seam-home-row .bravais-seam-shortcut { padding: 5px 6px; }
+    .bravais-seam .bravais-seam-home-row .bravais-seam-tools .bravais-seam-icon { width: 34px; height: 34px; }
+    .bravais-seam .bravais-seam-home-row .bravais-seam-tools .bravais-seam-icon.is-wide { padding: 0 8px; }
+    .bravais-seam .bravais-seam-home-row .bravais-account-entry { gap: 6px; padding: 4px 9px 4px 4px; }
+    .bravais-seam .bravais-seam-home-row .bravais-account-avatar { width: 28px; height: 28px; }
+    .bravais-seam .bravais-seam-home-row .bravais-account-entry .is-name { font-size: 11px; }
+    .bravais-seam .bravais-seam-home-row .bravais-seam-row-account { max-width: 120px; }
+}
+

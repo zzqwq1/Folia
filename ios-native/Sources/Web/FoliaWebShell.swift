@@ -29,6 +29,8 @@ final class FoliaWebHostController: UIViewController, WKScriptMessageHandler, WK
         config.mediaTypesRequiringUserActionForPlayback = []
         config.allowsAirPlayForMediaPlayback = true
         config.userContentController.add(self, name: "foliaMedia")
+        config.userContentController.add(FoliaLogRelay.shared, name: "foliaLog")
+        config.userContentController.addUserScript(FoliaLogRelay.script())
         config.userContentController.addUserScript(injectedScript())
 
         webView = WKWebView(frame: view.bounds, configuration: config)
@@ -170,5 +172,71 @@ final class FoliaWebHostController: UIViewController, WKScriptMessageHandler, WK
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         NSLog("[FoliaWebShell] load failed: %@", String(describing: error))
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        NSLog("[FoliaWebShell] loaded %@", webView.url?.absoluteString ?? "?")
+        probeLoginApi()
+    }
+
+    /// 启动时打一次登录接口：从页面自己的源发一条真实的跨域请求，日志里能看到它到底通没通，
+    /// 不用等用户点开登录窗口才知道。
+    private func probeLoginApi() {
+        let script = """
+        (function() {
+          fetch('/netease/login/qr/key?timestamp=' + Date.now(), { credentials: 'include' })
+            .then(function(r) {
+              console.log('[FoliaProbe] netease qr key HTTP ' + r.status);
+              return r.text();
+            })
+            .then(function(t) { console.log('[FoliaProbe] body ' + t.slice(0, 160)); })
+            .catch(function(e) { console.log('[FoliaProbe] failed ' + (e && e.message ? e.message : e)); });
+        })();
+        """
+        webView.evaluateJavaScript(script, completionHandler: nil)
+    }
+}
+
+/// 把页面里的 console 消息、以及没接住的 JS 异常转到系统日志，排查时看 Console.app 或 idevicesyslog 即可。
+final class FoliaLogRelay: NSObject, WKScriptMessageHandler {
+
+    static let shared = FoliaLogRelay()
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.name == "foliaLog" else { return }
+        NSLog("[FoliaWeb] %@", String(describing: message.body))
+    }
+
+    static func script() -> WKUserScript {
+        let source = """
+        (function() {
+          if (window.__foliaLogInstalled) return;
+          window.__foliaLogInstalled = true;
+          function post(level, args) {
+            try {
+              var text = Array.prototype.map.call(args, function(a) {
+                if (typeof a === 'string') return a;
+                try { return JSON.stringify(a); } catch (e) { return String(a); }
+              }).join(' ');
+              window.webkit.messageHandlers.foliaLog.postMessage(level + ': ' + text);
+            } catch (e) {}
+          }
+          ['log', 'warn', 'error'].forEach(function(level) {
+            var original = console[level];
+            console[level] = function() {
+              post(level, arguments);
+              return original.apply(console, arguments);
+            };
+          });
+          window.addEventListener('error', function(event) {
+            post('uncaught', [event.message + ' @ ' + (event.filename || '') + ':' + (event.lineno || 0)]);
+          });
+          window.addEventListener('unhandledrejection', function(event) {
+            var reason = event.reason && event.reason.message ? event.reason.message : String(event.reason);
+            post('rejection', [reason]);
+          });
+        })();
+        """
+        return WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true)
     }
 }

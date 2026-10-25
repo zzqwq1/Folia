@@ -25,15 +25,16 @@ const BravaisSeamAccountSwitcher: React.FC<{
     const open = (event: React.MouseEvent<HTMLButtonElement>) => account.onOpen(event.currentTarget);
 
     if (measure) {
-        // 头像 / 徽章 / 连接图标都是同一个尺寸的圆，占位 span 就够量宽度。
+        // 与真正渲染的那一份结构 / 类名一致（is-guest、avatar 的内容、is-name 的文案），否则量出的宽度和真按钮差一截，
+        // 定级会误判。测量副本不带按钮、data 属性与可访问名。
         return compact ? (
             <span className="bravais-account-switcher is-compact">
-                <span className="bravais-seam-icon bravais-account-spine"><span className="bravais-account-avatar" /></span>
+                <span className="bravais-seam-icon bravais-account-spine">{picture}</span>
             </span>
         ) : (
-            <span className="bravais-account-switcher">
+            <span className={`bravais-account-switcher${account.guest ? ' is-guest' : ''}`}>
                 <span className={`bravais-account-entry ${account.guest ? 'bravais-account-connect' : 'bravais-account-toggle'}`}>
-                    <span className="bravais-account-avatar" />
+                    {picture}
                     <span className="is-name">{account.guest ? account.connectLabel : account.nickname ?? account.providerLabel}</span>
                 </span>
             </span>

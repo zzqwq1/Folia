@@ -59,6 +59,14 @@ final class FoliaLocalServer {
         let body: Data
     }
 
+    /// 一条响应可以带多个 `Set-Cookie`：按字典收发会把它们合成一行、后写的盖掉先写的，登录态那一枚可能就丢了。
+    private struct HTTPReply {
+        let status: Int
+        var headers: [String: String]
+        var cookies: [String]
+        let body: Data
+    }
+
     private func readRequest(_ connection: NWConnection, buffer: Data) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
             guard let self else { return }
@@ -111,6 +119,7 @@ final class FoliaLocalServer {
     // ---- 路由 ----
 
     private func process(_ request: HTTPRequest, on connection: NWConnection) {
+        NSLog("[FoliaLocalServer] %@ %@", request.method, request.path)
         guard let pathOnly = URL(string: request.path)?.path else {
             sendResponse(status: 400, headers: ["Content-Type": "text/plain"], body: Data("bad request".utf8), on: connection)
             return
@@ -121,12 +130,16 @@ final class FoliaLocalServer {
             return
         }
 
-        if pathOnly.hasPrefix("/netease/") || pathOnly.hasPrefix("/qq/") ||
-            pathOnly.hasPrefix("/kugou/") || pathOnly.hasPrefix("/api/") {
+        if isProxyPath(pathOnly) {
             proxy(request, on: connection)
         } else {
             serveStatic(pathOnly, on: connection)
         }
+    }
+
+    private func isProxyPath(_ path: String) -> Bool {
+        path.hasPrefix("/netease/") || path.hasPrefix("/qq/") ||
+            path.hasPrefix("/kugou/") || path.hasPrefix("/api/")
     }
 
     // ---- API 代理 ----
@@ -151,30 +164,48 @@ final class FoliaLocalServer {
             urlRequest.setValue(value, forHTTPHeaderField: key)
         }
 
+        let startedAt = Date()
         session.dataTask(with: urlRequest) { [weak self] data, response, error in
             guard let self else { return }
             let httpResponse = response as? HTTPURLResponse
+            let elapsed = Int(Date().timeIntervalSince(startedAt) * 1000)
             if let error {
-                NSLog("[FoliaLocalServer] proxy failed %@: %@", target.absoluteString, String(describing: error))
+                NSLog("[FoliaLocalServer] proxy %@ %@ failed in %dms: %@", request.method, target.path, elapsed, String(describing: error))
                 self.sendResponse(status: 502, headers: ["Content-Type": "application/json"],
                                   body: Data(#"{"code":502,"msg":"proxy failed"}"#.utf8), on: connection)
                 return
             }
             let status = httpResponse?.statusCode ?? 502
             var headers: [String: String] = [:]
+            var cookies: [String] = []
             if let all = httpResponse?.allHeaderFields as? [String: Any] {
                 for (key, value) in all {
-                    guard let keyLower = (key as String).lowercased() as String? else { continue }
+                    let keyLower = key.lowercased()
                     if self.hopByHopHeaders.contains(keyLower) { continue }
-                    if keyLower == "set-cookie" || keyLower == "content-length" { continue }
-                    if let strValue = value as? String {
-                        headers[key as String] = strValue
+                    if keyLower == "content-length" { continue }
+                    if keyLower == "set-cookie" {
+                        if let one = value as? String { cookies.append(one) }
+                        continue
                     }
+                    // 上游可能给多个 CORS 头，用逗号拼在一起；先整行照抄，下面再按需补。
+                    let text = value as? String ?? String(describing: value)
+                    headers[key] = text
                 }
             }
+            if cookies.contains(where: { Self.isSessionCookie($0) }) {
+                NSLog("[FoliaLocalServer] proxy %@ %@ -> %d, session cookie from upstream", request.method, target.path, status)
+            } else {
+                NSLog("[FoliaLocalServer] proxy %@ %@ -> %d in %dms", request.method, target.path, status, elapsed)
+            }
             let body = data ?? Data()
-            self.sendResponse(status: status, headers: headers, body: body, on: connection)
+            self.sendResponse(status: status, headers: headers, cookies: cookies, body: body, on: connection)
         }.resume()
+    }
+
+    /// 登录态那一枚 cookie 的名字（网易云 MUSIC_U、QQ 的 qm_keyst、酷狗 kg_mid 等），只用来打日志。
+    private static func isSessionCookie(_ header: String) -> Bool {
+        let name = header.split(separator: "=", maxSplits: 1).first.map(String.init)?.lowercased() ?? ""
+        return name.contains("music_u") || name.contains("session") || name == "qm_keyst" || name == "kg_mid"
     }
 
     // ---- 静态文件 ----
@@ -197,9 +228,18 @@ final class FoliaLocalServer {
             return
         }
 
-        // SPA 兜底：非 API 路径找不到资源时返回 index.html（React Router 接管）
+        // runtime-config.js 只在 Docker 网关里存在（那里由 nginx 现写），bundle 里没有。
+        // 真发一次空配置，而不是掉进下面的兜底：脚本拿到 HTML 会被 WKWebView 当 MIME 不符拒掉。
+        if relative == "runtime-config.js" {
+            let script = Data("window.__FOLIA_RUNTIME_CONFIG__ = window.__FOLIA_RUNTIME_CONFIG__ || {};\n".utf8)
+            sendResponse(status: 200, headers: ["Content-Type": mimeType(for: relative)], body: script, on: connection)
+            return
+        }
+
+        // 静态资源缺失要回 404：回 index.html 的话，带 MIME 校验的请求会报一个与真正原因无关的错。
+        let missing = !(relative as NSString).pathExtension.isEmpty
         let indexURL = distURL.appendingPathComponent("index.html")
-        if let indexData = try? Data(contentsOf: indexURL) {
+        if !missing, let indexData = try? Data(contentsOf: indexURL) {
             sendResponse(status: 200, headers: ["Content-Type": "text/html; charset=utf-8"], body: indexData, on: connection)
         } else {
             sendResponse(status: 404, headers: ["Content-Type": "text/plain"], body: Data("not found".utf8), on: connection)
@@ -237,13 +277,15 @@ final class FoliaLocalServer {
 
     // ---- 响应 ----
 
-    private func sendResponse(status: Int, headers: [String: String], body: Data, on connection: NWConnection) {
+    private func sendResponse(status: Int, headers: [String: String], cookies: [String] = [], body: Data, on connection: NWConnection) {
         var head = "HTTP/1.1 \(status) \(reasonPhrase(status))\r\n"
-        var headerLines = ""
         for (key, value) in headers {
-            headerLines += "\(key): \(value)\r\n"
+            head += "\(key): \(value)\r\n"
         }
-        head += headerLines + "Content-Length: \(body.count)\r\n"
+        for cookie in cookies {
+            head += "Set-Cookie: \(cookie)\r\n"
+        }
+        head += "Content-Length: \(body.count)\r\n"
         head += "Connection: close\r\n\r\n"
 
         var out = Data(head.utf8)
