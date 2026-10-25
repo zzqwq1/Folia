@@ -14,6 +14,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var section: Section = .account
     @State private var showLogin = false
+    @State private var loginProvider: MusicProvider = .netease
 
     /// 手机上做得到的四个分区（原版 13 个分区里挑出跟本工程功能对得上的）
     enum Section: String, CaseIterable, Identifiable {
@@ -101,27 +102,46 @@ struct SettingsView: View {
     // MARK: - 主体
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            header
-            strip
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    pageHeader
-                    pageBody
+        ZStack {
+            VStack(alignment: .leading, spacing: 0) {
+                header
+                strip
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        pageHeader
+                        pageBody
+                    }
+                    .padding(.horizontal, M.bodyLead)
+                    .padding(.top, M.bodyTop)
+                    .padding(.bottom, M.bodyBottom)
                 }
-                .padding(.horizontal, M.bodyLead)
-                .padding(.top, M.bodyTop)
-                .padding(.bottom, M.bodyBottom)
+            }
+            .background(C.win)
+            .clipShape(RoundedRectangle(cornerRadius: M.corner, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: M.corner, style: .continuous)
+                    .strokeBorder(C.line2, lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.55), radius: 30, x: 0, y: 20)
+
+            // 登录窗是页面内浮层（原版 LoginWindow 叠在设置之上），不用系统 sheet
+            if showLogin {
+                Color.black.opacity(0.55)
+                    .ignoresSafeArea()
+                    .onTapGesture { closeLogin() }
+                    .transition(.opacity)
+                LoginView(provider: loginProvider, onClose: closeLogin)
+                    .environmentObject(library)
+                    .frame(maxWidth: 400)
+                    .padding(.horizontal, 24)
+                    .transition(.opacity)
             }
         }
-        .background(C.win)
-        .clipShape(RoundedRectangle(cornerRadius: M.corner, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: M.corner, style: .continuous)
-                .strokeBorder(C.line2, lineWidth: 1)
-        )
-        .shadow(color: .black.opacity(0.55), radius: 30, x: 0, y: 20)
         .preferredColorScheme(.dark)
+    }
+
+    private func closeLogin() {
+        withAnimation(moveAnimation) { showLogin = false }
     }
 
     // MARK: - Sheet 页头
@@ -212,14 +232,21 @@ struct SettingsView: View {
         }
     }
 
-    /// 账号：头像 / 昵称 / VIP + 扫码登录 + 退出登录
+    /// 账号：四个平台各一张卡（头像 / 昵称 / VIP + 扫码登录 + 退出登录）
     @ViewBuilder
     private var accountPage: some View {
-        SettingGroup(title: "网易云音乐", isFirst: true) {
-            if let account = library.account {
+        ForEach(Array(MusicProvider.allCases.enumerated()), id: \.element) { index, provider in
+            providerCard(provider, isFirst: index == 0)
+        }
+    }
+
+    @ViewBuilder
+    private func providerCard(_ provider: MusicProvider, isFirst: Bool) -> some View {
+        SettingGroup(title: provider.label, isFirst: isFirst) {
+            if let account = library.accounts[provider] {
                 SettingRow(hairline: false) {
                     HStack(spacing: 12) {
-                        accountAvatar(account)
+                        accountAvatar(account, provider: provider)
                         VStack(alignment: .leading, spacing: 0) {
                             Text(account.nickname)
                                 .font(.system(size: 14))
@@ -230,7 +257,7 @@ struct SettingsView: View {
                                 Circle()
                                     .fill(account.isVip ? C.warn : C.t3)
                                     .frame(width: 5, height: 5)
-                                Text(account.isVip ? "黑胶 VIP" : "普通用户")
+                                Text(account.isVip ? "会员" : "已登录")
                                     .font(.system(size: 12))
                                     .foregroundStyle(C.t2)
                                     .lineLimit(1)
@@ -248,7 +275,7 @@ struct SettingsView: View {
                             .font(.system(size: 14))
                             .foregroundStyle(C.t1)
                             .frame(height: M.rowLabelLine, alignment: .top)
-                        Text("扫码登录后，墙上会铺满你的收藏")
+                        Text("扫码登录后，墙上会铺满这个平台的收藏")
                             .font(.system(size: 12))
                             .foregroundStyle(C.t2)
                             .lineLimit(1)
@@ -259,28 +286,27 @@ struct SettingsView: View {
                 }
             }
 
-            SettingRow(action: { showLogin = true }) {
-                rowLabel("扫码登录网易云")
+            SettingRow(action: {
+                loginProvider = provider
+                withAnimation(moveAnimation) { showLogin = true }
+            }) {
+                rowLabel("扫码登录\(provider.shortName)")
                 Spacer(minLength: 0)
-                NeteaseMark(size: 24)
+                ProviderMark(provider: provider, size: 24)
                 Chevron()
             }
 
-            if library.isSignedIn {
-                SettingRow(action: { Task { await library.signOut() } }) {
+            if library.accounts[provider] != nil {
+                SettingRow(action: { Task { await library.signOut(provider: provider) } }) {
                     rowLabel("退出登录")
                     Spacer(minLength: 0)
                 }
             }
         }
-        .sheet(isPresented: $showLogin) {
-            LoginView()
-                .environmentObject(library)
-        }
     }
 
-    /// 账号头像：44pt 圆 + 角上 20pt 的网易云记号（原版 AccountPicture 的角标）
-    private func accountAvatar(_ account: Account) -> some View {
+    /// 账号头像：44pt 圆 + 角上 20pt 的平台记号（原版 AccountPicture 的角标）
+    private func accountAvatar(_ account: Account, provider: MusicProvider) -> some View {
         ZStack {
             Group {
                 if let url = account.avatar {
@@ -300,7 +326,7 @@ struct SettingsView: View {
             .clipShape(Circle())
 
             // 角标压在圆的右下（20pt 的记号移 25pt 到右下角），外层圆再裁掉外溢的部分
-            NeteaseMark(size: 20)
+            ProviderMark(provider: provider, size: 20)
                 .overlay(Circle().strokeBorder(C.card, lineWidth: 2))
                 .offset(x: 25, y: 25)
         }
@@ -409,13 +435,15 @@ struct SettingsView: View {
             }
         } 
 
-        SettingGroup(title: "平台", foot: "登录窗口标题前那个红底「云」字的记号。") {
-            SettingRow {
-                rowLabel("网易云音乐")
-                Spacer(minLength: 0)
-                NeteaseMark(size: 24)
+        SettingGroup(title: "平台", foot: "登录窗口标题前那个圆底记号的配色。") {
+            ForEach(MusicProvider.allCases) { provider in
+                SettingRow {
+                    rowLabel(provider.label)
+                    Spacer(minLength: 0)
+                    ProviderMark(provider: provider, size: 24)
+                }
             }
-        } 
+        }
     }
 
     /// 通用：版本 + 登录入口
@@ -434,16 +462,17 @@ struct SettingsView: View {
             }
 
             SettingGroup(title: "账号") {
-                SettingRow(action: { showLogin = true }) {
-                    rowLabel("扫码登录网易云")
-                    Spacer(minLength: 0)
-                    NeteaseMark(size: 24)
-                    Chevron()
+                ForEach(MusicProvider.allCases) { provider in
+                    SettingRow(action: {
+                        loginProvider = provider
+                        withAnimation(moveAnimation) { showLogin = true }
+                    }) {
+                        rowLabel("扫码登录\(provider.shortName)")
+                        Spacer(minLength: 0)
+                        ProviderMark(provider: provider, size: 24)
+                        Chevron()
+                    }
                 }
-            }
-            .sheet(isPresented: $showLogin) {
-                LoginView()
-                    .environmentObject(library)
             }
         }
     }
@@ -607,17 +636,19 @@ private struct SettingToggle: View {
     }
 }
 
-/// 网易云的记号：红底白字「云」（原版 PlatformMark：mark.color #dc2626、字号 size × 0.42）
-struct NeteaseMark: View {
+/// 平台记号：圆底 + 一个字（原版 PlatformMark，字号 size × 0.42）
+struct ProviderMark: View {
+    let provider: MusicProvider
     let size: CGFloat
 
     var body: some View {
-        Text("云")
+        Text(provider.markLetter)
             .font(.system(size: (size * 0.42).rounded(), weight: .bold))
             .foregroundStyle(Color.white)
             .lineLimit(1)
+            .minimumScaleFactor(0.6)
             .frame(width: size, height: size)
-            .background(Circle().fill(Color(hex: 0xDC2626)))
+            .background(Circle().fill(Color(hex: provider.markColorHex)))
     }
 }
 

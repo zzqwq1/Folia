@@ -53,14 +53,14 @@ struct CollectionView: View {
             backdrop
 
             if isLoading {
-                ProgressView()
-                    .tint(ink.opacity(0.5))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                cardGrid(placeholder: true)
             } else if songs.isEmpty {
                 Text("这个集合里没有可播放的歌曲")
                     .font(.system(size: 14))
                     .opacity(0.4)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                cardGrid(placeholder: false)
             }
 
             backButton
@@ -179,6 +179,111 @@ struct CollectionView: View {
         }
         .padding(.top, 16)
         .zIndex(4)
+    }
+
+    // MARK: - 曲面网格（`resolveGridViewCardBox` 的 <768 档：180×280 卡盒）
+    //
+    // 桌面端把卡片铺成一条可横竖拖拽的曲面；手机上按同样的卡盒尺寸收成一行三列的网格
+    // （180 + 间距 25 = 205 的横向节奏），正在播的那张卡描边并显示播放徽标。
+
+    private static let cardWidth: CGFloat = 180
+    private static let cardHeight: CGFloat = 280
+    private static let cardGapX: CGFloat = 25
+    private static let gridTop: CGFloat = 128
+    private static let gridBottom: CGFloat = 96
+
+    @ViewBuilder
+    private func cardGrid(placeholder: Bool) -> some View {
+        GeometryReader { geo in
+            let columns = max(Int((geo.size.width + Self.cardGapX) / (Self.cardWidth + Self.cardGapX)), 1)
+            let gap = max((geo.size.width - CGFloat(columns) * Self.cardWidth) / CGFloat(columns + 1), 12)
+            ScrollView(.vertical, showsIndicators: false) {
+                LazyVGrid(
+                    columns: Array(
+                        repeating: GridItem(.fixed(Self.cardWidth), spacing: gap, alignment: .top),
+                        count: columns
+                    ),
+                    alignment: .center,
+                    spacing: 24
+                ) {
+                    if placeholder {
+                        ForEach(0..<(columns * 2), id: \.self) { _ in
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .fill(ink.opacity(0.06))
+                                .frame(width: Self.cardWidth, height: Self.cardHeight)
+                        }
+                    } else {
+                        ForEach(Array(songs.enumerated()), id: \.offset) { index, song in
+                            Button {
+                                player.play(songs, startIndex: index, contextName: collection.name)
+                            } label: {
+                                gridCard(song: song, index: index)
+                            }
+                            .buttonStyle(ScaleButtonStyle())
+                        }
+                    }
+                }
+                .padding(.horizontal, gap)
+                .padding(.top, Self.gridTop)
+                .padding(.bottom, Self.gridBottom)
+            }
+        }
+        .opacity(placeholder ? 1 : (appeared ? 1 : 0))
+        .animation(.easeOut(duration: 0.24), value: appeared)
+    }
+
+    private func gridCard(song: Song, index: Int) -> some View {
+        let active = currentSongKey == WallTile.key(for: song)
+        return VStack(alignment: .leading, spacing: 0) {
+            ZStack {
+                Color.white.opacity(0.06)
+                AsyncImage(url: song.album.cover(size: 360)) { phase in
+                    if let image = phase.image {
+                        image.resizable().scaledToFill()
+                    } else {
+                        Image(systemName: "opticaldisc")
+                            .font(.system(size: 42))
+                            .opacity(0.18)
+                    }
+                }
+                if active {
+                    ZStack {
+                        Circle().fill(Color.black.opacity(0.45))
+                        Image(systemName: "waveform")
+                            .font(.system(size: 22, weight: .semibold))
+                            .foregroundStyle(theme.accent)
+                    }
+                    .frame(width: 52, height: 52)
+                }
+            }
+            .frame(width: Self.cardWidth, height: Self.cardWidth)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 0) {
+                Text(song.name)
+                    .font(.system(size: 14, weight: active ? .bold : .semibold))
+                    .foregroundStyle(ink)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text(WallTile.artistLabel(for: song))
+                    .font(.system(size: 11))
+                    .foregroundStyle(ink.opacity(0.55))
+                    .lineLimit(1)
+                    .padding(.top, 4)
+                Spacer(minLength: 0)
+                Text(String(format: "%02d · %@", index + 1, song.durationText))
+                    .font(.system(size: 10))
+                    .foregroundStyle(ink.opacity(0.4))
+                    .lineLimit(1)
+            }
+            .padding(.top, 10)
+            .padding(.horizontal, 2)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .frame(width: Self.cardWidth, height: Self.cardHeight, alignment: .top)
+        .opacity(song.isPlayable ? 1 : 0.5)
+        .contentShape(Rectangle())
     }
 
     // MARK: - 右下：列表按钮 + 定位按钮
@@ -478,9 +583,9 @@ struct CollectionView: View {
         defer { isLoading = false }
         switch collection.kind {
         case .album:
-            songs = (try? await NeteaseAPI.shared.album(id: collection.id))?.songs ?? []
+            songs = (try? await MusicAPI.shared.album(collection)) ?? []
         default:
-            songs = (try? await NeteaseAPI.shared.playlistTracks(id: collection.id)) ?? []
+            songs = (try? await MusicAPI.shared.playlistTracks(collection)) ?? []
         }
     }
 }

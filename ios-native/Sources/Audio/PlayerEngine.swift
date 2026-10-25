@@ -234,7 +234,7 @@ final class PlayerEngine: NSObject, ObservableObject {
         loadTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let (url, preview) = try await NeteaseAPI.shared.audioURL(songId: song.id)
+                let (url, preview) = try await MusicAPI.shared.audioURL(for: song)
                 guard !Task.isCancelled else { return }
                 self.isPreview = preview
                 let item = AVPlayerItem(url: url)

@@ -21,11 +21,12 @@ enum WallTitleFit {
 
     /// 返回适配 width 的标题（必要时截断并补省略号）。
     /// `minimumScale` 允许在文字太短、行数不够时不做缩放（与 CSS clamp 的行为一致）。
-    static func fit(_ text: String, width: CGFloat, style: Style) -> String {
+    /// `lines`：标题最多占几行，海报是 3 行；探索墙的 section 大标题是 2 行（LatticeHeading）。
+    static func fit(_ text: String, width: CGFloat, style: Style, lines: Int = maxLines) -> String {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, width > 8 else { return trimmed }
 
-        if lineCount(trimmed, width: width, style: style) <= maxLines {
+        if lineCount(trimmed, width: width, style: style) <= lines {
             return trimmed
         }
 
@@ -38,7 +39,7 @@ enum WallTitleFit {
             let mid = (low + high) / 2
             let candidate = String(graphemes.prefix(mid))
                 .trimmingCharacters(in: .whitespacesAndNewlines) + ellipsis
-            if lineCount(candidate, width: width, style: style) <= maxLines {
+            if lineCount(candidate, width: width, style: style) <= lines {
                 best = candidate
                 low = mid + 1
             } else {

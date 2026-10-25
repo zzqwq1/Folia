@@ -268,6 +268,34 @@ enum WallLayoutMath {
         return best
     }
 
+    /// Every poster of the block `from` sits in and of the eight blocks around it.
+    static func locateStepCandidates(
+        _ geometry: LatticeGeometry,
+        totalEntries: Int,
+        from: QueueInstance,
+        metrics: WallMetrics
+    ) -> [QueueInstance] {
+        let origin = block(of: geometry, instance: from)
+        var candidates: [QueueInstance] = []
+        for row in (origin.row - 1)...(origin.row + 1) {
+            for column in (origin.column - 1)...(origin.column + 1) {
+                for slotIndex in 0..<BlockTemplates.slotsPerBlock {
+                    candidates.append(
+                        buildInstance(
+                            geometry,
+                            totalEntries: totalEntries,
+                            absoluteColumn: column,
+                            absoluteRow: row,
+                            slotIndex: slotIndex,
+                            metrics: metrics
+                        )
+                    )
+                }
+            }
+        }
+        return candidates
+    }
+
     private static func floorDiv(_ value: Int, _ divisor: Int) -> Int {
         let quotient = value / divisor
         return (value % divisor != 0 && ((value < 0) != (divisor < 0))) ? quotient - 1 : quotient

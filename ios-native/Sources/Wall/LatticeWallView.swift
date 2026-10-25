@@ -2,10 +2,13 @@ import SwiftUI
 
 /// 海报墙容器。逐条移植 PosterWall.tsx：
 /// - 相机写在 `@State` 里，世界层只做 `offset + scaleEffect`（origin 左上）
-/// - 可见性由 `layoutLattice(bounds:overscan: 500)` 决定，最多 400 张
+/// - 可见性由布局（`WallLayoutSpec.near`，overscan 500）决定，最多 400 块
 /// - 单指拖拽带惯性（WALL_PAN_INERTIA），双指捏合缩放，长按聚焦，点卡展开
-/// - 点卡 → 让位表（layoutExpandedBlock）+ panTo（0.42s，cubic-bezier(0.22,1,0.36,1)）
+/// - 点卡 → 让位表（布局的 grown）+ panTo（0.42s，cubic-bezier(0.22,1,0.36,1)）
 /// - 入场波次（0.34s 封顶、抬升 90、0.88 → 1）只在第一次画出来后跑一遍
+///
+/// 两套布局共用这一层：传 `sections` 就是探索墙（lot 拼贴 + 标题格 + 段落选择器），
+/// 不传就是队列墙（无限格点）。
 struct LatticeWallView: View {
     let items: [WallItem]
     let theme: WallTheme
@@ -17,6 +20,8 @@ struct LatticeWallView: View {
     var emptyText: String = "开始播放任意歌曲后，队列会在这里铺开。"
     /// 左上角返回（nil 时不画，例如墙本身就是根页面时改放工具按钮）
     var onBack: (() -> Void)? = nil
+    /// 探索墙的段落；队列墙传空
+    var sections: [WallSectionSpec] = []
     /// 右下角工具区（设置 / 账号）
     var toolbar: AnyView? = nil
     /// 点卡的自身动作：集合 → 打开集合页
@@ -24,6 +29,9 @@ struct LatticeWallView: View {
     var onOpenPlayer: () -> Void = {}
     /// 外部（集合页的定位按钮）请求把某一首歌移到视口中心
     var locateRequest: WallLocateRequest? = nil
+    /// 探索墙左上角的刷新钮（原版 `.lattice-refresh` 接 `explore.refresh`）
+    var onRefresh: (() -> Void)? = nil
+    var isRefreshing: Bool = false
 
     @EnvironmentObject private var player: PlayerEngine
 
@@ -56,6 +64,13 @@ struct LatticeWallView: View {
     /// 每个实例的入场延迟，挂载时冻结（`useRef(entranceDelay).current`）
     @State private var landingDelays: [String: Double] = [:]
 
+    // MARK: - 段落（useWallSections）
+
+    /// 当前视口落在第几段
+    @State private var section: Int?
+    /// 正在飞往某段时记下那条补间，落地前不再被相机回调改写
+    @State private var flight: PanTween?
+
     // MARK: - 手势状态
 
     @State private var pan: PanSession?
@@ -69,9 +84,11 @@ struct LatticeWallView: View {
     var body: some View {
         ZStack(alignment: .topLeading) {
             backButton
+            refreshButton
             if measured { world }
             emptyState
             toolCluster
+            sectionFinder
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         // 世界层自己铺满，外壳按视口左上角排（与 CSS 的 absolute + top/left 一致）
@@ -94,18 +111,59 @@ struct LatticeWallView: View {
             guard let request else { return }
             locate(songId: request.songId)
         }
+        .onChange(of: layoutSignature) { _ in
+            // 段落变了（刷新 / 换墙）：重新看一次视口落在哪段
+            section = nil
+            watchCamera(camera)
+        }
         .task { await runEntrance() }
+    }
+
+    // MARK: - 布局
+
+    private var wallLayout: WallLayoutSpec {
+        if !sections.isEmpty {
+            return ExploreLayout(pageSections: sections, metrics: Self.metrics)
+        }
+        return QueueLayout(totalEntries: items.count, metrics: Self.metrics)
+    }
+
+    private var layoutSignature: String {
+        if sections.isEmpty { return "queue:\(items.count)" }
+        return sections.map { "\($0.key)#\($0.entries.count)" }.joined(separator: "|")
     }
 
     // MARK: - 世界层
 
     private var world: some View {
-        let drawn = drawnItems
+        let layout = wallLayout
+        let visible = layout.near(bounds, overscan: Self.overscan)
+        let headings = visible.headings
+        let extraPosters: [QueueInstance] = {
+            guard let activeId, !visible.posters.contains(where: { $0.instanceId == activeId }),
+                  let stale = instance(named: activeId) else { return [] }
+            return [stale]
+        }()
+        let posters = visible.posters + extraPosters
         let rects = activeId.map { expandedRects(for: $0) } ?? [:]
         let pixelScale = (camera.scale * UIScreen.main.scale).rounded(.up)
 
         return ZStack(alignment: .topLeading) {
-            ForEach(drawn) { instance in
+            ForEach(headings) { heading in
+                if layout.sections.indices.contains(heading.section) {
+                    LatticeHeadingView(
+                        heading: heading,
+                        section: layout.sections[heading.section],
+                        total: layout.sections.count,
+                        theme: theme,
+                        lightsOut: lightsOut
+                    )
+                    .offset(x: heading.x, y: heading.y)
+                    .zIndex(1)
+                }
+            }
+
+            ForEach(posters) { instance in
                 if let item = items(of: instance) {
                     let expanded = instance.instanceId == activeId
                     let rect = rects[instance.instanceId] ?? instance.rect
@@ -182,6 +240,42 @@ struct LatticeWallView: View {
         }
     }
 
+    /// `.lattice-refresh`：探索墙左上角、返回钮右边（`left: 72`，窄屏 64），同样 40×40 圆。
+    /// 刷新中图标转圈且禁用（原版 `[aria-disabled=true]` → opacity .5、无 hover 变换）。
+    @ViewBuilder
+    private var refreshButton: some View {
+        if let onRefresh, !sections.isEmpty {
+            let compact = viewport.width > 0 && viewport.width < 640
+            VStack(spacing: 0) {
+                Button(action: onRefresh) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 16, weight: .semibold))
+                        .frame(width: 40, height: 40)
+                        .foregroundStyle(theme.ink)
+                        .background(.ultraThinMaterial, in: Circle())
+                        .overlay(Circle().fill(Color.white.opacity(0.08)))
+                        .clipShape(Circle())
+                        .shadow(color: .black.opacity(0.24), radius: 15, x: 0, y: 10)
+                        .rotationEffect(.degrees(isRefreshing ? 360 : 0))
+                        .animation(
+                            isRefreshing
+                                ? .linear(duration: 0.9).repeatForever(autoreverses: false)
+                                : .default,
+                            value: isRefreshing
+                        )
+                        .opacity(isRefreshing ? 0.5 : 1)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(WallBackButtonStyle())
+                .disabled(isRefreshing)
+                .padding(.leading, compact ? 64 : 72)
+                .padding(.top, compact ? 14 : 20)
+                Spacer(minLength: 0)
+            }
+            .zIndex(5)
+        }
+    }
+
     /// `.lattice-empty`：居中、gap 9、strong 17px / 0.16em、span 12px / 0.5
     @ViewBuilder
     private var emptyState: some View {
@@ -201,6 +295,21 @@ struct LatticeWallView: View {
         }
     }
 
+    /// 段落选择器只在探索墙、且不止一段时出现
+    @ViewBuilder
+    private var sectionFinder: some View {
+        let layout = wallLayout
+        if !layout.sections.isEmpty, layout.sections.count > 0, section != nil {
+            LatticeSectionFinder(
+                sections: layout.sections,
+                current: section ?? 0,
+                theme: theme,
+                onChoose: chooseSection
+            )
+            .zIndex(6)
+        }
+    }
+
     @ViewBuilder
     private var toolCluster: some View {
         if let toolbar {
@@ -210,8 +319,6 @@ struct LatticeWallView: View {
                     Spacer(minLength: 0)
                     toolbar
                 }
-                .padding(.trailing, 16)
-                .padding(.bottom, 28)
             }
             .zIndex(4)
         }
@@ -219,31 +326,14 @@ struct LatticeWallView: View {
 
     // MARK: - 绘制列表
 
-    private var geometry: LatticeGeometry {
-        WallLayoutMath.geometry(totalEntries: items.count, metrics: Self.metrics)
-    }
-
-    private var drawnItems: [QueueInstance] {
-        guard measured, !items.isEmpty else { return [] }
-        let visible = WallLayoutMath.layoutLattice(
-            geometry,
-            totalEntries: items.count,
-            bounds: bounds,
-            overscan: Self.overscan,
-            metrics: Self.metrics
-        )
-        guard let activeId, !visible.contains(where: { $0.instanceId == activeId }) else {
-            return visible
-        }
-        guard let stale = instance(named: activeId) else { return visible }
-        return visible + [stale]
-    }
-
-    /// 由 instanceId `"cellSlot:repeatX:repeatY"` 反推块坐标并重建实例
+    /// 由 instanceId 反推实例：探索墙是 `"seat:column:row"`，队列墙是 `"cellSlot:repeatX:repeatY"`
     private func instance(named instanceId: String) -> QueueInstance? {
         let parts = instanceId.split(separator: ":").compactMap { Int($0) }
         guard parts.count == 3 else { return nil }
-        let layout = geometry
+        if !sections.isEmpty {
+            return exploreInstance(column: parts[1], row: parts[2], seat: parts[0])
+        }
+        let layout = WallLayoutMath.geometry(totalEntries: items.count, metrics: Self.metrics)
         guard layout.blockWidth > 0, layout.blockHeight > 0 else { return nil }
         let cellSlot = parts[0]
         let blockInCell = cellSlot / BlockTemplates.slotsPerBlock
@@ -259,6 +349,23 @@ struct LatticeWallView: View {
         )
     }
 
+    /// 探索墙：靠 `stepCandidates` 在邻近九块 lot 里找回同一座位
+    private func exploreInstance(column: Int, row: Int, seat: Int) -> QueueInstance? {
+        let layout = wallLayout
+        guard let anchor = layout.near(
+            WallBounds(
+                left: CGFloat(column) * 1_000,
+                top: CGFloat(row) * 1_000,
+                right: CGFloat(column) * 1_000,
+                bottom: CGFloat(row) * 1_000
+            ),
+            overscan: 2_000
+        ).posters.first(where: { $0.repeatX == column && $0.repeatY == row && $0.cellSlot == seat }) else {
+            return nil
+        }
+        return anchor
+    }
+
     private func items(of instance: QueueInstance) -> WallItem? {
         guard instance.queueIndex >= 0, instance.queueIndex < items.count else { return nil }
         return items[instance.queueIndex]
@@ -267,12 +374,7 @@ struct LatticeWallView: View {
     /// 展开卡的让位表：整块重新排布，其余卡保持 base rect
     private func expandedRects(for instanceId: String) -> [String: WallRect] {
         guard let instance = instance(named: instanceId) else { return [:] }
-        return WallLayoutMath.layoutExpandedBlock(
-            geometry,
-            totalEntries: items.count,
-            active: instance,
-            metrics: Self.metrics
-        )
+        return wallLayout.grown(instance)
     }
 
     private func poppedScale(instance: QueueInstance, expanded: Bool) -> CGFloat {
@@ -303,6 +405,7 @@ struct LatticeWallView: View {
             applyCamera(next, updateBounds: false)
         }
         measured = true
+        watchCamera(camera)
     }
 
     // MARK: - 入场波次
@@ -324,13 +427,7 @@ struct LatticeWallView: View {
     /// `min(0.34, steps / pitch * 0.03)`，steps 从视口左上角量起
     private func freezeLandingDelays() {
         guard !entranceDone, landingDelays.isEmpty, !items.isEmpty else { return }
-        let visible = WallLayoutMath.layoutLattice(
-            geometry,
-            totalEntries: items.count,
-            bounds: bounds,
-            overscan: Self.overscan,
-            metrics: Self.metrics
-        )
+        let visible = wallLayout.near(bounds, overscan: Self.overscan).posters
         var delays: [String: Double] = [:]
         for instance in visible {
             let steps = max(0, instance.x - bounds.left) + max(0, instance.y - bounds.top)
@@ -342,6 +439,49 @@ struct LatticeWallView: View {
         landingDelays = delays
     }
 
+    // MARK: - 段落（useWallSections）
+
+    /// 视口中心落在哪一段就以哪一段为当前段
+    private func watchCamera(_ camera: WallCamera) {
+        let layout = wallLayout
+        guard layout.lotSize != nil, !layout.sections.isEmpty, viewport.width > 0 else { return }
+        // 飞往某段的途中（且相机仍归这条补间管）不改写；落地后补间清空也不改写
+        if let flight {
+            if panTween === flight { return }
+            if panTween == nil { return }
+        }
+        let lot = layout.lotSize ?? .zero
+        let corner = WallCamera.home
+        let world = CGPoint(
+            x: (min(viewport.width / 2, corner.x + lot.width * camera.scale / 2) - camera.x) / camera.scale,
+            y: (min(viewport.height / 2, corner.y + lot.height * camera.scale / 2) - camera.y) / camera.scale
+        )
+        guard let next = layout.sectionAt(world) else { return }
+        guard next != section else { return }
+        section = next
+    }
+
+    private func goToSection(_ target: Int) {
+        let layout = wallLayout
+        guard let start = layout.sectionStart(target, point: viewportCenter) else { return }
+        let corner = WallCamera.home
+        let rect = WallRect(
+            x: start.x - corner.x / camera.scale,
+            y: start.y - corner.y / camera.scale,
+            width: viewport.width / camera.scale,
+            height: viewport.height / camera.scale
+        )
+        panTo(rect)
+        flight = panTween
+        section = target
+    }
+
+    private func chooseSection(_ target: Int) {
+        // 离开键盘焦点（原版 leaveForSection）
+        focusedId = nil
+        goToSection(target)
+    }
+
     // MARK: - 相机
 
     private func applyCamera(_ next: WallCamera, updateBounds: Bool = false) {
@@ -349,6 +489,7 @@ struct LatticeWallView: View {
         if updateBounds {
             bounds = WallBoundsReserve.merge(bounds, with: next.worldBounds(viewport: viewport))
         }
+        watchCamera(next)
     }
 
     private func updateCamera(x: CGFloat, y: CGFloat) {
@@ -534,12 +675,7 @@ struct LatticeWallView: View {
             activeId = instanceId
             touchOpen = false
         }
-        let rects = WallLayoutMath.layoutExpandedBlock(
-            geometry,
-            totalEntries: items.count,
-            active: instance,
-            metrics: Self.metrics
-        )
+        let rects = wallLayout.grown(instance)
         if let rect = rects[instanceId] {
             panTo(rect)
         }
@@ -559,7 +695,8 @@ struct LatticeWallView: View {
             y: (point.y - camera.y) / camera.scale
         )
         let rects = activeId.map { expandedRects(for: $0) } ?? [:]
-        return drawnItems.reversed().first { instance in
+        let visible = wallLayout.near(bounds, overscan: Self.overscan).posters
+        return visible.reversed().first { instance in
             let rect = rects[instance.instanceId] ?? instance.rect
             return world.x >= rect.x && world.x <= rect.x + rect.width
                 && world.y >= rect.y && world.y <= rect.y + rect.height
@@ -579,24 +716,17 @@ struct LatticeWallView: View {
             withAnimation(Self.dragSpring) { self.activeId = nil }
             return
         }
+        let layout = wallLayout
         let old = instance(named: activeId)
-        guard let nearest = WallLayoutMath.locateNearestInstance(
-            geometry,
-            totalEntries: items.count,
+        guard let nearest = layout.nearest(
             queueIndex: queueIndex,
-            point: CGPoint(x: old?.rect.midX ?? 0, y: old?.rect.midY ?? 0),
-            metrics: Self.metrics
+            point: CGPoint(x: old?.rect.midX ?? 0, y: old?.rect.midY ?? 0)
         ) else {
             withAnimation(Self.dragSpring) { self.activeId = nil }
             return
         }
         let before = old?.rect
-        let after = WallLayoutMath.layoutExpandedBlock(
-            geometry,
-            totalEntries: items.count,
-            active: nearest,
-            metrics: Self.metrics
-        )[nearest.instanceId]
+        let after = layout.grown(nearest)[nearest.instanceId]
         self.activeId = nearest.instanceId
         focusedId = nearest.instanceId
 
@@ -634,34 +764,15 @@ struct LatticeWallView: View {
     /// 这首歌现在在不在视口里（原版 isPlayingSongHere）
     func isOnScreen(songId: String) -> Bool {
         guard measured, let queueIndex = items.firstIndex(where: { $0.id == songId }) else { return false }
-        guard let instance = WallLayoutMath.locateNearestInstance(
-            geometry,
-            totalEntries: items.count,
-            queueIndex: queueIndex,
-            point: viewportCenter,
-            metrics: Self.metrics
-        ) else { return false }
-        let bounds = instance.rect.bounds
-        let visible = camera.worldBounds(viewport: viewport)
-        return WallLayoutMath.overlaps(bounds, visible)
+        guard let instance = wallLayout.nearest(queueIndex: queueIndex, point: viewportCenter) else { return false }
+        return WallLayoutMath.overlaps(instance.rect.bounds, camera.worldBounds(viewport: viewport))
     }
 
     private func focus(byIndex queueIndex: Int, instant: Bool) {
-        guard let instance = WallLayoutMath.locateNearestInstance(
-            geometry,
-            totalEntries: items.count,
-            queueIndex: queueIndex,
-            point: viewportCenter,
-            metrics: Self.metrics
-        ) else { return }
+        let layout = wallLayout
+        guard let instance = layout.nearest(queueIndex: queueIndex, point: viewportCenter) else { return }
         focusedId = instance.instanceId
-        let rect = WallLayoutMath.layoutExpandedBlock(
-            geometry,
-            totalEntries: items.count,
-            active: instance,
-            metrics: Self.metrics
-        )[instance.instanceId]
-        if let rect {
+        if let rect = layout.grown(instance)[instance.instanceId] {
             panTo(rect, instant: instant)
         }
     }
@@ -671,23 +782,12 @@ struct LatticeWallView: View {
         guard let key, let queueIndex = items.firstIndex(where: { $0.id == key }) else { return }
         // 入场第一次：直接落在卡上，不做飞行
         let isEntry = activeId == nil
-        guard let instance = WallLayoutMath.locateNearestInstance(
-            geometry,
-            totalEntries: items.count,
-            queueIndex: queueIndex,
-            point: viewportCenter,
-            metrics: Self.metrics
-        ) else { return }
+        let layout = wallLayout
+        guard let instance = layout.nearest(queueIndex: queueIndex, point: viewportCenter) else { return }
         focusedId = instance.instanceId
         if !autoFocusOnSongChange && !isEntry { return }
         activeId = instance.instanceId
-        let rect = WallLayoutMath.layoutExpandedBlock(
-            geometry,
-            totalEntries: items.count,
-            active: instance,
-            metrics: Self.metrics
-        )[instance.instanceId]
-        if let rect {
+        if let rect = layout.grown(instance)[instance.instanceId] {
             panTo(rect, instant: isEntry)
         }
     }
@@ -719,7 +819,7 @@ private struct PanSession {
 /// 补间与惯性共用一条时间轴：按需刷新，结束时回调。
 /// 用 `CADisplayLink` 而不是 SwiftUI 动画，因为相机每帧要写进同一个 `@State`，
 /// 轨迹必须能随时被打断（原版 applyCamera + animationRef.stop）。
-private final class PanTween {
+final class PanTween {
     private let from: CGPoint
     private let to: CGPoint
     private let duration: Double

@@ -11,6 +11,7 @@ import SwiftUI
 struct HomeView: View {
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var player: PlayerEngine
+    @EnvironmentObject private var covers: WallCoverLoader
 
     @State private var mode: Mode = .library
     @State private var openCollection: MusicCollection?
@@ -28,6 +29,8 @@ struct HomeView: View {
     enum Mode: Equatable {
         case library
         case queue
+        /// 探索墙：按段落拼贴，每段开头是一格大标题（原版 explore）
+        case explore
     }
 
     private var theme: WallTheme { .midnight }
@@ -40,8 +43,43 @@ struct HomeView: View {
         WallItem.collections(library.collections)
     }
 
+    /// 探索墙的段落：按平台分段（每段标题是平台名），段内条目按种类排序
+    private var exploreSections: [WallSectionSpec] {
+        var result: [WallSectionSpec] = []
+        for provider in MusicProvider.allCases {
+            let list = library.collections.enumerated()
+                .filter { $0.element.provider == provider }
+                .map { index, element in
+                    WallSectionSpec.Entry(index: index, kind: WallItem.entryKind(of: element))
+                }
+                .sorted { $0.kind.rank < $1.kind.rank }
+            guard !list.isEmpty else { continue }
+            result.append(
+                WallSectionSpec(key: "provider:\(provider.rawValue)", heading: provider.label, entries: list)
+            )
+        }
+        return result
+    }
+
+    private var exploreItems: [WallItem] {
+        WallItem.explore(sections: exploreSections, collections: library.collections)
+    }
+
+    /// 墙上要画的东西：探索墙用摊平后的格子，资料库 / 队列墙用各自的条目
     private var items: [WallItem] {
-        mode == .queue ? queueItems : libraryItems
+        switch mode {
+        case .queue: return queueItems
+        case .library: return libraryItems
+        case .explore: return exploreItems
+        }
+    }
+
+    /// 传给墙的段落表（探索墙才有）
+    private var wallSections: [WallSectionSpec] {
+        guard mode == .explore else { return [] }
+        let specs = exploreSections
+        guard !specs.isEmpty else { return [] }
+        return WallItem.sections(of: exploreItems)
     }
 
     var body: some View {
@@ -51,13 +89,16 @@ struct HomeView: View {
 
             // 底部居中的播放胶囊（原版 `FloatingPlayerControls`，`z-60`）
             if player.currentSong != nil {
-                PlayerCapsule(onOpenPlayer: { showPlayer = true })
+                PlayerCapsule(onOpenPlayer: {
+                    withAnimation(.easeOut(duration: 0.2)) { showPlayer = true }
+                })
                     .frame(maxHeight: .infinity, alignment: .bottom)
                     .zIndex(60)
             }
 
             LatticeWallView(
                 items: items,
+                sections: wallSections,
                 theme: theme,
                 lightsOut: isLightsOut,
                 hasPosterTint: isTintEnabled,
@@ -65,15 +106,19 @@ struct HomeView: View {
                 emptyTitle: mode == .queue ? "队列是空的" : "还没有歌单",
                 emptyText: mode == .queue
                     ? "开始播放任意歌曲后，队列会在这里铺开。"
-                    : "在设置里扫码登录网易云，墙面就会铺满你的收藏。",
+                    : "在设置里扫码登录网易云 / QQ / 酷狗 / 波点，墙面就会铺满你的收藏。",
                 toolbar: AnyView(toolsStack),
                 onOpenItem: { item in
                     if case .collection(let collection) = item.source {
                         openCollection = collection
                     }
                 },
-                onOpenPlayer: { showPlayer = true },
-                locateRequest: locateRequest
+                onOpenPlayer: {
+                    withAnimation(.easeOut(duration: 0.2)) { showPlayer = true }
+                },
+                locateRequest: locateRequest,
+                onRefresh: { Task { await library.refresh() } },
+                isRefreshing: library.isLoading
             )
             .id(mode)
 
@@ -96,26 +141,62 @@ struct HomeView: View {
                 .transition(.opacity)
                 .zIndex(110)
             }
+
+            // 设置 / 登录：原版是页面内浮层（`fixed inset-0 z-[120]` + 居中卡片），不是系统 sheet
+            if showSettings {
+                overlayScrim {
+                    withAnimation(.easeOut(duration: 0.2)) { showSettings = false }
+                }
+                .zIndex(120)
+
+                SettingsView()
+                    .environmentObject(library)
+                    .environmentObject(player)
+                    .frame(maxWidth: 560, maxHeight: 640)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 24)
+                    .transition(.opacity)
+                    .zIndex(121)
+            }
+
+            // 播放面板：原版 UnifiedPanel 浮在墙面之上（`z-90`），同样不是系统 sheet
+            if showPlayer {
+                NowPlayingView(onClose: {
+                    withAnimation(.easeOut(duration: 0.2)) { showPlayer = false }
+                })
+                .environmentObject(player)
+                .environmentObject(library)
+                .environmentObject(covers)
+                .transition(.opacity)
+                .zIndex(130)
+            }
         }
         .ignoresSafeArea()
-        .sheet(isPresented: $showSettings) {
-            SettingsView()
-                .environmentObject(library)
-                .environmentObject(player)
-        }
-        .sheet(isPresented: $showPlayer) {
-            NowPlayingView()
-                .environmentObject(player)
-                .environmentObject(library)
-        }
         .onChange(of: player.queue.isEmpty) { empty in
-            // 队列空了回到资料库墙，有歌了自动进队列墙
-            mode = empty ? .library : .queue
-            if empty { showQueueIsland = false }
+            // 队列空了：队列墙没有内容可铺，退回资料库；探索墙不受影响。
+            // 队列从空变非空：原版是切歌自动聚焦，这里在资料库墙上时自动进队列墙。
+            if empty {
+                if mode == .queue { mode = .library }
+                showQueueIsland = false
+            } else if mode == .library {
+                mode = .queue
+            }
         }
         .onAppear {
-            if !player.queue.isEmpty { mode = .queue }
+            if !player.queue.isEmpty && mode == .library { mode = .queue }
         }
+    }
+
+    /// 浮层背后的遮罩：原版 `fixed inset-0` 的深色毛玻璃，点空白关闭
+    private func overlayScrim(_ action: @escaping () -> Void) -> some View {
+        ZStack {
+            Rectangle()
+                .fill(Color.black.opacity(0.55))
+                .background(.ultraThinMaterial)
+        }
+        .ignoresSafeArea()
+        .contentShape(Rectangle())
+        .onTapGesture(perform: action)
     }
 
     /// 按钮上方的一列（column-reverse）：队列浮岛在上、工具按钮在下
@@ -146,8 +227,8 @@ struct HomeView: View {
                 .environmentObject(player)
             }
         }
-        .padding(.trailing, 16)
-        .padding(.bottom, 16)
+        // 内边距由 WallToolsPanel 自己带（原版 `.lattice-tools { right/bottom: 24px }`，
+        // ≤640px 时 16px）；这里再叠一层会让按钮多缩进一份，图钉看起来没贴住右下角。
     }
 
     // MARK: - 面板条目
@@ -161,12 +242,28 @@ struct HomeView: View {
                   disabled: true, keepOpen: true),
             .init(id: .queue, icon: "list.bullet", label: showQueueIsland ? "收起队列" : "播放队列",
                   keepOpen: true),
-            .init(id: .destination, icon: mode == .queue ? "square.grid.2x2" : "music.note.list",
-                  label: mode == .queue ? "资料库" : "播放队列"),
+            .init(id: .destination, icon: destinationIcon, label: destinationLabel),
             .init(id: .openPlayer, icon: "opticaldisc", label: "打开播放面板",
                   disabled: player.currentSong == nil),
             .init(id: .openSettings, icon: "gearshape", label: "打开设置"),
         ]
+    }
+
+    /// 山去处格的图标 / 文案：资料库 ↔ 播放队列 ↔ 探索墙 三态轮转
+    private var destinationIcon: String {
+        switch mode {
+        case .library: return "music.note.list"
+        case .queue: return "square.grid.2x2"
+        case .explore: return "square.stack.3d.up"
+        }
+    }
+
+    private var destinationLabel: String {
+        switch mode {
+        case .library: return "播放队列"
+        case .queue: return "探索墙"
+        case .explore: return "资料库"
+        }
     }
 
     private var canShuffle: Bool { player.queue.count > 1 }
@@ -176,7 +273,7 @@ struct HomeView: View {
             .init(id: "wall-mode", kind: .action(
                 icon: "rectangle.3.group",
                 label: "墙面",
-                value: mode == .queue ? "队列" : "资料库",
+                value: mode == .queue ? "队列" : (mode == .explore ? "探索" : "资料库"),
                 disabled: false
             )),
             .init(id: "auto-focus", kind: .action(
@@ -198,11 +295,12 @@ struct HomeView: View {
             // 原版是纯偏好开合，不看队列是否为空（空队列浮岛里显示「队列是空的」）
             withAnimation(.easeOut(duration: 0.18)) { showQueueIsland.toggle() }
         case .destination:
-            mode = mode == .queue ? .library : .queue
+            // 资料库 → 播放队列 → 探索墙 → 资料库
+            mode = mode == .library ? .queue : (mode == .queue ? .explore : .library)
         case .openPlayer:
-            showPlayer = true
+            withAnimation(.easeOut(duration: 0.2)) { showPlayer = true }
         case .openSettings:
-            showSettings = true
+            withAnimation(.easeOut(duration: 0.2)) { showSettings = true }
         }
     }
 

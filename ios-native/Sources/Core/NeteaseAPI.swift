@@ -165,7 +165,8 @@ actor NeteaseAPI {
 
     private static func account(from raw: [String: Any]) -> Account {
         Account(
-            userId: (raw["userId"] as? NSNumber)?.intValue ?? (raw["id"] as? NSNumber)?.intValue ?? 0,
+            userId: String((raw["userId"] as? NSNumber)?.intValue ?? (raw["id"] as? NSNumber)?.intValue ?? 0),
+            provider: .netease,
             nickname: raw["nickname"] as? String ?? "",
             avatarUrl: raw["avatarUrl"] as? String,
             vipType: (raw["vipType"] as? NSNumber)?.intValue
@@ -238,15 +239,15 @@ actor NeteaseAPI {
     // MARK: - 曲库
 
     /// 用户歌单列表（含「我喜欢的音乐」）
-    func userPlaylists(userId: Int, limit: Int = 1000, offset: Int = 0) async throws -> [MusicCollection] {
+    func userPlaylists(userId: String, limit: Int = 1000, offset: Int = 0) async throws -> [MusicCollection] {
         let json = try await get("/user/playlist", query: [
-            "uid": String(userId), "limit": String(limit), "offset": String(offset),
+            "uid": userId, "limit": String(limit), "offset": String(offset),
         ], needsTimestamp: true)
         let list = json["playlist"] as? [[String: Any]] ?? []
         return list.map { raw in
             let creatorId = (raw["creator"] as? [String: Any]).flatMap { ($0["userId"] as? NSNumber)?.intValue }
             let specialType = (raw["specialType"] as? NSNumber)?.intValue
-            let liked = specialType == 5 && creatorId == userId
+            let liked = specialType == 5 && String(creatorId ?? 0) == userId
             return Self.collection(from: raw, kind: .playlist, isLiked: liked)
         }
     }
@@ -280,24 +281,24 @@ actor NeteaseAPI {
     }
 
     /// 歌单详情
-    func playlistDetail(id: Int) async throws -> MusicCollection? {
-        let json = try await get("/playlist/detail", query: ["id": String(id)], needsTimestamp: true)
+    func playlistDetail(id: String) async throws -> MusicCollection? {
+        let json = try await get("/playlist/detail", query: ["id": id], needsTimestamp: true)
         guard let raw = json["playlist"] as? [String: Any] else { return nil }
         return Self.collection(from: raw, kind: .playlist, isLiked: false)
     }
 
     /// 歌单全部曲目
-    func playlistTracks(id: Int, limit: Int = 1000, offset: Int = 0) async throws -> [Song] {
+    func playlistTracks(id: String, limit: Int = 1000, offset: Int = 0) async throws -> [Song] {
         let json = try await get("/playlist/track/all", query: [
-            "id": String(id), "limit": String(limit), "offset": String(offset),
+            "id": id, "limit": String(limit), "offset": String(offset),
         ])
         let list = json["songs"] as? [[String: Any]] ?? []
         return list.compactMap(Self.song(from:))
     }
 
     /// 专辑详情 + 曲目
-    func album(id: Int) async throws -> (collection: MusicCollection, songs: [Song])? {
-        let json = try await get("/album", query: ["id": String(id)])
+    func album(id: String) async throws -> (collection: MusicCollection, songs: [Song])? {
+        let json = try await get("/album", query: ["id": id])
         guard let raw = json["album"] as? [String: Any] else { return nil }
         let songs = (json["songs"] as? [[String: Any]] ?? []).compactMap(Self.song(from:))
         return (Self.collection(from: raw, kind: .album, isLiked: false), songs)
@@ -342,6 +343,30 @@ actor NeteaseAPI {
         return LyricParser.parse(yrc.isEmpty ? lrc : yrc)
     }
 
+    // MARK: - MusicAPI 用的字符串版入口
+
+    func audio(for song: Song) async throws -> (url: URL, isPreview: Bool) {
+        guard let id = Int(song.id) else {
+            throw APIError(code: nil, message: "歌曲 id 无效")
+        }
+        return try await audioURL(songId: id)
+    }
+
+    func lyrics(for song: Song) async throws -> [LyricLine] {
+        guard let id = Int(song.id) else { return [] }
+        return try await lyrics(songId: id)
+    }
+
+    // MARK: - 登录
+
+    func signIn(cookie: String) async throws -> Account {
+        signInCookie = cookie
+        guard let account = try await currentAccount() else {
+            throw APIError(code: nil, message: "cookie 无效")
+        }
+        return account
+    }
+
     // MARK: - JSON → 模型
 
     private static func collection(from raw: [String: Any], kind: CollectionKind, isLiked: Bool) -> MusicCollection {
@@ -350,7 +375,8 @@ actor NeteaseAPI {
             ?? artists.first?["name"] as? String
             ?? (raw["artist"] as? [String: Any])?["name"] as? String
         return MusicCollection(
-            id: (raw["id"] as? NSNumber)?.intValue ?? 0,
+            id: String((raw["id"] as? NSNumber)?.intValue ?? 0),
+            provider: .netease,
             name: raw["name"] as? String ?? "",
             kind: kind,
             coverUrl: raw["coverImgUrl"] as? String ?? raw["picUrl"] as? String,
@@ -378,16 +404,17 @@ actor NeteaseAPI {
         let st = (privilege?["st"] as? NSNumber)?.intValue
 
         return Song(
-            id: id,
+            id: String(id),
+            provider: .netease,
             name: base["name"] as? String ?? raw["name"] as? String ?? "未知歌曲",
             artists: artists.enumerated().map { index, artist in
                 Artist(
-                    id: (artist["id"] as? NSNumber)?.intValue ?? index,
+                    id: String((artist["id"] as? NSNumber)?.intValue ?? index),
                     name: artist["name"] as? String ?? ""
                 )
             }.filter { !$0.name.isEmpty },
             album: Album(
-                id: (albumRaw["id"] as? NSNumber)?.intValue ?? 0,
+                id: String((albumRaw["id"] as? NSNumber)?.intValue ?? 0),
                 name: albumRaw["name"] as? String ?? "",
                 coverUrl: albumRaw["picUrl"] as? String ?? albumRaw["blPicUrl"] as? String
                     ?? (albumRaw["artist"] as? [String: Any])?["picUrl"] as? String

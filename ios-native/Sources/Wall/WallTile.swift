@@ -17,8 +17,8 @@ struct WallTile: Identifiable, Equatable {
     let coverUrl: String?
     let section: Section
 
-    /// 网易云的 key 是 `id:...`，同一首歌在队列里出现两次时原版也当作两张卡
-    static func key(for song: Song) -> String { "netease:\(song.id)" }
+    /// 原版 `getPlaybackSongKey` = `${provider}:${id}`；同一首歌在队列里出现两次时也当作两张卡
+    static func key(for song: Song) -> String { song.playbackKey }
 
     /// 徽标序号：`String(queueIndex + 1).padStart(2, '0')`
     var badgeNumber: String { String(format: "%02d", queueIndex + 1) }
@@ -56,10 +56,10 @@ struct WallTile: Identifiable, Equatable {
 /// 首页墙上的一个「集合」：歌单 / 专辑 / 推荐电台。
 /// 原版桌面首页铺的是收藏的集合，点开后进集合页再播放曲目；这里保持同一层级。
 struct WallEntry: Identifiable, Equatable {
-    let id: Int
+    let id: String
     let collection: MusicCollection
 
     static func build(_ collections: [MusicCollection]) -> [WallEntry] {
-        collections.map { WallEntry(id: $0.id, collection: $0) }
+        collections.map { WallEntry(id: $0.idString, collection: $0) }
     }
 }

@@ -2,75 +2,79 @@ import SwiftUI
 
 /// 复刻原版 Web 的扫码登录窗口（src/components/login/window/LoginWindow.tsx + LoginTile / LoginMessage）。
 ///
-/// 层级：与设置页同一个 Sheet 外壳（窗底 #1a1a1d / 24pt 圆角 / 1px 16% 外描边）
-/// → 页头（24pt 网易云记号 + 16pt 半粗「登录到 网易云音乐」+ 32×32 关闭钮）
-/// → 窄版正文（原版 `max-width:803px` 分支）：200×200 圆角 12 的 tile，下面竖排居中的消息区
-/// （20pt / 28 行高标题 + 13pt 说明 + 32pt 高操作按钮）。
+/// 层级：窗底 #1a1a1d / 24pt 圆角 / 1px 16% 外描边
+/// → 页头（24pt 平台记号 + 16pt 半粗「登录到 …」+ 32×32 关闭钮）
+/// → 窄版正文：200×200 圆角 12 的 tile，下面竖排居中的消息区。
 /// 二维码在 tile 里是 176×176 的白底；过期时换成卡片底 + 1px 8%，码淡到 10%，中央一个 56pt 深色刷新圆钮。
+///
+/// 四个平台共用这一份窗口，差别只有记号的字与底色、标题、扫码提示、风控码。
 struct LoginView: View {
     @EnvironmentObject private var library: LibraryStore
     @Environment(\.dismiss) private var dismiss
-    /// 取得的二维码图：过期态要把它淡淡地留在原地
+    /// 要登录哪个平台；不传就跟随首页当前选中的平台
+    var provider: MusicProvider?
+    /// 页面内浮层模式下由外部收起；为 nil 时退回 dismiss（系统 sheet）
+    var onClose: (() -> Void)?
+
+    private func close() {
+        if let onClose { onClose() } else { dismiss() }
+    }
+
     @State private var image: UIImage?
     @State private var scene: Scene = .preparing
-    /// 失败原因（原版平台或本地服务的原话）
     @State private var failureText = ""
-    /// 失败时平台给的码（网易云 -462 这类风控码要据此给「去浏览器验证」）
     @State private var failureCode: Int = 0
     @State private var pollTask: Task<Void, Never>?
 
-    /// 原版登录的几种样子（loginView.ts 里跟扫码有关的那几个）
     private enum Scene {
-        case preparing   // 正在取二维码：记号 + 一道转着的弧
-        case code        // 二维码已在
-        case scanned     // 手机上扫了，等确认
-        case success     // 登录成功
-        case expired     // 过期：码淡着留下，中央刷新钮
-        case failed      // 取码或轮询失败
+        case preparing
+        case code
+        case scanned
+        case success
+        case expired
+        case failed
     }
 
-    /// LoginWindow / LoginTile / LoginMessage 的像素值（Tailwind × 4）
     private enum M {
-        static let corner: CGFloat = 24           // Sheet rounded-2xl
-        static let headerTop: CGFloat = 16        // header pt-4
-        static let headerLead: CGFloat = 24       // header pl-6
-        static let headerTrail: CGFloat = 16      // header pr-4
-        static let headerGap: CGFloat = 10        // titleLead 的 gap-2.5
-        static let titleLine: CGFloat = 32        // leading-8
-        static let markLead: CGFloat = 24         // LEAD
-        static let closeSize: CGFloat = 32        // h-8 w-8
+        static let corner: CGFloat = 24
+        static let headerTop: CGFloat = 16
+        static let headerLead: CGFloat = 24
+        static let headerTrail: CGFloat = 16
+        static let headerGap: CGFloat = 10
+        static let titleLine: CGFloat = 32
+        static let markLead: CGFloat = 24
+        static let closeSize: CGFloat = 32
 
-        static let bodyLead: CGFloat = 24         // body px-6
-        static let bodyTop: CGFloat = 12          // body pt-3
-        static let bodyBottom: CGFloat = 20       // body pb-5
-        static let narrowGap: CGFloat = 16        // 窄版 gap-4
+        static let bodyLead: CGFloat = 24
+        static let bodyTop: CGFloat = 12
+        static let bodyBottom: CGFloat = 20
+        static let narrowGap: CGFloat = 16
 
-        static let tile: CGFloat = 200            // h-[200px] w-[200px]
-        static let tileCorner: CGFloat = 12       // rounded-xl
-        static let code: CGFloat = 176            // h-[176px] w-[176px]
-        static let refreshSize: CGFloat = 56      // h-14 w-14
-        static let refreshIcon: CGFloat = 22      // RefreshCw 22
-        static let disc: CGFloat = 88             // Disc h-[88px] w-[88px]
-        static let discIcon: CGFloat = 34         // Disc 里的图形
-        static let arc: CGFloat = 54              // preparing h-[54px] w-[54px]
-        static let arcMark: CGFloat = 30          // preparing 里的记号
+        static let tile: CGFloat = 200
+        static let tileCorner: CGFloat = 12
+        static let code: CGFloat = 176
+        static let refreshSize: CGFloat = 56
+        static let refreshIcon: CGFloat = 22
+        static let disc: CGFloat = 88
+        static let discIcon: CGFloat = 34
+        static let arc: CGFloat = 54
+        static let arcMark: CGFloat = 30
 
-        static let headlineSize: CGFloat = 20     // text-xl
-        static let headlineLine: CGFloat = 28     // leading-7
-        static let noteTop: CGFloat = 6           // mt-1.5
-        static let noteSize: CGFloat = 13         // text-[13px]
-        static let quoteCorner: CGFloat = 8       // rounded-lg
-        static let quoteV: CGFloat = 8            // py-2
-        static let quoteH: CGFloat = 10           // px-2.5
-        static let quoteSize: CGFloat = 12        // text-xs
-        static let actionTop: CGFloat = 16        // mt-4
-        static let actionMin: CGFloat = 32        // min-h-8
-        static let actionH: CGFloat = 32          // kit Button h-8
-        static let actionInset: CGFloat = 12      // kit Button px-3
-        static let actionSize: CGFloat = 13       // kit Button text-[13px]
+        static let headlineSize: CGFloat = 20
+        static let headlineLine: CGFloat = 28
+        static let noteTop: CGFloat = 6
+        static let noteSize: CGFloat = 13
+        static let quoteCorner: CGFloat = 8
+        static let quoteV: CGFloat = 8
+        static let quoteH: CGFloat = 10
+        static let quoteSize: CGFloat = 12
+        static let actionTop: CGFloat = 16
+        static let actionMin: CGFloat = 32
+        static let actionH: CGFloat = 32
+        static let actionInset: CGFloat = 12
+        static let actionSize: CGFloat = 13
     }
 
-    /// 与原版 CSS 变量一一对应（kitTheme.ts 的 --st-*）
     private enum C {
         static let t1 = FoliaTheme.text
         static let t2 = FoliaTheme.text.opacity(0.62)
@@ -78,18 +82,19 @@ struct LoginView: View {
         static let line2 = FoliaTheme.text.opacity(0.16)
         static let fill = FoliaTheme.text.opacity(0.07)
         static let accent = WallTheme.midnight.accent
-        /// --st-win：窗口的底色
         static let win = Color(hex: 0x1A1A1D)
-        /// --st-card：tile 的卡片底
         static let card = Color(hex: 0x232327)
-        /// 刷新圆钮：原版固定 #17171a（白底二维码上的深色钮，不跟主题）
         static let refresh = Color(hex: 0x17171A)
-        /// 加载弧的走色：原版是平台的码色 --login-pc
-        static let mark = Color(hex: 0xDC2626)
+        /// 加载弧的走色用平台自己的记号色（原版 --login-pc），在 `markColor` 里取
     }
 
-    /// kit 缓动：ease-out (0.22, 1, 0.36, 1)，move 0.22
     private static let moveAnimation = Animation.timingCurve(0.22, 1, 0.36, 1, duration: 0.22)
+
+    /// 当前平台
+    private var target: MusicProvider { provider ?? library.selectedProvider }
+
+    /// 加载弧的走色（原版 --login-pc 跟随平台记号色）
+    private var markColor: Color { Color(hex: target.markColorHex) }
 
     // MARK: - 主体
 
@@ -117,6 +122,7 @@ struct LoginView: View {
         .preferredColorScheme(.dark)
         .onAppear(perform: start)
         .onDisappear { pollTask?.cancel() }
+        .onChange(of: target) { _ in start() }
     }
 
     // MARK: - 页头
@@ -124,8 +130,8 @@ struct LoginView: View {
     private var header: some View {
         HStack(alignment: .center, spacing: 12) {
             HStack(spacing: M.headerGap) {
-                NeteaseMark(size: M.markLead)
-                Text("登录到 网易云音乐")
+                ProviderMark(provider: target, size: M.markLead)
+                Text("登录到 \(target.label)")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(C.t1)
                     .lineLimit(1)
@@ -136,7 +142,7 @@ struct LoginView: View {
 
             SheetCloseButton {
                 pollTask?.cancel()
-                dismiss()
+                close()
             }
             .frame(width: M.closeSize, height: M.closeSize)
         }
@@ -162,7 +168,6 @@ struct LoginView: View {
         .animation(Self.moveAnimation, value: scene)
     }
 
-    /// 二维码（含过期那一张）要白底才扫得出来；其余是卡片底 + 1px 8%（原版 onWhite / framed）
     private var onPaper: Bool {
         image != nil && (scene == .code || scene == .expired)
     }
@@ -187,7 +192,6 @@ struct LoginView: View {
         }
     }
 
-    /// 过期：码淡到 10% 留在原地，正中一个刷新圆钮
     private func expiredCode(_ code: UIImage) -> some View {
         ZStack {
             Image(uiImage: code)
@@ -199,19 +203,17 @@ struct LoginView: View {
         }
     }
 
-    /// 正在取二维码：平台的记号，外面一道转着的弧（login-arc：2px 环，顶边是码色）
     private var preparing: some View {
         ZStack {
             Circle()
                 .strokeBorder(C.line, lineWidth: 2)
             ArcShape()
-                .stroke(C.mark, style: StrokeStyle(lineWidth: 2, lineCap: .butt))
-            NeteaseMark(size: M.arcMark)
+                .stroke(markColor, style: StrokeStyle(lineWidth: 2, lineCap: .butt))
+            ProviderMark(provider: target, size: M.arcMark)
         }
         .frame(width: M.arc, height: M.arc)
     }
 
-    /// scanned / failed 的圆形画（Disc：88pt / 7% 底）
     private func discIcon(system: String) -> some View {
         ZStack {
             Circle().fill(C.fill)
@@ -222,7 +224,6 @@ struct LoginView: View {
         .frame(width: M.disc, height: M.disc)
     }
 
-    /// 过期态中央的刷新圆钮（56pt / #17171A / 白 RefreshCw 22 / 按下 scale 0.95）
     private var refreshButton: some View {
         Button {
             start()
@@ -262,7 +263,6 @@ struct LoginView: View {
         .frame(maxWidth: .infinity)
     }
 
-    /// 操作行（mt-4 / min-h-8 / gap-2）：有过期或失败就给「刷新二维码」，等确认时给原版那句安静小框
     private var actions: some View {
         HStack(spacing: 8) {
             if scene == .expired || scene == .failed {
@@ -319,12 +319,12 @@ struct LoginView: View {
         .frame(minHeight: M.actionMin)
     }
 
-    // MARK: - 文案（原版 zh-CN 的 home.loginTitle / home.loginNote / home.qrScanned …）
+    // MARK: - 文案
 
     private var headline: String {
         switch scene {
         case .preparing: return "正在获取二维码…"
-        case .code: return "使用网易云APP扫码"
+        case .code: return "使用\(target.shortName)APP扫码"
         case .scanned: return "扫描成功！请在手机上确认。"
         case .success: return "登录成功！"
         case .expired: return "二维码已过期"
@@ -335,7 +335,7 @@ struct LoginView: View {
     private var note: String? {
         switch scene {
         case .preparing: return nil
-        case .code: return "打开网易云音乐APP > 发现 > 扫一扫"
+        case .code: return target.scanHint
         case .scanned: return nil
         case .success: return nil
         case .expired: return "点中间的圆钮换一张新的二维码。"
@@ -347,10 +347,8 @@ struct LoginView: View {
         }
     }
 
-    /// 网易云的风控拒绝（-462 请完成验证操作 / -460 / 8821）：扫码这条路走不通，得先去网页版过一次安全验证。
-    /// 与桌面端一致（neteaseProvider.ts 的 caseNotes.refused → login.noteVerifyInBrowser）。
     private var needsWebVerification: Bool {
-        scene == .failed && Self.riskControlCodes.contains(failureCode)
+        scene == .failed && target == .netease && Self.riskControlCodes.contains(failureCode)
     }
 
     private static let riskControlCodes: Set<Int> = [-462, -460, 8821]
@@ -361,17 +359,19 @@ struct LoginView: View {
         pollTask?.cancel()
         image = nil
         failureText = ""
+        failureCode = 0
         scene = .preparing
+        let platform = target
         pollTask = Task {
             do {
-                let key = try await NeteaseAPI.shared.qrKey()
-                let base64 = try await NeteaseAPI.shared.qrImage(key: key)
-                if let comma = base64.firstIndex(of: ","),
-                   let data = Data(base64Encoded: String(base64[base64.index(after: comma)...])) {
-                    image = UIImage(data: data)
+                let code = try await platform.makeQRCode()
+                if let ready = Self.decode(code.image) {
+                    image = ready
+                } else {
+                    image = await Self.loadRemote(code.image)
                 }
                 scene = .code
-                await poll(key: key)
+                await poll(platform: platform, key: code.key)
             } catch {
                 failureText = (error as? LocalizedError)?.errorDescription ?? "获取二维码失败"
                 scene = .failed
@@ -379,42 +379,65 @@ struct LoginView: View {
         }
     }
 
-    private func poll(key: String) async {
+    /// 平台回来的可能是 `data:image/png;base64,...`，也可能直接是 http 地址
+    private static func decode(_ text: String) -> UIImage? {
+        if let comma = text.firstIndex(of: ","), text.hasPrefix("data:") {
+            let base64 = String(text[text.index(after: comma)...])
+            if let data = Data(base64Encoded: base64) { return UIImage(data: data) }
+        }
+        let bare = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let data = Data(base64Encoded: bare), let image = UIImage(data: data) { return image }
+        return nil
+    }
+
+    private static let imageCache = NSCache<NSURL, UIImage>()
+
+    private func poll(platform: MusicProvider, key: String) async {
         while !Task.isCancelled {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             guard !Task.isCancelled else { return }
-            switch await NeteaseAPI.shared.checkQR(key: key) {
+            switch await platform.pollQR(key: key) {
             case .waiting:
                 scene = .code
             case .scanned:
                 scene = .scanned
             case .confirmed:
                 scene = .success
-                if let account = try? await NeteaseAPI.shared.currentAccount() {
-                    library.signIn(session: account)
+                if let account = try? await platform.loadAccount(), let account {
+                    library.signIn(provider: platform, session: account)
                 } else {
-                    // 803 已经拿到 cookie，账号资料却取不到：不能让窗口静默关掉（看起来就是「登录没反应」）
                     failureText = "已拿到登录凭证，但读取账号失败，请点刷新二维码重试。"
                     scene = .failed
                     return
                 }
                 try? await Task.sleep(nanoseconds: 400_000_000)
-                dismiss()
+                close()
                 return
             case .expired:
                 scene = .expired
                 return
             case .failed(let reason):
                 failureText = reason
-                failureCode = await NeteaseAPI.shared.lastQRCode()
+                failureCode = await platform.lastQRCode()
                 scene = .failed
                 return
             }
         }
     }
+
+    /// 图片地址形式的二维码（波点的 imageUrl）没法在解码函数里同步取，留一个备用入口
+    static func loadRemote(_ text: String) async -> UIImage? {
+        guard let url = URL(string: text) else { return nil }
+        if let cached = imageCache.object(forKey: url as NSURL) { return cached }
+        let session = foliaURLSession()
+        guard let (data, _) = try? await session.data(from: url),
+              let image = UIImage(data: data) else { return nil }
+        imageCache.setObject(image, forKey: url as NSURL)
+        return image
+    }
 }
 
-/// 一道 90° 的弧（原版 login-arc 的 border-top：从顶点顺时针四分之一，边是码色）
+/// 一道 90° 的弧（原版 login-arc 的 border-top）
 private struct ArcShape: Shape {
     func path(in rect: CGRect) -> Path {
         var path = Path()
@@ -429,7 +452,6 @@ private struct ArcShape: Shape {
     }
 }
 
-/// kit Button 的按下反馈：缩放 0.97（enabled:active:scale-[0.97]）
 private struct LoginActionPressStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -438,7 +460,6 @@ private struct LoginActionPressStyle: ButtonStyle {
     }
 }
 
-/// 过期态刷新圆钮的按下反馈：active:scale-95
 private struct LoginRefreshPressStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label

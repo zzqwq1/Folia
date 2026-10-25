@@ -109,8 +109,7 @@ struct WallToolsPanel: View {
             if isOpen { panel }
             toolsButton
         }
-        .padding(.trailing, M.edge)
-        .padding(.bottom, M.edge)
+        .modifier(WallToolsEdge())
         .onChange(of: isOpen) { open in onOpenChange(open) }
     }
 
@@ -190,16 +189,15 @@ struct WallToolsPanel: View {
             .buttonStyle(ToolsPressStyle(normal: .clear, pressed: C.hover, radius: M.sliderIconRadius, height: M.sliderIconBox))
             .accessibilityLabel(player.isMuted ? "取消静音" : "静音")
 
-            Slider(
+            VolumeSlider(
                 value: Binding(
                     get: { player.isMuted ? 0 : Double(player.volume) },
                     set: { next in
-                if player.isMuted { player.isMuted = false }
-                player.volume = Float(next)
-            }),
-                in: 0...1
+                        if player.isMuted { player.isMuted = false }
+                        player.volume = Float(next)
+                    }
+                )
             )
-            .tint(WallTheme.midnight.accent)
 
             Text(player.isMuted ? "静音" : "\(Int((player.volume * 100).rounded()))%")
                 .font(.system(size: 12, weight: .semibold))
@@ -468,6 +466,16 @@ private struct ToolsSwitch: View {
         }
         .frame(width: 30, height: 18)
         .animation(.easeOut(duration: 0.16), value: isOn)
+    }
+}
+
+/// `.lattice-tools { right: 24px; bottom: 24px }`，≤640px 时 16px
+private struct WallToolsEdge: ViewModifier {
+    func body(content: Content) -> some View {
+        let edge: CGFloat = UIScreen.main.bounds.width <= 640 ? 16 : 24
+        return content
+            .padding(.trailing, edge)
+            .padding(.bottom, edge)
     }
 }
 

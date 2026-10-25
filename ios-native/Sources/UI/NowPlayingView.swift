@@ -12,6 +12,9 @@ struct NowPlayingView: View {
     @EnvironmentObject private var covers: WallCoverLoader
     @Environment(\.dismiss) private var dismiss
 
+    /// 关闭动作：页面内浮层时由首页改状态，系统 sheet 时退回 dismiss
+    var onClose: (() -> Void)?
+
     @State private var tab: Tab = .cover
     @State private var lyrics: [LyricLine] = []
     /// 拖动进度条时只改本地值（原版 Kit Slider 是先动后提交）
@@ -101,12 +104,12 @@ struct NowPlayingView: View {
                 }
         }
         .background(WallTheme.midnight.bg.ignoresSafeArea())
-        .task(id: song?.id) {
-            guard let id = song?.id else {
+        .task(id: song?.playbackKey) {
+            guard let song else {
                 lyrics = []
                 return
             }
-            lyrics = (try? await NeteaseAPI.shared.lyrics(songId: id)) ?? []
+            lyrics = (try? await MusicAPI.shared.lyrics(for: song)) ?? []
         }
     }
 
@@ -599,7 +602,7 @@ struct NowPlayingView: View {
 
     private var handle: some View {
         Button {
-            dismiss()
+            close()
         } label: {
             Image(systemName: "xmark")
                 .font(.system(size: 20, weight: .medium))
@@ -628,11 +631,19 @@ struct NowPlayingView: View {
             .onEnded { value in
                 if value.translation.height > 80 || value.predictedEndTranslation.height > 160 {
                     dragOffset = 0
-                    dismiss()
+                    close()
                 } else {
                     withAnimation(.easeOut(duration: 0.2)) { dragOffset = 0 }
                 }
             }
+    }
+
+    private func close() {
+        if let onClose {
+            onClose()
+        } else {
+            dismiss()
+        }
     }
 
     // MARK: - 辅助

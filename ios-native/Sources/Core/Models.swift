@@ -2,14 +2,75 @@ import Foundation
 
 // 与原版前端对齐的最小数据模型（src/types.ts 的 SongResult / UnifiedSong，
 // src/types/onlineMusic.ts 的 ProviderCollection）。字段只保留原生界面用得到的部分。
+//
+// 多平台：歌曲与集合的 `id` 用字符串，`provider` 说明它属于哪个平台
+// （原版 `getPlaybackSongKey` = `${provider}:${id}`）。网易云的 id 仍是数字，
+// QQ 是 songmid、酷狗是 hash、波点是它的数字 id，统一走这一层。
+
+/// 四个平台。原版 `src/services/onlineMusic` 下的四个 provider。
+enum MusicProvider: String, Codable, CaseIterable, Hashable {
+    case netease
+    case qq
+    case kugou
+    case bodian
+
+    /// 界面上的名字（原版 i18n `provider.netease` …）
+    var label: String {
+        switch self {
+        case .netease: return "网易云"
+        case .qq: return "QQ 音乐"
+        case .kugou: return "酷狗音乐"
+        case .bodian: return "波点音乐"
+        }
+    }
+
+    /// 原版 provider 的 `shortName`（登录窗口「登录到 …」、切换器、集合页标题用的短名）
+    var shortName: String {
+        switch self {
+        case .netease: return "网易云"
+        case .qq: return "QQ音乐"
+        case .kugou: return "酷狗"
+        case .bodian: return "波点"
+        }
+    }
+
+    /// 原版 `provider.mark`：平台记号的一个字与底色的十六进制
+    var markLetter: String {
+        switch self {
+        case .netease: return "云"
+        case .qq: return "Q"
+        case .kugou: return "K"
+        case .bodian: return "波"
+        }
+    }
+
+    var markColorHex: UInt32 {
+        switch self {
+        case .netease: return 0xDC2626
+        case .qq: return 0x16A34A
+        case .kugou: return 0x2563EB
+        case .bodian: return 0x0D9488
+        }
+    }
+
+    /// 登录窗口的二维码用哪个 App 扫（原版 `home.loginScanHint`）
+    var scanHint: String {
+        switch self {
+        case .netease: return "打开网易云音乐APP > 发现 > 扫一扫"
+        case .qq: return "打开QQ音乐APP > 我的 > 扫一扫"
+        case .kugou: return "打开酷狗音乐APP > 我的 > 扫一扫"
+        case .bodian: return "打开波点音乐APP > 我的 > 扫一扫"
+        }
+    }
+}
 
 struct Artist: Hashable, Codable, Identifiable {
-    let id: Int
+    let id: String
     let name: String
 }
 
 struct Album: Hashable, Codable {
-    let id: Int
+    let id: String
     let name: String
     let coverUrl: String?
 
@@ -33,7 +94,8 @@ struct Album: Hashable, Codable {
 }
 
 struct Song: Hashable, Codable, Identifiable {
-    let id: Int
+    let id: String
+    let provider: MusicProvider
     let name: String
     let artists: [Artist]
     let album: Album
@@ -44,6 +106,9 @@ struct Song: Hashable, Codable, Identifiable {
     let fee: Int?
     /// privilege.st < 0 表示下架 / 灰掉
     let st: Int?
+
+    /// 原版 `getPlaybackSongKey`：`${provider}:${id}`，墙与队列都用它认一首歌
+    var playbackKey: String { "\(provider.rawValue):\(id)" }
 
     var artistNames: String {
         artists.map(\.name).joined(separator: " / ")
@@ -76,7 +141,8 @@ enum CollectionKind: String, Codable {
 
 /// 首页墙面上的一个集合（歌单 / 专辑 / 电台 / 云盘）
 struct MusicCollection: Hashable, Codable, Identifiable {
-    let id: Int
+    let id: String
+    let provider: MusicProvider
     let name: String
     let kind: CollectionKind
     let coverUrl: String?
@@ -89,11 +155,12 @@ struct MusicCollection: Hashable, Codable, Identifiable {
 
     func cover(size: Int) -> URL? { Album.url(coverUrl, size: size) }
 
-    var idString: String { String(id) }
+    var idString: String { "\(provider.rawValue):\(id)" }
 }
 
 struct Account: Hashable, Codable {
-    let userId: Int
+    let userId: String
+    let provider: MusicProvider
     let nickname: String
     let avatarUrl: String?
     let vipType: Int?
