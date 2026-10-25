@@ -98,8 +98,8 @@ struct HomeView: View {
 
             LatticeWallView(
                 items: items,
-                sections: wallSections,
                 theme: theme,
+                sections: wallSections,
                 lightsOut: isLightsOut,
                 hasPosterTint: isTintEnabled,
                 autoFocusOnSongChange: mode == .queue,

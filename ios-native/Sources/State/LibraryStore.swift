@@ -22,10 +22,10 @@ final class LibraryStore: ObservableObject {
         defer { isLoading = false }
 
         // 四个平台并行恢复登录态；没登录的返回 nil
-        async let netease = NeteaseAPI.shared.currentAccount()
-        async let qq = QQMusicAPI.shared.currentAccount()
-        async let kugou = KugouAPI.shared.currentAccount()
-        async let bodian = BodianAPI.shared.currentAccount()
+        async let netease = try? NeteaseAPI.shared.currentAccount()
+        async let qq = try? QQMusicAPI.shared.currentAccount()
+        async let kugou = try? KugouAPI.shared.currentAccount()
+        async let bodian = try? BodianAPI.shared.currentAccount()
         var restored: [MusicProvider: Account] = [:]
         if let account = await netease { restored[.netease] = account }
         if let account = await qq { restored[.qq] = account }

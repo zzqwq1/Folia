@@ -446,7 +446,7 @@ actor BodianAPI {
             do {
                 let json = try await send(.audio, params: params)
                 if let found = Self.audioURL(from: json) {
-                    return found
+                    return (url: found.url, isPreview: found.preview)
                 }
             } catch {
                 lastError = error

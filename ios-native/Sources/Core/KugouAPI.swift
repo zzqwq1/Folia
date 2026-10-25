@@ -127,7 +127,7 @@ actor KugouAPI {
 
         if retryDevice, Self.needsDeviceVerification(payload) {
             clearDeviceIdentity()
-            try? await send(.registerDev, retryDevice: false)
+            _ = try? await send(.registerDev, retryDevice: false)
             return try await send(route, query: query, method: method, retryDevice: false)
         }
         return payload
@@ -601,19 +601,29 @@ actor KugouAPI {
         let audioInfo = raw["audio_info"] as? [String: Any]
         let trans = audioInfo?["trans_param"] as? [String: Any]
             ?? raw["trans_param"] as? [String: Any]
-        var cover = (albumInfo?["sizable_cover"] as? String) ?? (albumInfo?["cover"] as? String)
-            ?? (trans?["union_cover"] as? String)
-            ?? (raw["sizable_cover"] as? String) ?? (raw["Image"] as? String)
-            ?? (raw["image"] as? String) ?? (raw["img"] as? String)
-            ?? (raw["pic"] as? String) ?? (raw["picUrl"] as? String)
-            ?? (raw["cover"] as? String) ?? (raw["coverUrl"] as? String)
-            ?? (raw["sizable_avatar"] as? String)
+        // 拆成多段赋值，避免一长串 `??` 让类型检查器超时
+        var cover: String? = albumInfo?["sizable_cover"] as? String
+        if cover == nil { cover = albumInfo?["cover"] as? String }
+        if cover == nil { cover = trans?["union_cover"] as? String }
+        if cover == nil { cover = raw["sizable_cover"] as? String }
+        if cover == nil { cover = raw["Image"] as? String }
+        if cover == nil { cover = raw["image"] as? String }
+        if cover == nil { cover = raw["img"] as? String }
+        if cover == nil { cover = raw["pic"] as? String }
+        if cover == nil { cover = raw["picUrl"] as? String }
+        if cover == nil { cover = raw["cover"] as? String }
+        if cover == nil { cover = raw["coverUrl"] as? String }
+        if cover == nil { cover = raw["sizable_avatar"] as? String }
         guard var cover = cover else { return nil }
         if cover.contains("{size}") {
             cover = cover.replacingOccurrences(of: "{size}", with: "1024")
         }
         // 只给了文件名时拼回 kgimg 的路径
-        if cover.range(of: "^\\d{8,}\\.(jpe?g|png|webp)$", options: [.regularExpression, .caseInsensitive]) != nil {
+        let isBareFileName = cover.range(
+            of: "^\\d{8,}\\.(jpe?g|png|webp)$",
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
+        if isBareFileName {
             let prefix = String(cover.prefix(8))
             cover = "https://c1.kgimg.com/stdmusic/1024/\(prefix)/\(cover)"
         }
