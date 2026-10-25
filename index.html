@@ -62,11 +62,11 @@
         transition: opacity 320ms ease;
       }
 
-      /* iOS 壳里 #root 已经让出了状态栏与 Home 条（见文末的适配块），遮罩若还是 fixed inset-0
-         就会铺到整块屏幕上，等于在留白上又盖一层黑——启动那一下看着像有个黑边。
-         改成跟随 #root 的盒子，留白直接透出窗口底色，遮罩只覆盖界面本身。 */
+      /* iOS 壳里 #app-splash 是 #root 的直接子节点（不在内缩的界面容器里），
+         保持 fixed inset-0 才能盖住整块屏幕；如果跟着 #root 一起内缩，
+         状态栏与 Home 条那圈会先露出还没挂载的界面，看着就是四周一圈黑边。 */
       html[data-folia-ios='1'] #app-splash {
-        position: absolute;
+        position: fixed;
         inset: 0;
       }
 
@@ -316,34 +316,79 @@
         -webkit-tap-highlight-color: transparent;
         overscroll-behavior: none;
       }
-      /* #root 只做两件事：铺满窗口、给状态栏与 Home 条留出安全区。
-         不要在这里加 transform，也不要让子节点相对它错位——它的 padding box 就是界面的可视区域。 */
+      /* #root 只负责铺满整块屏幕并把底色铺够（状态栏、Home 条那块也由它垫底），
+         真正的安全区让位交给它下面那层界面容器做绝对定位内缩。
+         以前直接把 padding 加在 #root 上：父层若已经有 overflow:hidden 或尺寸不足，
+         padding 就会把内容往内挤出一圈空带，四周透出 #000（或纯黑窗口底色），
+         看起来就是一条黑边；同时 86% 缩放只按 content box 计算，右侧和底部会再空一截。 */
+      html[data-folia-ios='1'] {
+        background: #09090b;
+      }
+      html[data-folia-ios='1'] body {
+        margin: 0;
+        background: #09090b;
+      }
       html[data-folia-ios='1'] #root {
         position: fixed;
         inset: 0;
         box-sizing: border-box;
+        padding: 0;
         overflow: hidden;
-        padding-top: var(--folia-safe-top, env(safe-area-inset-top, 0px));
-        padding-right: var(--folia-safe-right, env(safe-area-inset-right, 0px));
-        padding-bottom: var(--folia-safe-bottom, env(safe-area-inset-bottom, 0px));
-        padding-left: var(--folia-safe-left, env(safe-area-inset-left, 0px));
         background: #09090b;
+      }
+      /* 界面容器：绝对定位内缩到安全区内，安全区之外由 #root 的底色垫着。
+         left/right 与 top/bottom 都用 inset 一起写，避免只让一侧时内容尺寸对不上。 */
+      html[data-folia-ios='1'] #root > div:not(#app-splash) {
+        position: absolute;
+        top: var(--folia-safe-top, env(safe-area-inset-top, 0px));
+        right: var(--folia-safe-right, env(safe-area-inset-right, 0px));
+        bottom: var(--folia-safe-bottom, env(safe-area-inset-bottom, 0px));
+        left: var(--folia-safe-left, env(safe-area-inset-left, 0px));
+        width: auto;
+        height: auto;
+        box-sizing: border-box;
       }
       /* 界面本身按桌面版的 pt 尺寸排，在手机上显得太大。整页缩到 86%，再按放大的倍数把尺寸要回来：
          元素都还是原来的版式，只是所有 px 尺寸一起变小。
          缩放原点必须是 0 0：默认的 50% 50% 会让内容以中心为准缩回去，铺不满、还整体偏右下。
-         #root 的 padding 已经让出了安全区，所以这层只用 100%（相对 #root 的 content box），
-         不要再乘 1/0.86；溢出部分由 #root 的 overflow: hidden 裁掉。 */
-      html[data-folia-ios='1'][data-folia-compact='1'] #root > div {
+         这里按内缩后盒子的 1/0.86 放大，再缩回来正好铺满 content box——
+         以前只给 100%，缩完只剩 86%，右侧和底部各空出一截，看着就是黑边。 */
+      html[data-folia-ios='1'][data-folia-compact='1'] #root > div:not(#app-splash) > div {
         box-sizing: border-box;
-        width: 100%;
-        height: 100%;
+        width: 116.27906976744185%;
+        height: 116.27906976744185%;
         transform: scale(0.86);
         transform-origin: 0 0;
       }
       /* 扫码登录的二维码：接口没给 data: 前缀时只有裸 base64，补上前缀，否则是一片空白 */
       html[data-folia-ios='1'] img[data-folia-b64='1'] {
         background: #fff;
+      }
+
+      /* ---------- WKWebView 壳（Capacitor / 原生壳）专用 ----------
+         壳里 WebKit 的自动安全区让位是关掉的，页面拿到的是整块屏幕，
+         状态栏、灵动岛、Home 条都压在界面之上。之前不同版本在这块各有各的写法，
+         结果就是「有的机型顶上一条、有的底部一条」——本质是让位量与实际可用区对不上。
+         这里统一成一条规则：用实测安全区把整块界面内缩，四周由 #root 的底色垫底，
+         内缩量就是状态栏与 Home 条的高度，不会再有多余的一条边。
+         安全区值为 0 时不内缩，界面照常铺满，所以桌面浏览器与没有安全区的机型不受影响。 */
+      html[data-folia-shell='1'],
+      html[data-folia-shell='1'] body {
+        background: #09090b;
+      }
+      html[data-folia-shell='1'] #root {
+        padding: 0;
+        background: #09090b;
+      }
+      /* 壳内不再用 86% 缩放：缩完四周必然留一圈底色，
+         手机上看着就是黑边。改成按宽度自适应（见下方 JS 的 --folia-shell-scale），
+         只在特别窄的屏幕上等比缩小，缩多少就把盒子放大多少来铺满。 */
+      html[data-folia-shell='1'] #root > div:not(#app-splash) {
+        position: absolute;
+        top: var(--folia-safe-top, 0px);
+        right: var(--folia-safe-right, 0px);
+        bottom: var(--folia-safe-bottom, 0px);
+        left: var(--folia-safe-left, 0px);
       }
     </style>
     <script>
@@ -352,6 +397,11 @@
         if (!/iPhone|iPad|iPod/i.test(ua)) return;
         var root = document.documentElement;
         root.setAttribute('data-folia-ios', '1');
+        // 装进壳里（Capacitor WKWebView / 原生壳）时，安全区由壳实测后推过来：
+        // 页面铺满整屏，界面按实测值内缩，不再自己算机型表、也不再整页缩 86%。
+        if (window.Capacitor || navigator.standalone === true || /FoliaApp|FoliaNative/i.test(ua)) {
+          root.setAttribute('data-folia-shell', '1');
+        }
 
         // 屏高 → 上下安全区（逻辑像素）。UA 与 CSS 尺寸一致时这两张表与真机 env() 值相等，
         // 用来在 env() 还没就绪时给一个正确值，避免内容被状态栏盖住或底部多出一截黑边。
@@ -399,9 +449,12 @@
         }
 
         // 手机上把整页缩到 86%（见上面的 CSS）：只在 iPhone 这种窄屏上做，iPad 与桌面版不动。
+        // 壳里不做整页缩放：缩完四周必然留一圈底色，就是用户说的那种黑边。
         function decideCompact() {
           var w = window.innerWidth || root.clientWidth;
-          var phone = !/iPad/i.test(ua) && Math.min(w, window.innerHeight || root.clientHeight) < 560;
+          var shell = root.getAttribute('data-folia-shell') === '1';
+          var phone = !shell && !/iPad/i.test(ua)
+            && Math.min(w, window.innerHeight || root.clientHeight) < 560;
           if (phone) root.setAttribute('data-folia-compact', '1');
           else root.removeAttribute('data-folia-compact');
         }
