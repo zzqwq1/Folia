@@ -1,5 +1,22 @@
 import SwiftUI
 
+/// WallToolsButton.css 的配色（面板玻璃、分隔线、开关轨道等）
+private enum C {
+    static let ink = Color.white
+    static let panelFill = Color.black.opacity(0.40)
+    static let panelBorder = Color.white.opacity(0.08)
+    static let hover = Color.white.opacity(0.10)
+    static let quickFill = Color.white.opacity(0.06)
+    static let quickHover = Color.white.opacity(0.13)
+    static let track = Color.white.opacity(0.18)
+    static let line = Color.white.opacity(0.10)
+    static let helpFill = Color.white.opacity(0.06)
+    static let helpLine = Color.white.opacity(0.07)
+    static let heading = Color.white.opacity(0.52)
+    /// `color-mix(in srgb, currentColor 58%, transparent)`
+    static let lightsIdle = Color.white.opacity(0.58)
+}
+
 /// 墙面右下角的工具按钮与锚定玻璃面板，逐条移植 `src/components/wall/WallToolsButton.tsx` +
 /// `WallToolsButton.css` + `WallToolsRows.tsx`：
 ///
@@ -66,22 +83,6 @@ struct WallToolsPanel: View {
         static let edge: CGFloat = 16
     }
 
-    private enum C {
-        static let ink = Color.white
-        static let panelFill = Color.black.opacity(0.40)
-        static let panelBorder = Color.white.opacity(0.08)
-        static let hover = Color.white.opacity(0.10)
-        static let quickFill = Color.white.opacity(0.06)
-        static let quickHover = Color.white.opacity(0.13)
-        static let track = Color.white.opacity(0.18)
-        static let line = Color.white.opacity(0.10)
-        static let helpFill = Color.white.opacity(0.06)
-        static let helpLine = Color.white.opacity(0.07)
-        static let heading = Color.white.opacity(0.52)
-        /// `color-mix(in srgb, currentColor 58%, transparent)`
-        static let lightsIdle = Color.white.opacity(0.58)
-    }
-
     // MARK: - 输入
 
     let quick: [QuickAction]
@@ -129,11 +130,11 @@ struct WallToolsPanel: View {
                 .fill(.ultraThinMaterial)
                 .overlay(
                     RoundedRectangle(cornerRadius: M.panelRadius, style: .continuous)
-                        .fill(M.C.panelFill)
+                        .fill(C.panelFill)
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: M.panelRadius, style: .continuous)
-                        .strokeBorder(M.C.panelBorder, lineWidth: 1)
+                        .strokeBorder(C.panelBorder, lineWidth: 1)
                 )
                 .shadow(color: .black.opacity(0.42), radius: 32, x: 0, y: 24)
         )
@@ -154,16 +155,16 @@ struct WallToolsPanel: View {
                 } label: {
                     Image(systemName: action.icon)
                         .font(.system(size: 17, weight: .regular))
-                        .foregroundStyle(M.C.ink)
+                        .foregroundStyle(C.ink)
                         .frame(maxWidth: .infinity)
                         .frame(height: M.quickHeight)
                         .background(
                             RoundedRectangle(cornerRadius: M.quickRadius, style: .continuous)
-                                .fill(M.C.quickFill)
+                                .fill(C.quickFill)
                         )
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(ToolsPressStyle(normal: M.C.quickFill, pressed: M.C.quickHover, radius: M.quickRadius, height: M.quickHeight))
+                .buttonStyle(ToolsPressStyle(normal: C.quickFill, pressed: C.quickHover, radius: M.quickRadius, height: M.quickHeight))
                 .disabled(action.disabled)
                 .opacity(action.disabled ? 0.35 : 1)
                 .accessibilityLabel(action.label)
@@ -179,11 +180,11 @@ struct WallToolsPanel: View {
             } label: {
                 Image(systemName: volumeIcon)
                     .font(.system(size: 16))
-                    .foregroundStyle(player.isMuted ? WallTheme.midnight.accent : M.C.ink)
+                    .foregroundStyle(player.isMuted ? WallTheme.midnight.accent : C.ink)
                     .frame(width: M.sliderIconBox, height: M.sliderIconBox)
                     .contentShape(Rectangle())
             }
-            .buttonStyle(ToolsPressStyle(normal: .clear, pressed: M.C.hover, radius: M.sliderIconRadius, height: M.sliderIconBox))
+            .buttonStyle(ToolsPressStyle(normal: .clear, pressed: C.hover, radius: M.sliderIconRadius, height: M.sliderIconBox))
             .accessibilityLabel(player.isMuted ? "取消静音" : "静音")
 
             Slider(
@@ -200,7 +201,7 @@ struct WallToolsPanel: View {
             Text(player.isMuted ? "静音" : "\(Int((player.volume * 100).rounded()))%")
                 .font(.system(size: 12, weight: .semibold))
                 .monospacedDigit()
-                .foregroundStyle(M.C.ink.opacity(0.66))
+                .foregroundStyle(C.ink.opacity(0.66))
                 .frame(width: 38, alignment: .trailing)
         }
         .padding(.leading, 4)
@@ -208,7 +209,7 @@ struct WallToolsPanel: View {
         .frame(height: M.rowHeight)
         .background(
             RoundedRectangle(cornerRadius: M.rowRadius, style: .continuous)
-                .fill(M.C.quickFill)
+                .fill(C.quickFill)
         )
     }
 
@@ -239,7 +240,7 @@ struct WallToolsPanel: View {
                             .opacity(0.6)
                     }
                 }
-                .foregroundStyle(M.C.ink)
+                .foregroundStyle(C.ink)
                 .padding(.horizontal, 12)
                 .frame(maxWidth: .infinity)
                 .frame(height: M.rowHeight)
@@ -262,7 +263,7 @@ struct WallToolsPanel: View {
                     Spacer(minLength: 0)
                     ToolsSwitch(isOn: isOn)
                 }
-                .foregroundStyle(M.C.ink)
+                .foregroundStyle(C.ink)
                 .padding(.horizontal, 12)
                 .frame(maxWidth: .infinity)
                 .frame(height: M.rowHeight)
@@ -291,11 +292,11 @@ struct WallToolsPanel: View {
                 } label: {
                     Image(systemName: "questionmark.circle")
                         .font(.system(size: 16))
-                        .foregroundStyle(M.C.ink)
+                        .foregroundStyle(C.ink)
                         .frame(width: 32, height: 32)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(ToolsPressStyle(normal: .clear, pressed: M.C.hover, radius: 12, height: 32))
+                .buttonStyle(ToolsPressStyle(normal: .clear, pressed: C.hover, radius: 12, height: 32))
                 .accessibilityLabel("墙的操作说明")
             }
             if showHelp {
@@ -304,22 +305,22 @@ struct WallToolsPanel: View {
                         HStack(spacing: 12) {
                             Text(line.0)
                                 .font(.system(size: 12))
-                                .foregroundStyle(M.C.ink.opacity(0.76))
+                                .foregroundStyle(C.ink.opacity(0.76))
                             Spacer(minLength: 0)
                             Text(line.1)
                                 .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(M.C.ink.opacity(0.76))
+                                .foregroundStyle(C.ink.opacity(0.76))
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 2)
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                        .strokeBorder(M.C.ink.opacity(0.36), lineWidth: 1)
+                                        .strokeBorder(C.ink.opacity(0.36), lineWidth: 1)
                                 )
                         }
                         .frame(minHeight: 30)
                         .overlay(alignment: .top) {
                             if index > 0 {
-                                Rectangle().fill(M.C.helpLine).frame(height: 1)
+                                Rectangle().fill(C.helpLine).frame(height: 1)
                             }
                         }
                     }
@@ -328,14 +329,14 @@ struct WallToolsPanel: View {
                 .padding(.vertical, 7)
                 .background(
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(M.C.helpFill)
+                        .fill(C.helpFill)
                 )
                 .padding(.top, 6)
             }
         }
         .padding(.top, 6)
         .overlay(alignment: .top) {
-            Rectangle().fill(M.C.line).frame(height: 1)
+            Rectangle().fill(C.line).frame(height: 1)
         }
         .padding(.top, 4)
     }
@@ -350,7 +351,7 @@ struct WallToolsPanel: View {
             Capsule().fill(Color.white.opacity(0.06))
         )
         .overlay(
-            Capsule().strokeBorder(M.C.ink.opacity(0.18), lineWidth: 1)
+            Capsule().strokeBorder(C.ink.opacity(0.18), lineWidth: 1)
         )
         .accessibilityLabel("墙面的灯")
     }
@@ -359,7 +360,7 @@ struct WallToolsPanel: View {
         Button(action: action) {
             Text(title)
                 .font(.system(size: 10.5, weight: .semibold))
-                .foregroundStyle(active ? WallTheme.midnight.bg : M.C.lightsIdle)
+                .foregroundStyle(active ? WallTheme.midnight.bg : C.lightsIdle)
                 .frame(minWidth: 44)
                 .padding(.horizontal, 9)
                 .padding(.vertical, 4)
@@ -466,3 +467,4 @@ private struct ToolsSwitch: View {
         .animation(.easeOut(duration: 0.16), value: isOn)
     }
 }
+
