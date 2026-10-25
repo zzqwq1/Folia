@@ -148,6 +148,47 @@ final class PlayerEngine: NSObject, ObservableObject {
         }
     }
 
+    // MARK: - 队列编辑（对应原版 wallpaperHost 的 addToQueue / playNext / moveQueueSong）
+
+    /// 全部加入队列：已经在队列里的同一首跳过（原版 addToQueue 的去重规则）
+    func addToQueue(_ songs: [Song]) {
+        let existing = Set(queue.map(\.id))
+        let fresh = songs.filter { !existing.contains($0.id) }
+        guard !fresh.isEmpty else { return }
+        let wasEmpty = queue.isEmpty
+        queue.append(contentsOf: fresh)
+        if wasEmpty {
+            load(index: 0, autoPlay: true)
+        }
+    }
+
+    /// 下一首播放：插在当前曲目后面，队尾播放时接着播
+    func playNext(at index: Int) {
+        guard queue.indices.contains(index) else { return }
+        let song = queue.remove(at: index)
+        if index < currentIndex { currentIndex -= 1 }
+        let insertAt = min(currentIndex + 1, queue.count)
+        queue.insert(song, at: insertAt)
+        playedIndices.removeAll()
+    }
+
+    /// 移到队尾
+    func moveToEnd(at index: Int) {
+        guard queue.indices.contains(index) else { return }
+        let song = queue.remove(at: index)
+        if index < currentIndex {
+            currentIndex -= 1
+        } else if index == currentIndex {
+            // 正在播的那首挪到队尾：保持一致，画面不跳
+            currentIndex = queue.count
+        }
+        queue.append(song)
+    }
+
+    func clearQueue() {
+        stop()
+    }
+
     func stop() {
         loadTask?.cancel()
         player.pause()

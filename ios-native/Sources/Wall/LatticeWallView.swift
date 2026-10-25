@@ -22,6 +22,8 @@ struct LatticeWallView: View {
     /// 点卡的自身动作：集合 → 打开集合页
     var onOpenItem: (WallItem) -> Void = { _ in }
     var onOpenPlayer: () -> Void = {}
+    /// 外部（集合页的定位按钮）请求把某一首歌移到视口中心
+    var locateRequest: WallLocateRequest? = nil
 
     @EnvironmentObject private var player: PlayerEngine
 
@@ -88,6 +90,10 @@ struct LatticeWallView: View {
         .simultaneousGesture(longPressGesture)
         .onChange(of: items) { _ in itemsChanged() }
         .onChange(of: currentSongKey) { key in focusPlaying(key) }
+        .onChange(of: locateRequest) { request in
+            guard let request else { return }
+            locate(songId: request.songId)
+        }
         .task { await runEntrance() }
     }
 
@@ -619,6 +625,47 @@ struct LatticeWallView: View {
 
     // MARK: - 播放跟随（useLatticePlaybackFocus）
 
+    /// 集合页右下的定位按钮用：把某首歌移到视口中心（原版 grid 的 locateOnThisPage）
+    func locate(songId: String) {
+        guard measured, let queueIndex = items.firstIndex(where: { $0.id == songId }) else { return }
+        focus(byIndex: queueIndex, instant: false)
+    }
+
+    /// 这首歌现在在不在视口里（原版 isPlayingSongHere）
+    func isOnScreen(songId: String) -> Bool {
+        guard measured, let queueIndex = items.firstIndex(where: { $0.id == songId }) else { return false }
+        guard let instance = WallLayoutMath.locateNearestInstance(
+            geometry,
+            totalEntries: items.count,
+            queueIndex: queueIndex,
+            point: viewportCenter,
+            metrics: Self.metrics
+        ) else { return false }
+        let bounds = instance.rect.bounds
+        let visible = camera.worldBounds(viewport: viewport)
+        return WallLayoutMath.overlaps(bounds, visible)
+    }
+
+    private func focus(byIndex queueIndex: Int, instant: Bool) {
+        guard let instance = WallLayoutMath.locateNearestInstance(
+            geometry,
+            totalEntries: items.count,
+            queueIndex: queueIndex,
+            point: viewportCenter,
+            metrics: Self.metrics
+        ) else { return }
+        focusedId = instance.instanceId
+        let rect = WallLayoutMath.layoutExpandedBlock(
+            geometry,
+            totalEntries: items.count,
+            active: instance,
+            metrics: Self.metrics
+        )[instance.instanceId]
+        if let rect {
+            panTo(rect, instant: instant)
+        }
+    }
+
     private func focusPlaying(_ key: String?) {
         guard measured else { return }
         guard let key, let queueIndex = items.firstIndex(where: { $0.id == key }) else { return }
@@ -800,6 +847,15 @@ private struct PosterLanding: ViewModifier {
                 }
             }
     }
+}
+
+// MARK: - 外部定位请求
+
+/// 集合页右下的定位按钮：父视图把请求写进这个值，墙视图收到后把对应的卡移到视口中心。
+/// 带 nonce，同一首歌连点两次也能重新触发。
+struct WallLocateRequest: Equatable {
+    let songId: String
+    let nonce: Int
 }
 
 /// `cubic-bezier(0.22, 1, 0.36, 1)` 的近似：五次 ease-out，前段斜率足够陡、末段贴住 1
