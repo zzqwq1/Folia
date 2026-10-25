@@ -130,7 +130,7 @@ struct PlayerCapsule: View {
                 .buttonStyle(CapsuleButtonStyle())
                 .frame(maxWidth: .infinity, alignment: .center)
 
-                Button(onOpenPlayer) {
+                Button(action: onOpenPlayer) {
                     slotIcon("text.alignleft")
                 }
                 .buttonStyle(CapsuleButtonStyle())
