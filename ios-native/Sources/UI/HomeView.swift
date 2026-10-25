@@ -16,7 +16,10 @@ struct HomeView: View {
     @State private var openCollection: MusicCollection?
     @State private var showSettings = false
     @State private var showPlayer = false
+    /// 原版 `showQueueIsland = isOpen && common.queueIslandShown`：浮岛随面板一起出现、一起收起，
+    /// 这个偏好由面板快捷排的「队列」格开合（`wallToolsQueueIslandOpen`）。
     @State private var showQueueIsland = false
+    @State private var isToolsOpen = false
     @State private var isTintEnabled = false
     @State private var isLightsOut = false
     /// 集合页的定位按钮：记下要定位的歌，墙视图按这个值把它移到视口中心
@@ -115,7 +118,7 @@ struct HomeView: View {
                 MiniPlayerBar(song: song) { showPlayer = true }
                     .frame(maxWidth: 296)
             }
-            if showQueueIsland {
+            if showQueueIsland && isToolsOpen {
                 QueueIsland()
                     .frame(width: 296)
                     .transition(.opacity)
@@ -134,7 +137,8 @@ struct HomeView: View {
                     ],
                     onRoute: handle,
                     onToggleTint: { isTintEnabled.toggle() },
-                    onSetLights: { lightsOn in isLightsOut = !lightsOn }
+                    onSetLights: { lightsOn in isLightsOut = !lightsOn },
+                    onOpenChange: { isToolsOpen = $0 }
                 )
                 .environmentObject(player)
             }
@@ -153,7 +157,7 @@ struct HomeView: View {
             .init(id: .generateTheme, icon: "sparkles", label: "生成主题",
                   disabled: true, keepOpen: true),
             .init(id: .queue, icon: "list.bullet", label: showQueueIsland ? "收起队列" : "播放队列",
-                  disabled: player.queue.isEmpty, keepOpen: true),
+                  keepOpen: true),
             .init(id: .destination, icon: mode == .queue ? "square.grid.2x2" : "music.note.list",
                   label: mode == .queue ? "资料库" : "播放队列"),
             .init(id: .openPlayer, icon: "opticaldisc", label: "打开播放面板",
@@ -188,7 +192,7 @@ struct HomeView: View {
         case .generateTheme:
             break
         case .queue:
-            guard !player.queue.isEmpty else { return }
+            // 原版是纯偏好开合，不看队列是否为空（空队列浮岛里显示「队列是空的」）
             withAnimation(.easeOut(duration: 0.18)) { showQueueIsland.toggle() }
         case .destination:
             mode = mode == .queue ? .library : .queue

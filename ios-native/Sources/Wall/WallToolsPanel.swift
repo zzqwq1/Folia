@@ -94,6 +94,8 @@ struct WallToolsPanel: View {
     var onRoute: (Route) -> Void
     var onToggleTint: () -> Void
     var onSetLights: (Bool) -> Void
+    /// 面板开合状态外传：原版队列浮岛跟着面板一起出现 / 收起（`showQueueIsland = isOpen && ...`）
+    var onOpenChange: (Bool) -> Void = { _ in }
 
     // MARK: - 状态
 
@@ -109,6 +111,7 @@ struct WallToolsPanel: View {
         }
         .padding(.trailing, M.edge)
         .padding(.bottom, M.edge)
+        .onChange(of: isOpen) { open in onOpenChange(open) }
     }
 
     // MARK: - 面板

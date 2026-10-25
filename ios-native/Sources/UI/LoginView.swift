@@ -360,6 +360,11 @@ struct LoginView: View {
                 scene = .success
                 if let account = try? await NeteaseAPI.shared.currentAccount() {
                     library.signIn(session: account)
+                } else {
+                    // 803 已经拿到 cookie，账号资料却取不到：不能让窗口静默关掉（看起来就是「登录没反应」）
+                    failureText = "已拿到登录凭证，但读取账号失败，请点刷新二维码重试。"
+                    scene = .failed
+                    return
                 }
                 try? await Task.sleep(nanoseconds: 400_000_000)
                 dismiss()

@@ -23,6 +23,8 @@ actor NeteaseAPI {
 
     private static let cookieKey = "folia.netease.cookie"
     private static let anonKey = "folia.netease.anonymousCookie"
+    /// 匿名注册失败后的冷却时间，避免每次请求都去打一个已经挂掉的路由
+    private var anonRetryAfter: Date?
 
     private init() {
         let config = URLSessionConfiguration.default
@@ -102,28 +104,35 @@ actor NeteaseAPI {
 
     /// 匿名 cookie：不登录也能读公开歌单、搜索
     private func registerAnonymous() async {
+        // 上游这个路由会间歇性 503（netease backend offline）。失败要退避，
+        // 否则每个接口调用都会先白等一次，首页会空着。
+        if let until = anonRetryAfter, Date() < until { return }
         guard let url = URL(string: "\(base)/register/anonimous") else { return }
         guard let (data, _) = try? await session.data(from: url),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let cookie = json["cookie"] as? String, !cookie.isEmpty else { return }
+              let cookie = json["cookie"] as? String, !cookie.isEmpty else {
+            anonRetryAfter = Date().addingTimeInterval(120)
+            return
+        }
         anonymousCookie = cookie
+        anonRetryAfter = nil
     }
 
     // MARK: - 账号与扫码登录
 
-    /// 当前登录状态；未登录返回 nil
+    /// 当前登录状态；未登录（或 cookie 已失效）返回 nil
     func currentAccount() async throws -> Account? {
         guard signInCookie != nil else { return nil }
-        do {
-            let json = try await get("/login/status", needsTimestamp: true, allowAnonymous: false)
-            guard let data = json["data"] as? [String: Any] ?? json["account"] as? [String: Any],
-                  (data["profile"] as? [String: Any]) != nil || (data["nickname"] as? String)?.isEmpty == false
-            else { return nil }
-            let profile = data["profile"] as? [String: Any] ?? data
-            return Self.account(from: profile)
-        } catch {
+        let json = try await get("/login/status", needsTimestamp: true, allowAnonymous: false)
+        if let code = (json["code"] as? NSNumber)?.intValue, [301, 401, 403].contains(code) {
+            signInCookie = nil
             return nil
         }
+        guard let data = json["data"] as? [String: Any] ?? json["account"] as? [String: Any],
+              (data["profile"] as? [String: Any]) != nil || (data["nickname"] as? String)?.isEmpty == false
+        else { return nil }
+        let profile = data["profile"] as? [String: Any] ?? data
+        return Self.account(from: profile)
     }
 
     private static func account(from raw: [String: Any]) -> Account {
@@ -178,6 +187,7 @@ actor NeteaseAPI {
         case 803:
             if let cookie = json["cookie"] as? String, !cookie.isEmpty {
                 signInCookie = cookie
+                anonymousCookie = nil
                 return .confirmed
             }
             return .failed("登录成功但没有拿到登录状态")
