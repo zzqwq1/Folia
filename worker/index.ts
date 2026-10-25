@@ -126,14 +126,23 @@ const neteaseWeapi = async (payload: Record<string, unknown>): Promise<{ params:
 /** 调一次网易云 weapi，返回解析后的 JSON。 */
 // 匿名 cookie：不注册匿名设备时，取流接口对部分歌会直接返回 404（等价“未登录”）。
 let neteaseAnonCookie: string | null = null;
+// 注册失败后的冷却：CF 出口 IP 被网易限流时这个接口会持续失败，
+// 不冷却的话每个取流请求都要白等一次。
+let neteaseAnonRetryAfter = 0;
 const ensureNeteaseAnonCookie = async (): Promise<string> => {
   if (neteaseAnonCookie) return neteaseAnonCookie;
+  if (Date.now() < neteaseAnonRetryAfter) return "";
   try {
-    const data: any = await neteaseWeapiRequest("/weapi/register/anonimous", {});
+    // 必须用请求体带上 username，否则网易回 code 400 且不下发 cookie。
+    const username = `86${String(Math.random()).slice(2, 13).padEnd(11, "0")}`.slice(0, 13);
+    const data: any = await neteaseWeapiRequest("/weapi/register/anonimous", { username });
     neteaseAnonCookie = typeof data?.cookie === "string" ? data.cookie : "";
+    // 有的版本把 cookie 放在顶层、有的放在 body 里，都兼容一下。
+    if (!neteaseAnonCookie && typeof data?.body?.cookie === "string") neteaseAnonCookie = data.body.cookie;
   } catch {
     neteaseAnonCookie = "";
   }
+  if (!neteaseAnonCookie) neteaseAnonRetryAfter = Date.now() + 60_000;
   return neteaseAnonCookie ?? "";
 };
 
