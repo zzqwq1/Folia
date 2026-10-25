@@ -41,10 +41,12 @@ final class FoliaWebHostController: UIViewController, WKScriptMessageHandler, WK
         webView.scrollView.backgroundColor = background
         webView.scrollView.bounces = false
         // 安全区由页面自己按 --folia-safe-* 留白（index.html）：WebKit 若再自动缩一次，
-        // 就成了两份，界面显得被整个顶下去一截。
+        // 就成了两份，界面显得被整个顶下去一截。具体数值由下面 injectSafeInsets 交过去。
         webView.scrollView.contentInsetAdjustmentBehavior = .never
         webView.navigationDelegate = self
         view.addSubview(webView)
+
+        injectSafeInsets()
 
         bridge.ensureRegistered()
         bridge.commandHandler = { [weak self] action in
@@ -63,6 +65,46 @@ final class FoliaWebHostController: UIViewController, WKScriptMessageHandler, WK
         DispatchQueue.main.async {
             self.webView?.evaluateJavaScript(script, completionHandler: nil)
         }
+    }
+
+    /// 把 WKWebView 实测的安全区交给页面（index.html 里的 `--folia-safe-*`）。
+    ///
+    /// 页面自己那份靠 env() 与机型表猜，在壳里两头都不可靠：WebKit 的自动 inset 已被关掉，
+    /// 原生壳全屏铺满后页面的视口也不再随安全区收缩。原生这边 `safeAreaInsets` 是唯一准的，
+    /// 由它算好再推过去；页面监听 `folia-safe-insets` 重排一次。注入分两处：
+    /// 文档开始时给初值，尺寸/方向变化时（home 条、通话状态栏）再补一次。
+    private func injectSafeInsets() {
+        let post = """
+        (function() {
+          try {
+            var top = window.__foliaSafeTop || 0;
+            var bottom = window.__foliaSafeBottom || 0;
+            window.__foliaSafeInsets = {
+              top: top,
+              bottom: bottom,
+              left: window.__foliaSafeLeft || 0,
+              right: window.__foliaSafeRight || 0
+            };
+            window.dispatchEvent(new Event('folia-safe-insets'));
+          } catch (e) {}
+        })();
+        """
+        let sync = """
+        (function() {
+          var v = window.__foliaSafeValues__ || { top: 0, bottom: 0, left: 0, right: 0 };
+          window.__foliaSafeTop = v.top;
+          window.__foliaSafeBottom = v.bottom;
+          window.__foliaSafeLeft = v.left;
+          window.__foliaSafeRight = v.right;
+        })();
+        """
+        let insets = view.safeAreaInsets
+        let values = "window.__foliaSafeValues__ = { top: \(Int(insets.top.rounded())), bottom: \(Int(insets.bottom.rounded())), left: \(Int(insets.left.rounded())), right: \(Int(insets.right.rounded())) };"
+        for script in [values, sync, post] {
+            let item = WKUserScript(source: script, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+            webView.configuration.userContentController.addUserScript(item)
+        }
+        evaluateJS(values + sync + post)
     }
 
     // MARK: - JS 桥消息
@@ -179,9 +221,16 @@ final class FoliaWebHostController: UIViewController, WKScriptMessageHandler, WK
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         NSLog("[FoliaWebShell] loaded %@", webView.url?.absoluteString ?? "?")
+        // 首帧时 safeAreaInsets 可能还没算出来，加载完成后补一次。
+        injectSafeInsets()
         probeLoginApi()
         logApiBase()
         installLoginDiagnostics()
+    }
+
+    override func viewSafeAreaInsetsDidChange() {
+        super.viewSafeAreaInsetsDidChange()
+        injectSafeInsets()
     }
 
     /// 只读系统日志也能看出前端实际用的 API 地址：CI 注入的是 `http://127.0.0.1:48231/api/*`。
