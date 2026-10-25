@@ -17,6 +17,8 @@ final class FoliaWebHostController: UIViewController, WKScriptMessageHandler, WK
 
     private let bridge = FoliaMediaBridge.shared
     private var webView: WKWebView!
+    /// 安全区脚本的 user script；只保留一份，数值变化时替换内容，避免重复注入叠加。
+    private var safeInsetsScripts: [WKUserScript] = []
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -100,9 +102,16 @@ final class FoliaWebHostController: UIViewController, WKScriptMessageHandler, WK
         """
         let insets = view.safeAreaInsets
         let values = "window.__foliaSafeValues__ = { top: \(Int(insets.top.rounded())), bottom: \(Int(insets.bottom.rounded())), left: \(Int(insets.left.rounded())), right: \(Int(insets.right.rounded())) };"
-        for script in [values, sync, post] {
-            let item = WKUserScript(source: script, injectionTime: .atDocumentStart, forMainFrameOnly: true)
-            webView.configuration.userContentController.addUserScript(item)
+        let controller = webView.configuration.userContentController
+        // 先移除上一次的，否则每次尺寸变化都会再叠三份，越叠越多
+        for item in safeInsetsScripts {
+            controller.removeUserScript(item)
+        }
+        safeInsetsScripts = [values, sync, post].map {
+            WKUserScript(source: $0, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+        }
+        for item in safeInsetsScripts {
+            controller.addUserScript(item)
         }
         evaluateJS(values + sync + post)
     }

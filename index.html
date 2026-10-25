@@ -316,14 +316,13 @@
         -webkit-tap-highlight-color: transparent;
         overscroll-behavior: none;
       }
-      /* 安全区留白加在 #root 上，而不是界面那个 fixed inset-0 的节点上。
-         那个节点是个一个像素都不缩小的全屏盒：加 padding 只会把内容往里挤、背景不跟着铺，
-         于是顶上留出一条空带、底下卡片被 Home 条盖住，整块界面看起来还被压窄了一圈。
-         加在 #root 上则是给界面让出真正的可用区域，界面自己依旧铺满，没有任何空带。 */
+      /* #root 只做两件事：铺满窗口、给状态栏与 Home 条留出安全区。
+         不要在这里加 transform，也不要让子节点相对它错位——它的 padding box 就是界面的可视区域。 */
       html[data-folia-ios='1'] #root {
         position: fixed;
         inset: 0;
         box-sizing: border-box;
+        overflow: hidden;
         padding-top: var(--folia-safe-top, env(safe-area-inset-top, 0px));
         padding-right: var(--folia-safe-right, env(safe-area-inset-right, 0px));
         padding-bottom: var(--folia-safe-bottom, env(safe-area-inset-bottom, 0px));
@@ -331,14 +330,16 @@
         background: #09090b;
       }
       /* 界面本身按桌面版的 pt 尺寸排，在手机上显得太大。整页缩到 86%，再按放大的倍数把尺寸要回来：
-         元素都还是原来的版式，只是所有 px 尺寸一起变小。没有设置 overflow 的滚动容器要靠这多出来的一截，
-         否则 14% 的内容会被裁掉，所以显式写滚动容器的宽度会一并收在下面。
-         以 #root 的 padding box 为参照，让出的安全区不会被放大回去。 */
+         元素都还是原来的版式，只是所有 px 尺寸一起变小。
+         缩放原点必须是 0 0：默认的 50% 50% 会让内容以中心为准缩回去，铺不满、还整体偏右下。
+         #root 的 padding 已经让出了安全区，所以这层只用 100%（相对 #root 的 content box），
+         不要再乘 1/0.86；溢出部分由 #root 的 overflow: hidden 裁掉。 */
       html[data-folia-ios='1'][data-folia-compact='1'] #root > div {
         box-sizing: border-box;
-        width: calc(100% / 0.86);
-        height: calc(100% / 0.86);
+        width: 100%;
+        height: 100%;
         transform: scale(0.86);
+        transform-origin: 0 0;
       }
       /* 扫码登录的二维码：接口没给 data: 前缀时只有裸 base64，补上前缀，否则是一片空白 */
       html[data-folia-ios='1'] img[data-folia-b64='1'] {
