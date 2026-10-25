@@ -256,14 +256,14 @@ final class PlayerEngine: NSObject, ObservableObject {
         let center = MPRemoteCommandCenter.shared()
         center.playCommand.addTarget { [weak self] _ in
             Task { @MainActor in
-                guard let self, !self.isPlaying else { return .success }
+                guard let self, !self.isPlaying else { return }
                 self.togglePlayPause()
             }
             return .success
         }
         center.pauseCommand.addTarget { [weak self] _ in
             Task { @MainActor in
-                guard let self, self.isPlaying else { return .success }
+                guard let self, self.isPlaying else { return }
                 self.togglePlayPause()
             }
             return .success
@@ -283,7 +283,7 @@ final class PlayerEngine: NSObject, ObservableObject {
         center.changePlaybackPositionCommand.addTarget { [weak self] event in
             guard let event = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
             Task { @MainActor in self?.seek(to: event.positionTime) }
-            return .success
+            return MPRemoteCommandHandlerStatus.success
         }
     }
 
