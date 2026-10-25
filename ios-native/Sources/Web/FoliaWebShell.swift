@@ -232,19 +232,42 @@ final class FoliaWebHostController: UIViewController, WKScriptMessageHandler, WK
               throw err;
             });
           };
-          var box = null;
+          // 平时不打扰界面：只有真的出现网络层失败（ERR）时，左下角才冒一个不显眼的小圆点，点开才是面板。
+          var wrap = null, panel = null, btn = null, expanded = false;
           var server = [];
+          function failed() {
+            for (var i = 0; i < log.length; i += 1) { if (log[i].status === 'ERR') return true; }
+            return false;
+          }
+          function ensure() {
+            if (wrap && wrap.isConnected) { btn.style.display = failed() ? 'block' : 'none'; return; }
+            wrap = document.createElement('div');
+            wrap.setAttribute('data-folia-diag', '1');
+            wrap.style.cssText = 'position:fixed;left:8px;bottom:calc(6px + env(safe-area-inset-bottom,0px));'
+              + 'z-index:2147483647;display:flex;flex-direction:column;align-items:flex-start;gap:6px;';
+            panel = document.createElement('pre');
+            panel.style.cssText = 'display:none;max-height:40vh;max-width:calc(100vw - 28px);overflow:auto;margin:0;'
+              + 'padding:8px 10px;border-radius:8px;font:10px/1.35 -apple-system,Menlo,monospace;'
+              + 'background:rgba(0,0,0,.9);color:#9ae6b4;white-space:pre-wrap;word-break:break-all;';
+            panel.addEventListener('dblclick', function() { wrap.remove(); wrap = null; panel = null; });
+            btn = document.createElement('div');
+            btn.textContent = '!';
+            btn.style.cssText = 'display:none;width:24px;height:24px;border-radius:12px;background:rgba(0,0,0,.55);'
+              + 'color:#9ae6b4;font:12px/24px -apple-system,sans-serif;text-align:center;opacity:.75;';
+            btn.addEventListener('click', function() {
+              expanded = !expanded;
+              panel.style.display = expanded ? 'block' : 'none';
+              if (expanded) { pollServer(); paint(); }
+            });
+            wrap.appendChild(panel);
+            wrap.appendChild(btn);
+            document.body.appendChild(wrap);
+            btn.style.display = failed() ? 'block' : 'none';
+          }
           function paint() {
-            if (!box || !box.isConnected) {
-              box = document.createElement('pre');
-              box.setAttribute('data-folia-diag', '1');
-              box.style.cssText = 'position:fixed;left:0;right:0;bottom:0;max-height:45%;overflow:auto;'
-                + 'margin:0;padding:8px 10px;z-index:2147483647;font:10px/1.35 -apple-system,Menlo,monospace;'
-                + 'background:rgba(0,0,0,.88);color:#9ae6b4;white-space:pre-wrap;word-break:break-all;';
-              box.addEventListener('dblclick', function() { box.remove(); box = null; });
-              document.body.appendChild(box);
-            }
-            box.textContent = log.map(function(e) {
+            ensure();
+            if (!expanded) return;
+            panel.textContent = log.map(function(e) {
               return e.t + ' ' + (e.status === undefined ? '…' : e.status) + ' ' + (e.ms || 0) + 'ms '
                 + e.url.replace('http://127.0.0.1:48231', '') + (e.body ? '\\n    ' + e.body : '');
             }).join('\\n')
@@ -261,14 +284,12 @@ final class FoliaWebHostController: UIViewController, WKScriptMessageHandler, WK
                 var json = JSON.parse(xhr.responseText);
                 if (json && json.events) {
                   server = json.events.slice(-40);
-                  paint();
+                  if (expanded) paint();
                 }
               } catch (e) {}
             };
             xhr.send();
           }
-          setInterval(pollServer, 2000);
-          pollServer();
         })();
         """
         webView.evaluateJavaScript(source, completionHandler: nil)
