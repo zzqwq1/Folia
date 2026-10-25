@@ -11,7 +11,7 @@ struct WallItem: Identifiable, Equatable {
     }
 
     let id: String
-    let source: Source
+    var source: Source
     /// 探索墙上这一格属于哪一段（队列墙没有）
     var sectionKey: String? = nil
     /// 这一段的标题（标题格用段落自己的 title，海报卡用段标题当歌手行）

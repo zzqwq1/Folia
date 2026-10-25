@@ -8,11 +8,13 @@ import Foundation
 // QQ 是 songmid、酷狗是 hash、波点是它的数字 id，统一走这一层。
 
 /// 四个平台。原版 `src/services/onlineMusic` 下的四个 provider。
-enum MusicProvider: String, Codable, CaseIterable, Hashable {
+enum MusicProvider: String, Codable, CaseIterable, Hashable, Identifiable {
     case netease
     case qq
     case kugou
     case bodian
+
+    var id: String { rawValue }
 
     /// 界面上的名字（原版 i18n `provider.netease` …）
     var label: String {

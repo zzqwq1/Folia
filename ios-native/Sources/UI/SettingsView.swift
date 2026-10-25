@@ -288,7 +288,7 @@ struct SettingsView: View {
 
             SettingRow(action: {
                 loginProvider = provider
-                withAnimation(moveAnimation) { showLogin = true }
+                withAnimation(SettingsView.moveAnimation) { showLogin = true }
             }) {
                 rowLabel("扫码登录\(provider.shortName)")
                 Spacer(minLength: 0)
@@ -465,7 +465,7 @@ struct SettingsView: View {
                 ForEach(MusicProvider.allCases) { provider in
                     SettingRow(action: {
                         loginProvider = provider
-                        withAnimation(moveAnimation) { showLogin = true }
+                        withAnimation(SettingsView.moveAnimation) { showLogin = true }
                     }) {
                         rowLabel("扫码登录\(provider.shortName)")
                         Spacer(minLength: 0)
