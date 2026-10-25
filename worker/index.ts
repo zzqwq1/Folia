@@ -210,7 +210,7 @@ const withCors = (request: Request, response: Response): Response => {
 const NETEASE_BACKUP_BASE = "https://enclosure-sailing-senate-taken.trycloudflare.com";
 // 家用电脑（住宅 IP）：网易扫码登录对它不弹验证码，机房 IP 会弹 -462。
 // 用户已把电脑长开（QQ 音乐回退也依赖它），登录优先走这条，其次才是云服务器。
-const HOME_NETEASE_BASE = "https://lion-asks-latinas-paul.trycloudflare.com";
+const HOME_NETEASE_BASE = "https://lighter-frames-boost-ethical.trycloudflare.com";
 
 // SPA 真正允许返回 index.html 的路径；其余路径被兜底成 HTML 时一律 404。
 const HTML_ROUTES = new Set(["/", "/index.html"]);
