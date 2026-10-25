@@ -296,6 +296,121 @@
         }
       })();
     </script>
+    <!-- ========== iOS 原生壳适配 开始 ==========
+         WKWebView 铺满全屏、状态栏浮在内容上，env(safe-area-inset-*) 在首次绘制时可能还是 0，
+         按下述顺序用实测的屏幕尺寸兜住：先试 env()，再试 visualViewport，最后按 UA 型号表。
+         只按 iPhone/iPad 的 UA 生效，桌面版与安卓不受影响。 -->
+    <style>
+      html[data-folia-ios='1'],
+      html[data-folia-ios='1'] body {
+        /* 关掉双击缩放与长按选中，行为贴近原生 */
+        -webkit-text-size-adjust: 100%;
+        -webkit-tap-highlight-color: transparent;
+        overscroll-behavior: none;
+      }
+      html[data-folia-ios='1'] #root > div {
+        padding-top: var(--folia-safe-top, env(safe-area-inset-top, 0px));
+        padding-right: var(--folia-safe-right, env(safe-area-inset-right, 0px));
+        padding-bottom: var(--folia-safe-bottom, env(safe-area-inset-bottom, 0px));
+        padding-left: var(--folia-safe-left, env(safe-area-inset-left, 0px));
+      }
+      /* 诊断条（仅壳内）：避免盖住底部播放条 */
+      html[data-folia-ios='1'] [data-folia-diag='1'] {
+        padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px)) !important;
+      }
+      /* 扫码登录的二维码：接口没给 data: 前缀时只有裸 base64，补上前缀，否则是一片空白 */
+      html[data-folia-ios='1'] img[data-folia-b64='1'] {
+        background: #fff;
+      }
+    </style>
+    <script>
+      (function () {
+        var ua = navigator.userAgent || '';
+        if (!/iPhone|iPad|iPod/i.test(ua)) return;
+        var root = document.documentElement;
+        root.setAttribute('data-folia-ios', '1');
+
+        // 屏高 → 上下安全区（逻辑像素）。UA 与 CSS 尺寸一致时这两张表与真机 env() 值相等，
+        // 用来在 env() 还没就绪时给一个正确值，避免内容被状态栏盖住或底部多出一截黑边。
+        function insetsFor(width, height, dpr) {
+          var short = Math.min(width, height);
+          // iPad：上下各 24pt
+          if (/iPad/i.test(ua) || short >= 744) return { top: 24, bottom: 20 };
+          // 带灵动岛 / 刘海的机型
+          if (short >= 440) return { top: 62, bottom: 34 }; // 17 Pro Max 等 6.9"
+          if (short >= 402) return { top: 62, bottom: 34 }; // 16 Pro / 17 Pro
+          if (short >= 393) return { top: 59, bottom: 34 }; // 15 / 16 / 14 Pro
+          if (short >= 390) return { top: 47, bottom: 34 }; // 12 / 13 / 14 非 Pro
+          if (short >= 375) return { top: 47, bottom: 34 }; // X / XS / 11 Pro / mini 系列
+          if (short >= 360 && dpr >= 3) return { top: 44, bottom: 34 }; // 8 Plus 等
+          return { top: 20, bottom: 0 }; // SE / 8 及更早：有状态栏、无 Home 条
+        }
+
+        function measured() {
+          var w = window.innerWidth || root.clientWidth;
+          var h = window.innerHeight || root.clientHeight;
+          var dpr = window.devicePixelRatio || 1;
+          // visualViewport 高度会扣掉浏览器栏；壳内是全屏，取较大者更接近屏幕尺寸
+          var vv = window.visualViewport;
+          if (vv && vv.height > h) h = vv.height;
+          return insetsFor(w, h, dpr);
+        }
+
+        function probeEnv() {
+          var probe = document.getElementById('folia-safe-probe');
+          if (!probe) {
+            probe = document.createElement('div');
+            probe.id = 'folia-safe-probe';
+            probe.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;visibility:hidden;pointer-events:none;'
+              + 'padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);'
+              + 'padding-left:env(safe-area-inset-left,0px);padding-right:env(safe-area-inset-right,0px);';
+            document.body.appendChild(probe);
+          }
+          var s = window.getComputedStyle(probe);
+          return {
+            top: parseFloat(s.paddingTop) || 0,
+            bottom: parseFloat(s.paddingBottom) || 0,
+            left: parseFloat(s.paddingLeft) || 0,
+            right: parseFloat(s.paddingRight) || 0
+          };
+        }
+
+        function apply() {
+          var envValue = probeEnv();
+          var guess = measured();
+          var top = envValue.top || guess.top;
+          var bottom = envValue.bottom || guess.bottom;
+          root.style.setProperty('--folia-safe-top', top + 'px');
+          root.style.setProperty('--folia-safe-bottom', bottom + 'px');
+          root.style.setProperty('--folia-safe-left', (envValue.left || 0) + 'px');
+          root.style.setProperty('--folia-safe-right', (envValue.right || 0) + 'px');
+        }
+
+        apply();
+        window.addEventListener('resize', apply);
+        window.addEventListener('orientationchange', apply);
+        if (window.visualViewport) window.visualViewport.addEventListener('resize', apply);
+        document.addEventListener('DOMContentLoaded', apply);
+
+        // 扫码登录的图片：npm 版接口回的是完整 dataURL，某些代理/自建服务只回裸 base64，
+        // <img> 拿到裸 base64 会显示空白。这里补上 data: 前缀，PNG/JPEG 按魔数判断。
+        var BASE64_ONLY = /^[A-Za-z0-9+/=\r\n]+$/;
+        function fixImage(img) {
+          if (!img || img.getAttribute('data-folia-b64') === '1') return;
+          var src = (img.getAttribute('src') || '').trim();
+          if (!src || src.indexOf('data:') === 0 || src.length < 512 || !BASE64_ONLY.test(src)) return;
+          var mime = src.slice(0, 4).indexOf('/9j/') === 0 ? 'image/jpeg' : 'image/png';
+          img.setAttribute('src', 'data:' + mime + ';base64,' + src.replace(/[\r\n]/g, ''));
+          img.setAttribute('data-folia-b64', '1');
+        }
+        function sweep() {
+          var imgs = document.querySelectorAll('img');
+          for (var i = 0; i < imgs.length; i += 1) fixImage(imgs[i]);
+        }
+        new MutationObserver(sweep).observe(root, { subtree: true, childList: true, attributes: true, attributeFilter: ['src'] });
+      })();
+    </script>
+    <!-- ========== iOS 原生壳适配 结束 ========== -->
     <div id="root"></div>
     <script type="module" src="/src/index.tsx"></script>
 
@@ -360,6 +475,8 @@ var FOLIA_LATEST_VERSION = '1.8.5';
     var p = new URLSearchParams(window.location.search);
     if (p.get('obs') === '1' || window.location.pathname === '/obs' || p.get('splash') === '0') return;
   } catch (e) {}
+  // iOS 原生壳（WKWebView）里不弹：这个弹窗是网页版的赞赏入口，装在 App 里只是开机挡一层。
+  if (/iPhone|iPad|iPod/i.test(navigator.userAgent || '')) return;
 
   var mask = document.getElementById('donate-mask');
   if (!mask) return;
