@@ -117,6 +117,15 @@ final class PlayerEngine: NSObject, ObservableObject {
         }
     }
 
+    /// 原版循环钮：列表循环 → 单曲循环 → 关闭
+    func cycleRepeatMode() {
+        switch repeatMode {
+        case .off: repeatMode = .all
+        case .all: repeatMode = .one
+        case .one: repeatMode = .off
+        }
+    }
+
     func previous() {
         guard !queue.isEmpty else { return }
         // 播过 3 秒以上就回到本曲开头，和系统播放器一致

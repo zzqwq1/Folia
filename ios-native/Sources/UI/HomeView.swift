@@ -49,6 +49,13 @@ struct HomeView: View {
             WallBackdrop(theme: theme, hasVignette: true)
                 .ignoresSafeArea()
 
+            // 底部居中的播放胶囊（原版 `FloatingPlayerControls`，`z-60`）
+            if player.currentSong != nil {
+                PlayerCapsule(onOpenPlayer: { showPlayer = true })
+                    .frame(maxHeight: .infinity, alignment: .bottom)
+                    .zIndex(60)
+            }
+
             LatticeWallView(
                 items: items,
                 theme: theme,
@@ -111,13 +118,9 @@ struct HomeView: View {
         }
     }
 
-    /// 按钮上方的一列（column-reverse）：队列浮岛在上、迷你播放条与工具按钮在下
+    /// 按钮上方的一列（column-reverse）：队列浮岛在上、工具按钮在下
     private var toolsStack: some View {
         VStack(alignment: .trailing, spacing: 8) {
-            if let song = player.currentSong {
-                MiniPlayerBar(song: song) { showPlayer = true }
-                    .frame(maxWidth: 296)
-            }
             if showQueueIsland && isToolsOpen {
                 QueueIsland()
                     .frame(width: 296)
