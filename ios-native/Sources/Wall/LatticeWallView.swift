@@ -47,7 +47,7 @@ struct LatticeWallView: View {
     @State private var entranceDone = false
     /// 首次画出来之前的卡「原地挂载」，不跑波次（`hasDrawnRef`）
     @State private var hasDrawn = false
-    @State private var bounds = WallBounds(left: -100, right: 1400, top: -100, bottom: 900)
+    @State private var bounds = WallBounds(left: -100, top: -100, right: 1400, bottom: 900)
     @State private var activeId: String?
     @State private var focusedId: String?
     @State private var touchOpen = false

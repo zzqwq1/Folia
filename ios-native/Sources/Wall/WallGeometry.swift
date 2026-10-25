@@ -15,8 +15,8 @@ struct WallMetrics: Equatable {
 
 struct WallBounds: Equatable {
     var left: CGFloat
-    var right: CGFloat
     var top: CGFloat
+    var right: CGFloat
     var bottom: CGFloat
 }
 
@@ -27,7 +27,7 @@ struct WallRect: Equatable {
     var height: CGFloat
 
     var bounds: WallBounds {
-        WallBounds(left: x, right: x + width, top: y, bottom: y + height)
+        WallBounds(left: x, top: y, right: x + width, bottom: y + height)
     }
 
     var midX: CGFloat { x + width / 2 }
@@ -151,8 +151,8 @@ enum WallLayoutMath {
 
         let view = WallBounds(
             left: bounds.left - overscan,
-            right: bounds.right + overscan,
             top: bounds.top - overscan,
+            right: bounds.right + overscan,
             bottom: bounds.bottom + overscan
         )
         let fromColumn = floored(view.left / geometry.blockWidth)
