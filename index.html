@@ -348,6 +348,16 @@
         height: auto;
         box-sizing: border-box;
       }
+      /* 壳内铺满：WKWebView 已被壳裁到屏幕(或窗口)边缘，再按安全区内缩就只剩一圈底色——
+         用户看到的就是「黑边」。这里界面本体贴满四边（0 inset，不给 --folia-safe-* 位置），
+         状态栏与 Home 条压在最上层，用它们自己的半透明底垫着，视觉上仍是铺满。
+         桌面版与手机浏览器不命中这条路，仍是安全区内缩。 */
+      html[data-folia-shell='1'] #root > div:not(#app-splash) {
+        top: 0;
+        right: 0;
+        bottom: 0;
+        left: 0;
+      }
       /* 界面本身按桌面版的 pt 尺寸排，在手机上显得太大。整页缩到 86%，再按放大的倍数把尺寸要回来：
          元素都还是原来的版式，只是所有 px 尺寸一起变小。
          缩放原点必须是 0 0：默认的 50% 50% 会让内容以中心为准缩回去，铺不满、还整体偏右下。
@@ -367,11 +377,10 @@
 
       /* ---------- WKWebView 壳（Capacitor / 原生壳）专用 ----------
          壳里 WebKit 的自动安全区让位是关掉的，页面拿到的是整块屏幕，
-         状态栏、灵动岛、Home 条都压在界面之上。之前不同版本在这块各有各的写法，
-         结果就是「有的机型顶上一条、有的底部一条」——本质是让位量与实际可用区对不上。
-         这里统一成一条规则：用实测安全区把整块界面内缩，四周由 #root 的底色垫底，
-         内缩量就是状态栏与 Home 条的高度，不会再有多余的一条边。
-         安全区值为 0 时不内缩，界面照常铺满，所以桌面浏览器与没有安全区的机型不受影响。 */
+         状态栏、灵动岛、Home 条都压在界面之上。以前这里按实测安全区给整块界面内缩，
+         但内缩量与实际可用区只要差几 pt，屏幕上就是一条黑边（顶部一条 / 四周一圈，机型不同表现不同）。
+         现在改成界面贴满四边（见上方 data-folia-shell 的 0 inset 规则），
+         安全区只用来给需要避让的浮层（底部播放条这类）留位置，不再当作界面盒子。 */
       html[data-folia-shell='1'],
       html[data-folia-shell='1'] body {
         background: #09090b;
@@ -379,16 +388,6 @@
       html[data-folia-shell='1'] #root {
         padding: 0;
         background: #09090b;
-      }
-      /* 壳内不再用 86% 缩放：缩完四周必然留一圈底色，
-         手机上看着就是黑边。改成按宽度自适应（见下方 JS 的 --folia-shell-scale），
-         只在特别窄的屏幕上等比缩小，缩多少就把盒子放大多少来铺满。 */
-      html[data-folia-shell='1'] #root > div:not(#app-splash) {
-        position: absolute;
-        top: var(--folia-safe-top, 0px);
-        right: var(--folia-safe-right, 0px);
-        bottom: var(--folia-safe-bottom, 0px);
-        left: var(--folia-safe-left, 0px);
       }
     </style>
     <script>
