@@ -217,7 +217,7 @@ struct SettingsView: View {
     private var accountPage: some View {
         SettingGroup(title: "网易云音乐", isFirst: true) {
             if let account = library.account {
-                SettingRow {
+                SettingRow(hairline: false) {
                     HStack(spacing: 12) {
                         accountAvatar(account)
                         VStack(alignment: .leading, spacing: 0) {
@@ -240,9 +240,9 @@ struct SettingsView: View {
                         }
                         Spacer(minLength: 0)
                     }
-                } hairline: false
+                }
             } else {
-                SettingRow {
+                SettingRow(hairline: false) {
                     VStack(alignment: .leading, spacing: 0) {
                         Text("当前是访客")
                             .font(.system(size: 14))
@@ -256,7 +256,7 @@ struct SettingsView: View {
                             .padding(.top, 2)
                     }
                     Spacer(minLength: 0)
-                } hairline: false
+                }
             }
 
             SettingRow {
@@ -399,7 +399,7 @@ struct SettingsView: View {
     /// 外观：主题 + 平台记号
     @ViewBuilder
     private var appearancePage: some View {
-        SettingGroup(title: "主题", isFirst: true) {
+        SettingGroup(title: "主题", isFirst: true, foot: "原版有多套配色，原生先固定「午夜墨染」。") {
             SettingRow {
                 VStack(alignment: .leading, spacing: 0) {
                     rowLabel("主题")
@@ -411,15 +411,15 @@ struct SettingsView: View {
                     .foregroundStyle(C.t2)
                     .lineLimit(1)
             }
-        } foot: "原版有多套配色，原生先固定「午夜墨染」。"
+        } 
 
-        SettingGroup(title: "平台") {
+        SettingGroup(title: "平台", foot: "登录窗口标题前那个红底「云」字的记号。") {
             SettingRow {
                 rowLabel("网易云音乐")
                 Spacer(minLength: 0)
                 NeteaseMark(size: 24)
             }
-        } foot: "登录窗口标题前那个红底「云」字的记号。"
+        } 
     }
 
     /// 通用：版本 + 登录入口
