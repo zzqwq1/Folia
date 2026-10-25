@@ -3,12 +3,13 @@ import Network
 
 /// 本地 HTTP 服务器：WKWebView 加载的原版前端（bundle 内 dist）与线上 API 走同源，
 /// 规避 Cloudflare 无 CORS 预检（405）以及 WKURLSchemeHandler 读不到 POST body 的限制。
-/// 静态文件从 bundle 的 dist 目录提供；`/netease/` `/qq/` `/kugou/` `/api/` 前缀请求
-/// 原样转发到 https://app.folia-api.top（Cookie 由 URLSession 自动存储与回传，网易云登录态可用）。
+/// 静态文件从 bundle 的 dist 目录提供；`/api/`（以及旧的 `/netease/` `/qq/` `/kugou/`）前缀请求
+/// 原样转发到 https://app.folia-api.top。
 final class FoliaLocalServer {
     static let shared = FoliaLocalServer()
 
     private let port: UInt16 = 48231
+    private let upstream = "https://app.folia-api.top"
     private let queue = DispatchQueue(label: "folia.local.server")
     private var listener: NWListener?
     private let session: URLSession
@@ -120,13 +121,22 @@ final class FoliaLocalServer {
 
     private func process(_ request: HTTPRequest, on connection: NWConnection) {
         NSLog("[FoliaLocalServer] %@ %@", request.method, request.path)
-        guard let pathOnly = URL(string: request.path)?.path else {
+        guard let url = URL(string: "http://127.0.0.1\(request.path)") else {
             sendResponse(status: 400, headers: ["Content-Type": "text/plain"], body: Data("bad request".utf8), on: connection)
             return
         }
+        let pathOnly = url.path
 
         if request.method == "OPTIONS" {
-            sendResponse(status: 204, headers: [:], body: Data(), on: connection)
+            // 预检：页面跨源访问本服务器时，不带这几个头整个请求就会被浏览器拦下。
+            sendResponse(status: 204, headers: [
+                "Access-Control-Allow-Origin": request.headers["origin"] ?? "*",
+                "Access-Control-Allow-Credentials": "true",
+                "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+                "Access-Control-Allow-Headers": request.headers["access-control-request-headers"] ?? "Content-Type, X-QQ-Session, X-Requested-With",
+                "Access-Control-Max-Age": "86400",
+                "Vary": "Origin",
+            ], body: Data(), on: connection)
             return
         }
 
@@ -137,6 +147,8 @@ final class FoliaLocalServer {
         }
     }
 
+    /// 平台前缀有两种写法：`/api/<平台>/...`（构建注入的默认值）和旧的 `/<平台>/...`。
+    /// 线上 Worker 两种都认，转发时原样送过去即可。
     private func isProxyPath(_ path: String) -> Bool {
         path.hasPrefix("/netease/") || path.hasPrefix("/qq/") ||
             path.hasPrefix("/kugou/") || path.hasPrefix("/api/")
@@ -150,7 +162,8 @@ final class FoliaLocalServer {
     ]
 
     private func proxy(_ request: HTTPRequest, on connection: NWConnection) {
-        guard let target = URL(string: "https://app.folia-api.top" + request.path) else {
+        let forwardPath = request.path // path 与 query 一起原样转发，避免 query 里的转义被二次编码。
+        guard let target = URL(string: upstream + forwardPath) else {
             sendResponse(status: 400, headers: ["Content-Type": "text/plain"], body: Data("bad path".utf8), on: connection)
             return
         }
@@ -158,10 +171,20 @@ final class FoliaLocalServer {
         var urlRequest = URLRequest(url: target)
         urlRequest.httpMethod = request.method
         urlRequest.httpBody = request.body.isEmpty ? nil : request.body
+        let bodyMethod = ["POST", "PUT", "PATCH"].contains(request.method)
         for (key, value) in request.headers {
             if hopByHopHeaders.contains(key) { continue }
-            if key == "origin" { continue } // 代理侧无需转发 Origin
+            // 转发时 body 已按原字节重发，带过去的 Content-Length 可能已被 URLSession 改写；
+            // Accept-Encoding 也要交回 URLSession 决定，否则它按声明返回压缩体而我们不解压。
+            if key == "content-length" || key == "accept-encoding" { continue }
+            // 页面与代理现在同源，浏览器会自动补 Origin；原样转发会让上游把它当成跨站请求。
+            if key == "origin" { continue }
+            // fetch 的 keepalive / sec-* 头在代理连接上无意义。
+            if key.hasPrefix("sec-") { continue }
             urlRequest.setValue(value, forHTTPHeaderField: key)
+        }
+        if bodyMethod && request.headers["content-type"] == nil {
+            urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
 
         let startedAt = Date()
@@ -187,11 +210,23 @@ final class FoliaLocalServer {
                         if let one = value as? String { cookies.append(one) }
                         continue
                     }
-                    // 上游可能给多个 CORS 头，用逗号拼在一起；先整行照抄，下面再按需补。
+                    // CORS 头由下面按同源重写：上游给的是 app.folia-api.top 的那份，留着会和页面自己的源打架。
+                    if keyLower.hasPrefix("access-control-") { continue }
                     let text = value as? String ?? String(describing: value)
                     headers[key] = text
                 }
             }
+            // 页面经 http://127.0.0.1:48231 访问本服务器，是跨源请求：CORS 头不补，fetch 会直接失败，
+            // 前端只能报「登录失败」。带 cookie 的请求不允许用 `*`，所以照抄请求的 Origin 并允许凭据。
+            headers["Access-Control-Allow-Origin"] = request.headers["origin"] ?? "*"
+            headers["Access-Control-Allow-Credentials"] = "true"
+            headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+            if let requested = request.headers["access-control-request-headers"] {
+                headers["Access-Control-Allow-Headers"] = requested
+            } else {
+                headers["Access-Control-Allow-Headers"] = "Content-Type, X-QQ-Session, X-Requested-With"
+            }
+            headers["Vary"] = "Origin"
             if cookies.contains(where: { Self.isSessionCookie($0) }) {
                 NSLog("[FoliaLocalServer] proxy %@ %@ -> %d, session cookie from upstream", request.method, target.path, status)
             } else {
@@ -223,8 +258,9 @@ final class FoliaLocalServer {
         let distURL = Bundle.main.bundleURL.appendingPathComponent("dist", isDirectory: true)
         let fileURL = distURL.appendingPathComponent(relative)
 
+        // 静态文件也要允许跨源：页面可能是 file:// 或别的源加载的，挡掉的话整个界面都起不来。
         if let data = try? Data(contentsOf: fileURL) {
-            sendResponse(status: 200, headers: ["Content-Type": mimeType(for: relative)], body: data, on: connection)
+            sendStatic(headers: ["Content-Type": mimeType(for: relative)], body: data, on: connection)
             return
         }
 
@@ -232,7 +268,7 @@ final class FoliaLocalServer {
         // 真发一次空配置，而不是掉进下面的兜底：脚本拿到 HTML 会被 WKWebView 当 MIME 不符拒掉。
         if relative == "runtime-config.js" {
             let script = Data("window.__FOLIA_RUNTIME_CONFIG__ = window.__FOLIA_RUNTIME_CONFIG__ || {};\n".utf8)
-            sendResponse(status: 200, headers: ["Content-Type": mimeType(for: relative)], body: script, on: connection)
+            sendStatic(headers: ["Content-Type": mimeType(for: relative)], body: script, on: connection)
             return
         }
 
@@ -240,10 +276,17 @@ final class FoliaLocalServer {
         let missing = !(relative as NSString).pathExtension.isEmpty
         let indexURL = distURL.appendingPathComponent("index.html")
         if !missing, let indexData = try? Data(contentsOf: indexURL) {
-            sendResponse(status: 200, headers: ["Content-Type": "text/html; charset=utf-8"], body: indexData, on: connection)
+            sendStatic(headers: ["Content-Type": "text/html; charset=utf-8"], body: indexData, on: connection)
         } else {
             sendResponse(status: 404, headers: ["Content-Type": "text/plain"], body: Data("not found".utf8), on: connection)
         }
+    }
+
+    /// 静态响应统一带上跨源头（不带凭据：静态资源不读 cookie）。
+    private func sendStatic(headers: [String: String], body: Data, on connection: NWConnection) {
+        var all = headers
+        all["Access-Control-Allow-Origin"] = "*"
+        sendResponse(status: 200, headers: all, body: body, on: connection)
     }
 
     private func mimeType(for path: String) -> String {

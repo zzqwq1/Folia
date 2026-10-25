@@ -184,7 +184,7 @@ final class FoliaWebHostController: UIViewController, WKScriptMessageHandler, WK
     private func probeLoginApi() {
         let script = """
         (function() {
-          fetch('/netease/login/qr/key?timestamp=' + Date.now(), { credentials: 'include' })
+          fetch('/api/netease/login/qr/key?timestamp=' + Date.now(), { credentials: 'include' })
             .then(function(r) {
               console.log('[FoliaProbe] netease qr key HTTP ' + r.status);
               return r.text();
