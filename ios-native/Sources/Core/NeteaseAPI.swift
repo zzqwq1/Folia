@@ -10,6 +10,8 @@ actor NeteaseAPI {
     static let shared = NeteaseAPI()
 
     private let base = "https://app.folia-api.top/api/netease"
+    /// 纯 weapi 的兜底路由：不依赖家用/服务器隧道，机房 IP 上登录后取账号要用它
+    private let nativeBase = "https://app.folia-api.top/api/native/netease"
     private let session: URLSession
 
     /// 登录态：网易云 `/login/qr/check` 在 803 时回的 cookie 串
@@ -102,6 +104,24 @@ actor NeteaseAPI {
         return json
     }
 
+    /// 直接打原生兜底路由（/api/native/netease），不走隧道、不带匿名 cookie
+    private func getNative(_ route: String, query: [String: String] = [:]) async throws -> [String: Any] {
+        guard var components = URLComponents(string: nativeBase + route) else {
+            throw APIError(code: nil, message: "bad route \(route)")
+        }
+        components.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) }
+        guard let url = components.url else { throw APIError(code: nil, message: "bad url for \(route)") }
+        var request = URLRequest(url: url)
+        request.setValue("https://app.folia-api.top", forHTTPHeaderField: "Referer")
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw APIError(code: nil, message: "no response") }
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            let text = String(data: data.prefix(200), encoding: .utf8) ?? ""
+            throw APIError(code: http.statusCode, message: "HTTP \(http.statusCode): \(text)")
+        }
+        return json
+    }
+
     /// 匿名 cookie：不登录也能读公开歌单、搜索
     private func registerAnonymous() async {
         // 上游这个路由会间歇性 503（netease backend offline）。失败要退避，
@@ -130,7 +150,15 @@ actor NeteaseAPI {
         }
         guard let data = json["data"] as? [String: Any] ?? json["account"] as? [String: Any],
               (data["profile"] as? [String: Any]) != nil || (data["nickname"] as? String)?.isEmpty == false
-        else { return nil }
+        else {
+            // 机房 IP 上 /login/status 会回 -462 且不带资料，但 cookie 是好的。
+            // 这时退回走原生路由（纯 weapi 取账号），否则「扫码成功」后会被当成没登录。
+            if let fallback = try? await getNative("/user/account", query: ["cookie": signInCookie ?? ""]) {
+                let raw = fallback["profile"] as? [String: Any] ?? fallback["account"] as? [String: Any]
+                if let raw { return Self.account(from: raw) }
+            }
+            return nil
+        }
         let profile = data["profile"] as? [String: Any] ?? data
         return Self.account(from: profile)
     }

@@ -523,7 +523,9 @@ const foliaFetch = async (request: Request, env: Env): Promise<Response> => {
       };
 
       try {
-        if (subPath === "/user/account") {
+        if (subPath === "/user/account" || subPath === "/login/status") {
+          // 原生 App 读账号资料走这里。用 /w/nuser/account/get：它同时给 account 与 profile，
+          // 而 /weapi/login/status 在机房 IP 上回 -462 且没有 profile，登录后拿不到昵称/头像。
           const data: any = await weapiWithCookie("/weapi/w/nuser/account/get", {});
           return new Response(JSON.stringify(data ?? { code: 500, message: "empty" }), { headers: jsonHeaders });
         }
