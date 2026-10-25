@@ -201,12 +201,13 @@ struct CollectionView: View {
                     .contentShape(Circle())
                 }
                 .buttonStyle(GridActionButtonStyle())
-                .keyframeAnimator(initialValue: 1.0, trigger: locatePresses) { view, scale in
-                    view.scaleEffect(scale)
-                } keyframes: { _ in
-                    LinearKeyframe(1.16, duration: 0.14)
-                    SpringKeyframe(1.0, duration: 0.26, spring: .snappy)
-                }
+                .scaleEffect(locatePresses == 0 ? 1 : 1.16)
+                .animation(
+                    locatePresses == 0
+                        ? .spring(response: 0.26, dampingFraction: 0.6)
+                        : .easeOut(duration: 0.14),
+                    value: locatePresses
+                )
                 .accessibilityLabel("定位正在播放")
                 .id(key)
             }
