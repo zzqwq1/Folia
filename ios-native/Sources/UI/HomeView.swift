@@ -357,43 +357,58 @@ private struct QueueIsland: View {
     // MARK: - 列表（`padding 0 4`）
 
     private var list: some View {
-        ScrollView(.vertical, showsIndicators: false) {
-            LazyVStack(spacing: 0) {
-                ForEach(Array(songs.enumerated()), id: \.offset) { index, song in
-                    QueueIslandRow(
-                        song: song,
-                        index: index,
-                        isCurrent: currentKey == WallTile.key(for: song),
-                        theme: theme,
-                        onPlay: { player.play(at: index) },
-                        onPlayNext: { player.playNext(at: index) },
-                        onMoveToEnd: { player.moveToEnd(at: index) },
-                        onRemove: { player.remove(at: index) }
-                    )
+        ZStack {
+            if songs.isEmpty {
+                // `.lattice-tools-island-empty`：居中、12px、0.45
+                Text("队列是空的")
+                    .font(.system(size: 12))
+                    .opacity(0.45)
+            } else {
+                ScrollView(.vertical, showsIndicators: false) {
+                    LazyVStack(spacing: 0) {
+                        ForEach(Array(songs.enumerated()), id: \.offset) { index, song in
+                            QueueIslandRow(
+                                song: song,
+                                index: index,
+                                isCurrent: currentKey == WallTile.key(for: song),
+                                onPlay: { player.play(at: index) },
+                                onPlayNext: { player.playNext(at: index) },
+                                onMoveToEnd: { player.moveToEnd(at: index) },
+                                onRemove: { player.remove(at: index) }
+                            )
+                        }
+                    }
+                    .padding(.horizontal, 4)
                 }
             }
-            .padding(.horizontal, 4)
         }
-        .frame(maxHeight: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
-}
 
 // MARK: - 浮岛的一行
 
 /// `.lattice-tools-island-row`：40 高、`padding 2 4 2 0`、r10；当前行 10% 底。
 /// 触屏没有 hover，动作钮常显（原版悬停才出现）。
 private struct QueueIslandRow: View {
+    @EnvironmentObject private var player: PlayerEngine
+
     let song: Song
     let index: Int
     let isCurrent: Bool
-    let theme: WallTheme
     let onPlay: () -> Void
     let onPlayNext: () -> Void
     let onMoveToEnd: () -> Void
     let onRemove: () -> Void
 
+    private var theme: WallTheme { .midnight }
     private var ink: Color { theme.ink }
+    /// `isSongUnavailable`：不可播放（VIP / 无版权 / 试听外）
     private var available: Bool { song.isPlayable }
+    private var currentKey: String { WallTile.key(for: song) }
+    /// 正在播的那一行：显示的那首或内部 currentSong，都不给「移除」与「下一首播放」
+    private var isPlayingRow: Bool {
+        currentKey == player.currentSong.map { WallTile.key(for: $0) }
+    }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -409,7 +424,7 @@ private struct QueueIslandRow: View {
                         .fill(isCurrent ? theme.accent : Color.clear)
                         .frame(width: 3, height: 18)
 
-                    VStack(spacing: 0) {
+                    VStack(alignment: .leading, spacing: 0) {
                         HStack(spacing: 6) {
                             Text(song.name)
                                 .font(.system(size: 12.5, weight: isCurrent ? .bold : .medium))
@@ -427,8 +442,9 @@ private struct QueueIslandRow: View {
                                     )
                                     .opacity(0.6)
                             }
-                            Spacer(minLength: 0)
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
                         Text(song.artistNames)
                             .font(.system(size: 10.5))
                             .opacity(0.52)
@@ -437,6 +453,7 @@ private struct QueueIslandRow: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .foregroundStyle(ink)
+                    // `.lattice-tools-island-row.is-unavailable .lattice-tools-island-text { opacity: .55 }`
                     .opacity(available ? 1 : 0.55)
                 }
                 .padding(.leading, 2)
@@ -448,7 +465,7 @@ private struct QueueIslandRow: View {
             .frame(maxWidth: .infinity)
 
             HStack(spacing: 0) {
-                if isCurrent {
+                if isPlayingRow {
                     rowAction(icon: "text.append", label: "移到队尾", action: onMoveToEnd)
                 } else {
                     rowAction(icon: "text.badge.plus", label: "下一首播放", action: onPlayNext)
