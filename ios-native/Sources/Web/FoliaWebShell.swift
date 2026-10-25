@@ -17,8 +17,9 @@ final class FoliaWebHostController: UIViewController, WKScriptMessageHandler, WK
 
     private let bridge = FoliaMediaBridge.shared
     private var webView: WKWebView!
-    /// 安全区脚本的 user script；只保留一份，数值变化时替换内容，避免重复注入叠加。
+    /// 安全区脚本的 user script；只注入一份，数值不变就不重复追加，避免叠加。
     private var safeInsetsScripts: [WKUserScript] = []
+    private var lastSafeInsetsScriptValues = ""
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -103,15 +104,17 @@ final class FoliaWebHostController: UIViewController, WKScriptMessageHandler, WK
         let insets = view.safeAreaInsets
         let values = "window.__foliaSafeValues__ = { top: \(Int(insets.top.rounded())), bottom: \(Int(insets.bottom.rounded())), left: \(Int(insets.left.rounded())), right: \(Int(insets.right.rounded())) };"
         let controller = webView.configuration.userContentController
-        // 先移除上一次的，否则每次尺寸变化都会再叠三份，越叠越多
-        for item in safeInsetsScripts {
-            controller.removeUserScript(item)
-        }
-        safeInsetsScripts = [values, sync, post].map {
-            WKUserScript(source: $0, injectionTime: .atDocumentStart, forMainFrameOnly: true)
-        }
-        for item in safeInsetsScripts {
-            controller.addUserScript(item)
+        // 数值没变就不再加 user script：viewSafeAreaInsetsDidChange 会被反复调用，
+        // 每次都追加就会叠很多份（叠加不会改变结果，但纯属浪费）。
+        // WKUserContentController 没有移除单个 script 的接口，所以只保证「首次注入一次」。
+        if values != lastSafeInsetsScriptValues {
+            lastSafeInsetsScriptValues = values
+            safeInsetsScripts = [values, sync, post].map {
+                WKUserScript(source: $0, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+            }
+            for item in safeInsetsScripts {
+                controller.addUserScript(item)
+            }
         }
         evaluateJS(values + sync + post)
     }
