@@ -136,8 +136,13 @@ actor NeteaseAPI {
     }
 
     /// 扫码第一步：拿 key
+    /// 服务端在这一次请求就会下发 cookie（在响应顶层，不在 data 内），后续 create/check 必须带上，
+    /// 否则二维码与轮询状态可能对不上，登录拿不到 cookie。
     func qrKey() async throws -> String {
         let json = try await get("/login/qr/key", needsTimestamp: true, allowAnonymous: false)
+        if let cookie = json["cookie"] as? String, !cookie.isEmpty, signInCookie == nil {
+            anonymousCookie = cookie
+        }
         guard let data = json["data"] as? [String: Any], let key = data["unikey"] as? String else {
             throw APIError(code: (json["code"] as? NSNumber)?.intValue, message: qrMessage(json))
         }

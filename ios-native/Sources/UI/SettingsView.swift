@@ -259,21 +259,17 @@ struct SettingsView: View {
                 }
             }
 
-            SettingRow {
+            SettingRow(action: { showLogin = true }) {
                 rowLabel("扫码登录网易云")
                 Spacer(minLength: 0)
                 NeteaseMark(size: 24)
                 Chevron()
-            } action: {
-                showLogin = true
             }
 
             if library.isSignedIn {
-                SettingRow {
+                SettingRow(action: { Task { await library.signOut() } }) {
                     rowLabel("退出登录")
                     Spacer(minLength: 0)
-                } action: {
-                    Task { await library.signOut() }
                 }
             }
         }
@@ -438,13 +434,11 @@ struct SettingsView: View {
             }
 
             SettingGroup(title: "账号") {
-                SettingRow {
+                SettingRow(action: { showLogin = true }) {
                     rowLabel("扫码登录网易云")
                     Spacer(minLength: 0)
                     NeteaseMark(size: 24)
                     Chevron()
-                } action: {
-                    showLogin = true
                 }
             }
             .sheet(isPresented: $showLogin) {
@@ -614,7 +608,7 @@ private struct SettingToggle: View {
 }
 
 /// 网易云的记号：红底白字「云」（原版 PlatformMark：mark.color #dc2626、字号 size × 0.42）
-private struct NeteaseMark: View {
+struct NeteaseMark: View {
     let size: CGFloat
 
     var body: some View {
