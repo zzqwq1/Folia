@@ -79,24 +79,18 @@ final class AudioSessionController {
         center.nextTrackCommand.isEnabled = true
         center.previousTrackCommand.isEnabled = true
 
-        let forward: (MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus = { event in
-            let script: String
-            switch event.command {
-            case MPRemoteCommandCenter.shared().playCommand.command: script = "play"
-            case MPRemoteCommandCenter.shared().pauseCommand.command: script = "pause"
-            case MPRemoteCommandCenter.shared().nextTrackCommand.command: script = "next"
-            case MPRemoteCommandCenter.shared().previousTrackCommand.command: script = "prev"
-            default: script = "toggle"
+        let handler: (String) -> (MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus = { script in
+            return { _ in
+                NotificationCenter.default.post(name: .foliaRemoteCommand, object: script)
+                return .success
             }
-            NotificationCenter.default.post(name: .foliaRemoteCommand, object: script)
-            return .success
         }
 
-        center.playCommand.addTarget(handler: forward)
-        center.pauseCommand.addTarget(handler: forward)
-        center.togglePlayPauseCommand.addTarget(handler: forward)
-        center.nextTrackCommand.addTarget(handler: forward)
-        center.previousTrackCommand.addTarget(handler: forward)
+        center.playCommand.addTarget(handler: handler("play"))
+        center.pauseCommand.addTarget(handler: handler("pause"))
+        center.togglePlayPauseCommand.addTarget(handler: handler("toggle"))
+        center.nextTrackCommand.addTarget(handler: handler("next"))
+        center.previousTrackCommand.addTarget(handler: handler("prev"))
     }
 }
 
