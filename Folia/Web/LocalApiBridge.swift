@@ -109,20 +109,26 @@ final class LocalApiBridge {
 
     // MARK: - 反向代理
 
+    /// 网易接口转发。上游 NeteaseCloudMusicApi 的路由直接挂在根上（`/login/qr/key`），
+    /// 没有 `/api/netease` 这一层，所以这里要把前缀拼回去。
     private func proxy(route: String, rawQuery: String?, cookie: String) -> [String: Any]? {
-        self.proxy(path: Self.neteasePrefix + route, rawQuery: rawQuery, cookie: cookie)
-    }
-
-    /// 拼出上游 URL 并发起 GET。返回 nil 表示上游不可达。
-    private func proxy(path: String, rawQuery: String?, cookie: String) -> [String: Any]? {
-        var target = Self.upstream + path
+        var target = Self.upstream + route
         if let rawQuery, !rawQuery.isEmpty {
             // 网易接口的 cookie 已经在 effective 里并进表了，去掉前端拼的那份，
             // 避免上游收到两份互相矛盾的 cookie。
-            let kept = path.hasPrefix(Self.neteasePrefix)
-                ? rawQuery.split(separator: "&").filter { !$0.hasPrefix("cookie=") }.joined(separator: "&")
-                : rawQuery
+            let kept = rawQuery.split(separator: "&").filter { !$0.hasPrefix("cookie=") }.joined(separator: "&")
             if !kept.isEmpty { target += "?\(kept)" }
+        }
+        guard let url = URL(string: target) else { return nil }
+        NSLog("[Folia] proxy \(route)")
+        return request(url, method: "GET", form: nil, cookie: cookie)
+    }
+
+    /// 其它平台转发：路径原样透传。
+    private func proxy(path: String, rawQuery: String?, cookie: String) -> [String: Any]? {
+        var target = Self.upstream + path
+        if let rawQuery, !rawQuery.isEmpty {
+            target += "?\(rawQuery)"
         }
         guard let url = URL(string: target) else { return nil }
         NSLog("[Folia] proxy \(path)")
