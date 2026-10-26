@@ -8,10 +8,12 @@ on:
 jobs:
   build:
     runs-on: macos-15
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          lfs: true
 
       - name: Show toolchain
         run: |
@@ -24,6 +26,12 @@ jobs:
             brew install xcodegen
           fi
           xcodegen --version
+
+      - name: Verify web assets
+        run: |
+          test -f Folia/www/index.html
+          echo "www files: $(find Folia/www -type f | wc -l)"
+          du -sh Folia/www
 
       - name: Generate Xcode project
         run: |
@@ -60,12 +68,14 @@ jobs:
           rm -rf Payload
           mkdir -p Payload
           cp -R Folia.app Payload/
-          zip -qry Folia-unsigned.ipa Payload
-          ls -lh Folia-unsigned.ipa
+          zip -qry Folia-Web-unsigned.ipa Payload
+          ls -lh Folia-Web-unsigned.ipa
+          echo "app bundle: $(du -sh Folia.app)"
+          test -f Payload/Folia.app/www/index.html
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Folia-unsigned-ipa
-          path: build/Build/Products/Release-iphoneos/Folia-unsigned.ipa
+          name: Folia-Web-unsigned-ipa
+          path: build/Build/Products/Release-iphoneos/Folia-Web-unsigned.ipa
           if-no-files-found: error
