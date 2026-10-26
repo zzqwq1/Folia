@@ -22,26 +22,29 @@ workflows:
       - name: build unsigned app
         script: |
           set -e
+          echo "PWD=$(pwd)"
           xcodebuild \
             -project "$XCODE_PROJECT" \
             -scheme "$XCODE_SCHEME" \
             -configuration Release \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
-            -derivedDataPath build \
+            -derivedDataPath "$CM_BUILD_DIR/build" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGN_ENTITLEMENTS="" \
             build
+          echo "--- products ---"
+          ls -la "$CM_BUILD_DIR/build/Build/Products/Release-iphoneos" || true
       - name: wrap into ipa
         script: |
           set -e
-          cd ios-native/build/Build/Products/Release-iphoneos
+          cd "$CM_BUILD_DIR/build/Build/Products/Release-iphoneos"
           rm -rf Payload
           mkdir -p Payload
           cp -R FoliaNative.app Payload/
           zip -qry Folia-unsigned.ipa Payload
           ls -lh Folia-unsigned.ipa
     artifacts:
-      - ios-native/build/Build/Products/Release-iphoneos/Folia-unsigned.ipa
+      - build/Build/Products/Release-iphoneos/Folia-unsigned.ipa
