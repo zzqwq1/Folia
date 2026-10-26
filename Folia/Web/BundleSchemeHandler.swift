@@ -20,12 +20,18 @@ final class BundleSchemeHandler: NSObject, WKURLSchemeHandler {
     }
 
     func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
+        guard let url = urlSchemeTask.request.url else {
+            urlSchemeTask.didFailWithError(URLError(.badURL))
+            return
+        }
+        // 网易云接口交给本地桥接层：静态包里没有 /api/netease，直接读文件会回落成 index.html。
+        if NeteaseBridge.shared.shouldHandle(url) {
+            NeteaseBridge.shared.handle(urlSchemeTask)
+            return
+        }
+
         queue.async { [weak self] in
             guard let self else { return }
-            guard let url = urlSchemeTask.request.url else {
-                urlSchemeTask.didFailWithError(URLError(.badURL))
-                return
-            }
             guard let fileURL = self.resolve(url) else {
                 urlSchemeTask.didFailWithError(URLError(.fileDoesNotExist))
                 return
@@ -43,7 +49,10 @@ final class BundleSchemeHandler: NSObject, WKURLSchemeHandler {
                     "Content-Type": MimeType.of(fileURL.pathExtension),
                     "Content-Length": "\(data.count)",
                     "Cache-Control": "public, max-age=31536000, immutable",
-                    "Access-Control-Allow-Origin": "*"
+                    "Access-Control-Allow-Origin": "*",
+                    // WebAudio / 波形分析要读音频采样，没有这个头谱线就是一条平线。
+                    "Access-Control-Allow-Headers": "*",
+                    "Access-Control-Allow-Methods": "GET, POST, OPTIONS"
                 ]
             )!
 

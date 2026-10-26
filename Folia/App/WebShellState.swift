@@ -1,5 +1,7 @@
 import Foundation
 import AVFoundation
+import MediaPlayer
+import UIKit
 
 /// WKWebView 内嵌官方 Folia 网页版的运行状态。
 final class WebShellState: ObservableObject {
@@ -25,7 +27,9 @@ final class AudioSessionController {
 
         let session = AVAudioSession.sharedInstance()
         do {
-            try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+            // 不加 .mixWithOthers：混音会让系统把本 App 当成「可被压低」的次要音频，
+            // 切后台、锁屏时更容易被静音。要让锁屏控制中心把它当主播放器，就得独占。
+            try session.setCategory(.playback, mode: .default, options: [])
             try session.setActive(true)
         } catch {
             // 音频会话失败不影响网页功能，只是切后台可能被系统暂停。
@@ -33,6 +37,12 @@ final class AudioSessionController {
         }
 
         observeInterruptions()
+        configureRemoteCommands()
+    }
+
+    /// 从后台回到前台时再激活一次：系统可能在后台把会话降级。
+    func reactivate() {
+        try? AVAudioSession.sharedInstance().setActive(true)
     }
 
     private func observeInterruptions() {
@@ -51,8 +61,45 @@ final class AudioSessionController {
                 // 来电 / 其他 App 抢占结束后重新激活会话，让网页继续播放。
                 try? AVAudioSession.sharedInstance().setActive(true)
             default:
+                // .began 时必须把会话让出去，否则系统会直接掐断音频。
                 break
             }
         }
     }
+
+    /// 锁屏控制中心/耳机线控按钮。
+    ///
+    /// WKWebView 里的 <audio> 不会自动注册远程控制事件，这里占住这组事件，
+    /// 再通过 JS 转给页面自身的播放器，锁屏才能暂停/继续而不是显示成「未在播放」。
+    private func configureRemoteCommands() {
+        let center = MPRemoteCommandCenter.shared()
+        center.playCommand.isEnabled = true
+        center.pauseCommand.isEnabled = true
+        center.togglePlayPauseCommand.isEnabled = true
+        center.nextTrackCommand.isEnabled = true
+        center.previousTrackCommand.isEnabled = true
+
+        let forward: (MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus = { event in
+            let script: String
+            switch event.command {
+            case is MPPlayCommand: script = "play"
+            case is MPPauseCommand: script = "pause"
+            case is MPNextTrackCommand: script = "next"
+            case is MPPreviousTrackCommand: script = "prev"
+            default: script = "toggle"
+            }
+            NotificationCenter.default.post(name: .foliaRemoteCommand, object: script)
+            return .success
+        }
+
+        center.playCommand.addTarget(handler: forward)
+        center.pauseCommand.addTarget(handler: forward)
+        center.togglePlayPauseCommand.addTarget(handler: forward)
+        center.nextTrackCommand.addTarget(handler: forward)
+        center.previousTrackCommand.addTarget(handler: forward)
+    }
+}
+
+extension Notification.Name {
+    static let foliaRemoteCommand = Notification.Name("app.folia.remote-command")
 }

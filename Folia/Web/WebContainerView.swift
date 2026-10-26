@@ -76,6 +76,53 @@ final class WebContainerView: UIView {
             .sink { [weak self] _ in self?.webView.reload() }
 
         webView.load(URLRequest(url: Self.startURL))
+
+        // 锁屏 / 耳机线控按钮 → 页面播放器。
+        remoteObservation = NotificationCenter.default
+            .addObserver(forName: .foliaRemoteCommand, object: nil, queue: .main) { [weak self] note in
+                guard let action = note.object as? String else { return }
+                self?.forwardRemoteCommand(action)
+            }
+
+        // WebKit 的内容进程被杀（内存压力 / 系统回收）时会白屏。自动重载而不是留一片黑。
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(contentProcessDidTerminate),
+            name: WKWebView.webProcessDidTerminateNotification,
+            object: webView
+        )
+    }
+
+    private var remoteObservation: Any?
+
+    @objc private func contentProcessDidTerminate() {
+        webView.reload()
+    }
+
+    /// 页面里的播放器是 React 状态机，没有全局 API，这里按 DOM 上的按钮与媒体元素找。
+    private func forwardRemoteCommand(_ action: String) {
+        let js = """
+        (function(a){
+          try {
+            var media = document.querySelector('audio,video');
+            if (a === 'play') { media && media.play && media.play(); return; }
+            if (a === 'pause') { media && media.pause && media.pause(); return; }
+            // 其余按钮走界面上的播放控制区，优先按 data-testid，找不到再按 aria-label。
+            var sel = a === 'next'
+              ? ['[data-testid="player-next"]','[aria-label*="下一"]','[aria-label*="Next"]']
+              : a === 'prev'
+                ? ['[data-testid="player-prev"]','[aria-label*="上一"]','[aria-label*="Previous"]']
+                : ['[data-testid="player-toggle"]','[aria-label*="播放"]','[aria-label*="暂停"]'];
+            for (var i = 0; i < sel.length; i += 1) {
+              var el = document.querySelector(sel[i]);
+              if (el) { el.click(); return; }
+            }
+            // 兜底：单按钮切换。
+            if (a === 'toggle' && media) { media.paused ? media.play() : media.pause(); }
+          } catch (e) {}
+        })('\(action)');
+        """
+        webView?.evaluateJavaScript(js, completionHandler: nil)
     }
 
     private static var userAgent: String {
