@@ -72,6 +72,9 @@ jobs:
           ls -lh Folia-Web-unsigned.ipa
           echo "app bundle: $(du -sh Folia.app)"
           test -f Payload/Folia.app/www/index.html
+          test -f Payload/Folia.app/Assets.car
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconName" Payload/Folia.app/Info.plist
+          ls -lh Payload/Folia.app/Assets.car
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
