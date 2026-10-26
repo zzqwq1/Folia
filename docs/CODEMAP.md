@@ -15,9 +15,9 @@
 | --- | --- |
 | components | 1024+ |
 | test/dev | 1024+ |
+| 其他 | 512+ |
 | library | 256+ |
 | services | 256+ |
-| 其他 | 256+ |
 | backend/electron | 128+ |
 | utils | 128+ |
 | hooks | 64+ |
