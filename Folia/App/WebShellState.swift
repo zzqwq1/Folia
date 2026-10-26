@@ -82,10 +82,10 @@ final class AudioSessionController {
         let forward: (MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus = { event in
             let script: String
             switch event.command {
-            case is MPPlayCommandEvent: script = "play"
-            case is MPPauseCommandEvent: script = "pause"
-            case is MPNextTrackCommandEvent: script = "next"
-            case is MPPreviousTrackCommandEvent: script = "prev"
+            case MPRemoteCommandCenter.shared().playCommand.command: script = "play"
+            case MPRemoteCommandCenter.shared().pauseCommand.command: script = "pause"
+            case MPRemoteCommandCenter.shared().nextTrackCommand.command: script = "next"
+            case MPRemoteCommandCenter.shared().previousTrackCommand.command: script = "prev"
             default: script = "toggle"
             }
             NotificationCenter.default.post(name: .foliaRemoteCommand, object: script)
