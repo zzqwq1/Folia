@@ -17,9 +17,9 @@
 | test/dev | 1024+ |
 | library | 256+ |
 | services | 256+ |
+| 其他 | 256+ |
 | backend/electron | 128+ |
 | utils | 128+ |
-| 其他 | 128+ |
 | hooks | 64+ |
 | src (其他) | 64+ |
 | stores | 32+ |
@@ -34,10 +34,10 @@
 | 被依赖量级 | 模块 |
 | --- | --- |
 | 1024+ | `src/types.ts` |
+| 256+ | `Folia/www/assets/lucide-icons-BWrg6OBA.js` |
 | 256+ | `src/types/onlineMusic.ts` |
 | 128+ | `src/types/ponder.ts` |
 | 128+ | `src/utils/appPlaybackGuards.ts` |
-| 64+ | `Folia/www/assets/lucide-icons-BWrg6OBA.js` |
 | 64+ | `Folia/www/assets/noLyricLines-BWAU2uCh.js` |
 | 64+ | `Folia/www/assets/preload-helper-vuKwV25Y.js` |
 | 64+ | `src/components/command-palette/types.ts` |
