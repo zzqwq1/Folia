@@ -127,9 +127,11 @@ final class PlayerEngine: ObservableObject {
               let index = queue.firstIndex(of: current) else { return }
         let nextIndex: Int
         if shuffle, queue.count > 1 {
-            repeat {
-                nextIndex = Int.random(in: 0..<queue.count)
-            } while nextIndex == index
+            var candidate = index
+            while candidate == index {
+                candidate = Int.random(in: 0..<queue.count)
+            }
+            nextIndex = candidate
         } else {
             nextIndex = index + 1
         }
