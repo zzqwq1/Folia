@@ -16,24 +16,12 @@ jobs:
       - name: Show Xcode version
         run: xcodebuild -version
 
-      - name: Install xcodegen
+      - name: Build (project in repo root)
         run: |
-          brew install xcodegen || true
-          xcodegen --version
-
-      - name: Generate Xcode project
-        working-directory: ios-native
-        run: |
-          xcodegen generate
-          ls -la
-
-      - name: Build unsigned app
-        run: |
-          set -e
-          echo "PWD=$(pwd)"
+          set -o pipefail
           xcodebuild \
-            -project "ios-native/FoliaNative.xcodeproj" \
-            -scheme "FoliaNative" \
+            -project "Folia.xcodeproj" \
+            -scheme "Folia" \
             -configuration Release \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
@@ -42,9 +30,14 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGN_ENTITLEMENTS="" \
-            build
-          echo "--- products ---"
-          ls -la "$GITHUB_WORKSPACE/build/Build/Products/Release-iphoneos"
+            build 2>&1 | tee /tmp/xcodebuild.log
+
+      - name: Show errors on failure
+        if: failure()
+        run: |
+          echo "=== ERROR LINES ==="
+          grep -nE "error:|error " /tmp/xcodebuild.log | head -n 60 || true
+          echo "=== END ==="
 
       - name: Wrap into IPA
         run: |
@@ -52,7 +45,7 @@ jobs:
           cd "$GITHUB_WORKSPACE/build/Build/Products/Release-iphoneos"
           rm -rf Payload
           mkdir -p Payload
-          cp -R FoliaNative.app Payload/
+          cp -R Folia.app Payload/
           zip -qry Folia-unsigned.ipa Payload
           ls -lh Folia-unsigned.ipa
 
