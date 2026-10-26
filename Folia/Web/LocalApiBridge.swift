@@ -1,23 +1,30 @@
 import Foundation
 import WebKit
 
-/// 网页版把网易云接口写在 `/api/netease/...` 上，静态包里没有这个目录，
-/// 于是请求会回落到 index.html（HTML），前端解析 JSON 失败 → 扫码登录报 start-error。
+/// 网页版把各平台的接口挂在 `/api/<provider>/...` 上，静态包里没有这些目录。
+/// 在 `folia://app/` 协议下，前端硬编码的 `/api/kugou`、`/api/qq`、`/api/bodian`
+/// 以及 `folia://app/api/netease` 全会落到本层，由这里翻译成真实请求。
 ///
-/// 这里在自定义 scheme 里把 `/api/netease/*` 截下来，翻译成网易官方接口的调用：
-/// 入参形状保持 NeteaseCloudMusicApi 的约定（前端直接按它的字段名读），
-/// 出参由网易官方的 eapi / weapi 返回结构重排成前端期望的形状。
-/// 全部本地实现，不依赖自建 API 服务，也不做任何云端更新检查。
-final class NeteaseBridge {
-    static let shared = NeteaseBridge()
+/// 路由：
+///   /api/netease/*     → 反代到电脑上的 NeteaseCloudMusicApi（官方加密通道，能拿到 MUSIC_U）
+///   /api/kugou|qq|bodian → 反代到同一个 upstream（这三个服务端与网易共用一台机器）
+///   /api/lyric-proxy   → 反代酷狗官方接口（前端用它绕 CORS）
+///
+/// 上游不可达时，网易接口退回本地明文实现，至少保证未登录也能浏览/播放。
+final class LocalApiBridge {
+    static let shared = LocalApiBridge()
 
-    /// 网页版里的接口前缀。
-    static let prefix = "/api/netease"
-    /// 壳内页面（folia://）把接口指向这个主机，由本层截获。
-    static let host = "api.ncm.local"
+    /// 网页版里的网易接口前缀（前端在 folia: 协议下写死的值）。
+    static let neteasePrefix = "/api/netease"
+    /// 其它平台前缀：前端在 folia://app/ 下解析出的相对路径。
+    static let otherPrefixes = ["/api/kugou", "/api/qq", "/api/bodian", "/api/lyric-proxy"]
+
+    /// 电脑上跑的服务端经 Cloudflare 隧道暴露的公网地址。
+    /// 换隧道/换电脑时只改这一行，然后重新打包。
+    static let upstream = "https://candy-fancy-xhtml-boundaries.trycloudflare.com"
 
     private let origin = "https://music.163.com"
-    private let queue = DispatchQueue(label: "app.folia.netease", qos: .userInitiated, attributes: .concurrent)
+    private let queue = DispatchQueue(label: "app.folia.api", qos: .userInitiated, attributes: .concurrent)
     private var cookies: [String: String] = [:]
 
     private init() {
@@ -27,10 +34,9 @@ final class NeteaseBridge {
     // MARK: - 入口
 
     func shouldHandle(_ url: URL) -> Bool {
-        // 页面本身（index.html / assets/*）也挂在 api.ncm.local 这个 host 下，
-        // 但它们是静态资源，必须交给 BundleSchemeHandler 读磁盘；
-        // 否则首页会显示成桥接层返回的 JSON。
-        return url.path.hasPrefix(Self.prefix)
+        let path = url.path
+        if path.hasPrefix(Self.neteasePrefix) { return true }
+        return Self.otherPrefixes.contains { path.hasPrefix($0) }
     }
 
     func handle(_ task: WKURLSchemeTask) {
@@ -38,20 +44,44 @@ final class NeteaseBridge {
             Self.finish(task, status: 400, json: ["code": 400, "message": "bad url"])
             return
         }
-        // 剥掉 /api/netease 前缀拿到真正的接口路径。
+        let path = url.path
+        guard !path.hasPrefix(Self.neteasePrefix) else {
+            handleNetease(task, url: url)
+            return
+        }
+        // 其余平台整条 URL 透传，路径和查询串都保持原样。
+        handlePassthrough(task, url: url)
+    }
+
+    /// 其它平台：不改写任何参数，直接转发。
+    private func handlePassthrough(_ task: WKURLSchemeTask, url: URL) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            guard let proxied = self.proxy(path: url.path, rawQuery: url.query, cookie: "") else {
+                NSLog("[Folia] upstream unreachable \(url.path)")
+                Self.finish(task, status: 200, json: [
+                    "code": 502,
+                    "message": "服务端未连接：\(url.path)"
+                ], url: url)
+                return
+            }
+            Self.finish(task, status: 200, json: proxied, url: url)
+        }
+    }
+
+    /// 网易：先并 cookie，再反代；上游挂了退回本地明文实现。
+    private func handleNetease(_ task: WKURLSchemeTask, url: URL) {
         var route = url.path
-        if route.hasPrefix(Self.prefix) {
-            route = String(route.dropFirst(Self.prefix.count))
-        } else if let range = route.range(of: "/api/netease") {
-            route = String(route[range.upperBound...])
+        if route.hasPrefix(Self.neteasePrefix) {
+            route = String(route.dropFirst(Self.neteasePrefix.count))
         }
         if route.isEmpty { route = "/" }
         let query = Self.query(url)
+
         // 前端把 localStorage 里的 cookie 拼在 ?cookie= 上，这是权威来源：
-        // 扫码成功那一刻前端已写入 localStorage，而桥接层进程内的表可能还没拿到，
-        // 不合并就会出现「刚扫码成功，紧接着 login/status 说没有账号」。
+        // 扫码成功那一刻前端已写入 localStorage，而桥接层进程内的表可能还没拿到。
         // 注意：前端在没登录时会退而带上「匿名 cookie」，那个没有 MUSIC_U，
-        // 只对歌曲/歌词接口有用；对账号类接口必须忽略，否则会把匿名态当登录态。
+        // 对账号类接口必须忽略，否则会把匿名态当登录态。
         let forwarded = Self.parseCookieString(query["cookie"])
         let isAccountRoute = route == "/login/status" || route == "/user/account"
         let effective = isAccountRoute
@@ -61,14 +91,45 @@ final class NeteaseBridge {
         queue.async { [weak self] in
             guard let self else { return }
             if isAccountRoute {
-                // 对应前端诊断里的 "login cookie=no"：这里能看出真实登录态到底有没有。
                 NSLog("[Folia] \(route) cookie=\(effective.isEmpty ? "none" : "len\(effective.count)")")
             }
             if !forwarded.isEmpty { self.adopt(forwarded) }
+
+            // 主路径：转发到电脑上的服务端，它走官方加密通道，803 时能真正拿到 MUSIC_U。
+            let rawQuery = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedQuery
+            if let proxied = self.proxy(route: route, rawQuery: rawQuery, cookie: effective) {
+                Self.finish(task, status: 200, json: proxied, url: url)
+                return
+            }
+            NSLog("[Folia] upstream unreachable, fallback to local \(route)")
             let result = self.dispatch(route: route, query: query, cookie: effective)
             Self.finish(task, status: 200, json: result, url: url)
         }
     }
+
+    // MARK: - 反向代理
+
+    private func proxy(route: String, rawQuery: String?, cookie: String) -> [String: Any]? {
+        self.proxy(path: Self.neteasePrefix + route, rawQuery: rawQuery, cookie: cookie)
+    }
+
+    /// 拼出上游 URL 并发起 GET。返回 nil 表示上游不可达。
+    private func proxy(path: String, rawQuery: String?, cookie: String) -> [String: Any]? {
+        var target = Self.upstream + path
+        if let rawQuery, !rawQuery.isEmpty {
+            // 网易接口的 cookie 已经在 effective 里并进表了，去掉前端拼的那份，
+            // 避免上游收到两份互相矛盾的 cookie。
+            let kept = path.hasPrefix(Self.neteasePrefix)
+                ? rawQuery.split(separator: "&").filter { !$0.hasPrefix("cookie=") }.joined(separator: "&")
+                : rawQuery
+            if !kept.isEmpty { target += "?\(kept)" }
+        }
+        guard let url = URL(string: target) else { return nil }
+        NSLog("[Folia] proxy \(path)")
+        return request(url, method: "GET", form: nil, cookie: cookie)
+    }
+
+    // MARK: - 本地兜底（仅网易）
 
     private func dispatch(route: String, query: [String: String], cookie: String) -> [String: Any] {
         switch route {
@@ -85,28 +146,23 @@ final class NeteaseBridge {
         case "/register/anonimous":
             return registerAnonymous()
         case "/logout":
-            // 前端会把待注销的 cookie 一并带来，只清这些字段，
-            // 避免把匿名 cookie 也删掉导致歌曲接口变慢。
             let names = Self.parseCookieString(query["cookie"]).keys
             for name in names { cookies.removeValue(forKey: name) }
             if names.isEmpty { cookies.removeAll() }
             persist()
             return ["code": 200]
         default:
-            // 其它接口静态包本来就跑不通，给个明确的 JSON 让前端走「接口不可用」分支，
-            // 而不是拿 HTML 去 JSON.parse 抛异常闪烁。
-            return ["code": 200, "message": "local bridge: unsupported route \(route)"]
+            return ["code": 200, "message": "local fallback: unsupported route \(route)"]
         }
     }
 
-    // MARK: - 二维码登录
+    // MARK: - 二维码登录（本地兜底）
 
     private func qrKey() -> [String: Any] {
         guard let json = post("/api/login/qrcode/unikey", form: ["type": "3"]),
               let key = json["unikey"] as? String, !key.isEmpty else {
             return ["code": 502, "message": "网易云接口无响应"]
         }
-        // 前端只认 data.unikey，保持 NeteaseCloudMusicApi 的返回形状。
         return ["code": 200, "data": ["code": 200, "unikey": key]]
     }
 
@@ -133,8 +189,6 @@ final class NeteaseBridge {
 
         switch code {
         case 803:
-            // 803 带登录态，有两种下发方式：JSON 的 cookie 字段，或响应的 Set-Cookie。
-            // 后者已经在 request 里被 absorb 收进 cookie 表，所以这里统一看整张表。
             let payloadCookie = json["cookie"] as? String ?? ""
             NSLog(
                 "[Folia] netease 803 jsonCookie="
@@ -145,13 +199,10 @@ final class NeteaseBridge {
             )
             adoptCookie(from: json["cookie"])
             guard cookies["MUSIC_U"] != nil else {
-                // 没拿到登录态就不要回 803，否则前端的 checkLogin 会把空 cookie 写进
-                // localStorage 并当成登录成功，随后 refresh 必然失败。
                 NSLog("[Folia] netease 803 without MUSIC_U, giving up")
                 return ["code": 502, "message": "网易云未下发登录态，请重试扫码"]
             }
-            let header = cookieHeader()
-            return ["code": 803, "message": "授权登陆成功", "cookie": header]
+            return ["code": 803, "message": "授权登陆成功", "cookie": cookieHeader()]
         case 800:
             return ["code": 800, "message": "二维码已过期"]
         case 801:
@@ -163,14 +214,12 @@ final class NeteaseBridge {
         }
     }
 
-    // MARK: - 账号
+    // MARK: - 账号（本地兜底）
 
     private func loginStatus(cookie: String) -> [String: Any] {
         if let payload = accountPayload(cookie: cookie) {
             return ["code": 200, "data": merged(["code": 200], payload)]
         }
-        // 拿不到账号时回 301（未登录），让前端走「未登录」分支，
-        // 而不是拿到一个 code=200 但 profile 为空的响应去判 refresh-failed。
         return ["code": 301, "data": ["code": 301], "message": "未登录"]
     }
 
@@ -188,7 +237,6 @@ final class NeteaseBridge {
     }
 
     /// 用登录态打 /api/nuser/account/get，转成前端要的 account + profile。
-    /// 网易侧登录态有几秒钟落地延迟，所以失败时短重试几次。
     private func accountPayload(cookie: String) -> [String: Any]? {
         guard !cookie.isEmpty else { return nil }
         for attempt in 0..<3 {
@@ -231,18 +279,22 @@ final class NeteaseBridge {
 
     // MARK: - HTTP
 
-    /// 表单 POST（网易的 unikey / client/login / anonimous 都走这个）。
     private func post(_ path: String, form: [String: String]) -> [String: Any]? {
         guard let url = URL(string: origin + path) else { return nil }
         return request(url, method: "POST", form: form)
     }
 
     private func request(_ url: URL, method: String, form: [String: String]?, cookie: String? = nil) -> [String: Any]? {
-        var request = URLRequest(url: url, timeoutInterval: 15)
+        var request = URLRequest(url: url, timeoutInterval: 20)
         request.httpMethod = method
-        request.setValue(origin + "/", forHTTPHeaderField: "Referer")
         request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        // Referer / Content-Type 是网易接口的要求；转发到隧道时不能带。
+        if url.host == "music.163.com" {
+            request.setValue(origin + "/", forHTTPHeaderField: "Referer")
+            if let form {
+                request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+            }
+        }
         let header = cookie ?? cookieHeader()
         if !header.isEmpty {
             request.setValue(header, forHTTPHeaderField: "Cookie")
@@ -260,10 +312,14 @@ final class NeteaseBridge {
         }
 
         var result: [String: Any]?
+        var failed = false
         let semaphore = DispatchSemaphore(value: 0)
         URLSession.shared.dataTask(with: request) { data, response, _ in
             defer { semaphore.signal() }
-            guard let data else { return }
+            guard let data else {
+                failed = true
+                return
+            }
             if let http = response as? HTTPURLResponse {
                 // 不能写 `allHeaderFields as? [String: String]`：只要有一个非字符串值，
                 // 整个转换就会失败，Set-Cookie 会被静默丢掉，登录态随之丢失。
@@ -279,14 +335,17 @@ final class NeteaseBridge {
                 if !headerCookies.isEmpty {
                     self.absorb(setCookie: headerCookies.joined(separator: ", "))
                 }
+                // 上游 5xx 视为不可用，让网易接口能退回本地实现。
+                if (500...599).contains(http.statusCode) { failed = true }
             }
             result = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
             if result == nil, let text = String(data: data, encoding: .utf8) {
-                NSLog("[Folia] netease non-json response: \(text.prefix(200))")
+                NSLog("[Folia] api non-json response: \(text.prefix(200))")
             }
         }.resume()
 
-        if semaphore.wait(timeout: .now() + 20) == .timedOut { return nil }
+        if semaphore.wait(timeout: .now() + 25) == .timedOut { return nil }
+        if failed && result == nil { return nil }
         return result
     }
 
@@ -335,7 +394,6 @@ final class NeteaseBridge {
         if changed { persist() }
     }
 
-    /// 803 / anonimous 把 cookie 放在 JSON 字段里，直接收下。
     private func adoptCookie(from value: Any?) {
         adopt(Self.parseCookieString(value as? String))
     }

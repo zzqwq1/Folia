@@ -24,9 +24,10 @@ final class BundleSchemeHandler: NSObject, WKURLSchemeHandler {
             urlSchemeTask.didFailWithError(URLError(.badURL))
             return
         }
-        // 网易云接口交给本地桥接层：静态包里没有 /api/netease，直接读文件会回落成 index.html。
-        if NeteaseBridge.shared.shouldHandle(url) {
-            NeteaseBridge.shared.handle(urlSchemeTask)
+        // 各平台接口交给桥接层：静态包里没有 /api/netease、/api/kugou 等目录，
+        // 直接读文件会回落成 index.html，前端拿到 HTML 去 JSON.parse 就报错。
+        if LocalApiBridge.shared.shouldHandle(url) {
+            LocalApiBridge.shared.handle(urlSchemeTask)
             return
         }
 
