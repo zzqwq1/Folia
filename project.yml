@@ -15,11 +15,7 @@ targets:
       - path: Folia/App
       - path: Folia/Web
       - path: Folia/Views
-      - path: Folia/Resources
-        excludes:
-          - "**/*.appiconset"
-          - "**/*.xcassets"
-      - path: Folia/Resources/AppIcon.appiconset
+      - path: Folia/Resources/Assets.xcassets
         buildPhase: resources
       - path: Folia/www
         type: folder
