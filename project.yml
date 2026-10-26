@@ -12,9 +12,10 @@ targets:
     platform: iOS
     deploymentTarget: "16.0"
     sources:
-      - path: Folia
-        excludes:
-          - "Info.plist"
+      - path: Folia/App
+      - path: Folia/Web
+      - path: Folia/Views
+      - path: Folia/Assets.xcassets
       - path: Folia/www
         type: folder
         buildPhase: resources
