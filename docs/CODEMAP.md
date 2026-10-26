@@ -34,7 +34,7 @@
 | 被依赖量级 | 模块 |
 | --- | --- |
 | 1024+ | `src/types.ts` |
-| 256+ | `Folia/www/assets/lucide-icons-BWrg6OBA.js` |
+| 512+ | `Folia/www/assets/lucide-icons-BWrg6OBA.js` |
 | 256+ | `src/types/onlineMusic.ts` |
 | 128+ | `src/types/ponder.ts` |
 | 128+ | `src/utils/appPlaybackGuards.ts` |
