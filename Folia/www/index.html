@@ -425,6 +425,125 @@ var FOLIA_LATEST_VERSION = '2.0';
 })();
 </script>
 <!-- ========== 版本更新公告 结束 ========== -->
-  
+
+<!-- ========== 网易 /lyric/new 响应修正 ========== -->
+<script>
+// NeteaseCloudMusicApi 的 /lyric/new 会把 lrc.lyric 拼成「混合体」：
+// 除前几行是 {"t":0,"c":[{"tx":"作词: "},...]} 这样的逐字 JSON 外，
+// 后面全是普通 LRC 行。播放器只会按 LRC 解析，遇到 JSON 那几行就直接报错，
+// 结果整首歌一句歌词都显示不出来（表现为「网易云没歌词」）。
+// 这里在 fetch/XHR 层把响应改写成第二行起那种纯 LRC 文本。
+(function () {
+  if (window.__foliaLyricFixInstalled) return;
+  window.__foliaLyricFixInstalled = true;
+
+  var hasOwn = Object.prototype.hasOwnProperty;
+
+  function parseLine(line) {
+    var text = line.trim();
+    if (!text || text.charAt(0) !== '{') return null;
+    try {
+      var obj = JSON.parse(text);
+      if (!obj || typeof obj.t !== 'number' || !Array.isArray(obj.c)) return null;
+      var content = '';
+      for (var i = 0; i < obj.c.length; i++) {
+        if (obj.c[i] && typeof obj.c[i].tx === 'string') content += obj.c[i].tx;
+      }
+      return { t: obj.t, text: content };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function lrcTime(ms) {
+    if (ms < 0) ms = 0;
+    var centis = Math.floor(ms % 1000 / 10);
+    var totalSec = Math.floor(ms / 1000);
+    var mm = Math.floor(totalSec / 60);
+    var ss = totalSec % 60;
+    return '[' + (mm < 10 ? '0' + mm : mm) + ':' + (ss < 10 ? '0' + ss : ss) + '.' +
+      (centis < 10 ? '0' + centis : centis) + ']';
+  }
+
+  function convert(text) {
+    var lines = text.split('\n');
+    var touched = false;
+    for (var i = 0; i < lines.length; i++) {
+      var parsed = parseLine(lines[i]);
+      if (!parsed) continue;
+      touched = true;
+      lines[i] = lrcTime(parsed.t) + parsed.text;
+    }
+    return touched ? lines.join('\n') : text;
+  }
+
+  function fixJson(payload) {
+    if (!payload || typeof payload !== 'object') return payload;
+    var source = payload;
+    if (!payload.lrc && payload.data && payload.data.lrc) source = payload.data;
+    var lrc = source.lrc;
+    if (!lrc || typeof lrc.lyric !== 'string') return payload;
+    var next = convert(lrc.lyric);
+    if (next === lrc.lyric) return payload;
+    lrc.lyric = next;
+    return payload;
+  }
+
+  // 只处理网易歌词接口，其它请求一律走原生实现。
+  function isTarget(url) {
+    return typeof url === 'string' && url.indexOf('/lyric/new') >= 0;
+  }
+
+  var nativeFetch = window.fetch;
+  if (typeof nativeFetch === 'function') {
+    window.fetch = function (input, init) {
+      var url = typeof input === 'string' ? input : input && input.url;
+      var result = nativeFetch.apply(this, arguments);
+      if (!isTarget(url)) return result;
+      return result.then(function (response) {
+        return response.text().then(function (text) {
+          var fixed = text;
+          try { fixed = JSON.stringify(fixJson(JSON.parse(text))); } catch (e) {}
+          var body = new Response(fixed, {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers
+          });
+          return body;
+        }, function () { return response; });
+      });
+    };
+  }
+
+  var nativeOpen = XMLHttpRequest.prototype.open;
+  var nativeSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function (method, url) {
+    this.__foliaLyricUrl = url;
+    return nativeOpen.apply(this, arguments);
+  };
+  XMLHttpRequest.prototype.send = function () {
+    var xhr = this;
+    if (isTarget(xhr.__foliaLyricUrl)) {
+      xhr.addEventListener('readystatechange', function () {
+        if (xhr.readyState !== 4 || xhr.status !== 200) return;
+        if (hasOwn.call(xhr, '__foliaFixed')) return;
+        xhr.__foliaFixed = true;
+        var text = '';
+        try { text = xhr.responseText; } catch (e) { return; }
+        var fixed = text;
+        try { fixed = JSON.stringify(fixJson(JSON.parse(text))); } catch (e) { return; }
+        Object.defineProperty(xhr, 'responseText', { value: fixed, configurable: true });
+        Object.defineProperty(xhr, 'response', {
+          value: xhr.responseType === 'json' ? JSON.parse(fixed) : fixed,
+          configurable: true
+        });
+      }, true);
+    }
+    return nativeSend.apply(this, arguments);
+  };
+})();
+</script>
+<!-- ========== 网易 /lyric/new 响应修正 结束 ========== -->
+
 </body>
 </html>

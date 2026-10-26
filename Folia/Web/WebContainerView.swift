@@ -14,6 +14,8 @@ final class WebContainerView: UIView {
     private var webView: WKWebView!
     private var reloadObservation: AnyCancellable?
     private var lastInsets: UIEdgeInsets = .zero
+    /// 内容进程被回收的次数与时间窗，用来防止「重载→立刻再挂→再重载」的死循环。
+    private var contentProcessRestarts: [Date] = []
 
     private static let startURL = URL(string: "\(BundleSchemeHandler.scheme)://app/index.html")!
 
@@ -50,6 +52,7 @@ final class WebContainerView: UIView {
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
+        userContent.add(AudioStateRelay(), name: "foliaAudioState")
         config.userContentController = userContent
 
         webView = WKWebView(frame: bounds, configuration: config)
@@ -96,9 +99,26 @@ final class WebContainerView: UIView {
         (function(a){
           try {
             var media = document.querySelector('audio,video');
-            if (a === 'play') { media && media.play && media.play(); return; }
-            if (a === 'pause') { media && media.pause && media.pause(); return; }
-            // 其余按钮走界面上的播放控制区，优先按 data-testid，找不到再按 aria-label。
+            var ms = navigator.mediaSession;
+            // 页面自身已经绑过 setActionHandler，优先借它的处理器：
+            // 它走的是 React 状态机，切歌后 UI、队列、歌词都会同步；
+            // 直接点 DOM 在页面重载后或按钮被隐藏时会静默失效。
+            if (a === 'play') {
+              var playFn = window.__foliaMediaCommand && window.__foliaMediaCommand.play;
+              if (playFn) { playFn(); return; }
+              if (media && media.play) { media.play(); return; }
+              if (ms) { try { ms.playbackState = 'playing'; } catch (e) {} }
+              return;
+            }
+            if (a === 'pause') {
+              var pauseFn = window.__foliaMediaCommand && window.__foliaMediaCommand.pause;
+              if (pauseFn) { pauseFn(); return; }
+              if (media && media.pause) { media.pause(); return; }
+              return;
+            }
+            var fn = window.__foliaMediaCommand && window.__foliaMediaCommand[a];
+            if (fn) { fn(); return; }
+            // 兜底：界面上没有暴露接口时，按 data-testid / aria-label 点按钮。
             var sel = a === 'next'
               ? ['[data-testid="player-next"]','[aria-label*="下一"]','[aria-label*="Next"]']
               : a === 'prev'
@@ -108,10 +128,64 @@ final class WebContainerView: UIView {
               var el = document.querySelector(sel[i]);
               if (el) { el.click(); return; }
             }
-            // 兜底：单按钮切换。
             if (a === 'toggle' && media) { media.paused ? media.play() : media.pause(); }
           } catch (e) {}
         })('\(action)');
+        """
+        webView?.evaluateJavaScript(js, completionHandler: nil)
+    }
+
+    /// 后台播放保活 + 播放状态上报给原生（锁屏/控制中心据此判断「正在播放」）。
+    private func installAudioKeeper() {
+        let js = """
+        (function(){
+          if (window.__foliaAudioKeeperInstalled) { return; }
+          window.__foliaAudioKeeperInstalled = true;
+
+          // 记录页面自身的 MediaSession 处理器，供锁屏按钮直接调用。
+          var handlers = window.__foliaMediaCommand = window.__foliaMediaCommand || {};
+          try {
+            var ms = navigator.mediaSession;
+            if (ms && ms.setActionHandler) {
+              ['play','pause','previoustrack','nexttrack'].forEach(function(name){
+                try {
+                  var prev = ms.setActionHandler.bind(ms);
+                  var wrapped = function(detail){
+                    if (typeof detail === 'function') {
+                      handlers[name === 'previoustrack' ? 'prev' : name === 'nexttrack' ? 'next' : name] = detail;
+                    }
+                    return prev(detail);
+                  };
+                  ms.setActionHandler = wrapped;
+                } catch (e) {}
+              });
+            }
+          } catch (e) {}
+
+          var lastState = '';
+          var report = function(){
+            try {
+              var el = document.querySelector('audio,video');
+              var state = '';
+              if (el) { state = el.paused ? 'paused' : 'playing'; }
+              else if (navigator.mediaSession) { state = navigator.mediaSession.playbackState || ''; }
+              if (!state || state === lastState) { return; }
+              lastState = state;
+              window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.foliaAudioState
+                && window.webkit.messageHandlers.foliaAudioState.postMessage(state);
+            } catch (e) {}
+          };
+
+          // WebAudio 走 createMediaElementSource 时元素本身不直出声音，
+          // 但 iOS 仍以「页面上有在播放的媒体」来维持后台音频，所以这里持续观察。
+          setInterval(report, 1000);
+          document.addEventListener('playing', report, true);
+          document.addEventListener('pause', report, true);
+          document.addEventListener('visibilitychange', function(){
+            if (document.visibilityState === 'visible') { report(); }
+          });
+          report();
+        })();
         """
         webView?.evaluateJavaScript(js, completionHandler: nil)
     }
@@ -208,11 +282,43 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         lastInsets = .zero
         pushInsetsIfNeeded()
+        installAudioKeeper()
+        // App 启动时会被系统重新激活会话；每次页面加载完再补一次，
+        // 覆盖「之前被来电/其他播放器降级」的情况。
+        AudioSessionController.shared.reactivate()
     }
 
-    /// 内容进程被系统回收（内存压力）时自动重载，避免停在白屏。
+    /// 内容进程被系统回收（内存压力）时自动恢复，但要限流：
+    /// 无脑 reload 会形成「加载界面 → 立刻再被杀 → 再 reload」的死循环，
+    /// 用户在界面上看到的就是反复闪回加载界面。
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        webView.reload()
+        let now = Date()
+        contentProcessRestarts = contentProcessRestarts.filter { now.timeIntervalSince($0) < 60 }
+        contentProcessRestarts.append(now)
+
+        if contentProcessRestarts.count <= 2 {
+            webView.reload()
+        } else if contentProcessRestarts.count == 3 {
+            webView.load(URLRequest(url: Self.startURL))
+        } else {
+            // 一分钟内挂了四次，说明继续重建只会更糟，先停在这里等用户手动刷新。
+            NSLog("[Folia] content process terminated repeatedly, stop auto reload")
+        }
+    }
+
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        AudioSessionController.shared.reactivate()
+    }
+}
+
+// MARK: - 播放状态上报
+
+/// 页面里的播放器播放/暂停时通知原生，用来维持锁屏与控制中心的「正在播放」状态。
+private final class AudioStateRelay: NSObject, WKScriptMessageHandler {
+    func userContentController(_ userContentController: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        guard let state = message.body as? String else { return }
+        AudioSessionController.shared.updatePlaybackState(state == "playing")
     }
 }
 

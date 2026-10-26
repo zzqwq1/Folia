@@ -34,15 +34,15 @@ final class BundleSchemeHandler: NSObject, WKURLSchemeHandler {
         queue.async { [weak self] in
             guard let self else { return }
             guard let fileURL = self.resolve(url) else {
-                urlSchemeTask.didFailWithError(URLError(.fileDoesNotExist))
+                DispatchQueue.main.async { urlSchemeTask.didFailWithError(URLError(.fileDoesNotExist)) }
                 return
             }
             guard let data = try? Data(contentsOf: fileURL, options: .mappedIfSafe) else {
-                urlSchemeTask.didFailWithError(URLError(.cannotLoadFromNetwork))
+                DispatchQueue.main.async { urlSchemeTask.didFailWithError(URLError(.cannotLoadFromNetwork)) }
                 return
             }
 
-            let response = HTTPURLResponse(
+            guard let response = HTTPURLResponse(
                 url: url,
                 statusCode: 200,
                 httpVersion: "HTTP/1.1",
@@ -55,7 +55,10 @@ final class BundleSchemeHandler: NSObject, WKURLSchemeHandler {
                     "Access-Control-Allow-Headers": "*",
                     "Access-Control-Allow-Methods": "GET, POST, OPTIONS"
                 ]
-            )!
+            ) else {
+                DispatchQueue.main.async { urlSchemeTask.didFailWithError(URLError(.badServerResponse)) }
+                return
+            }
 
             DispatchQueue.main.async {
                 urlSchemeTask.didReceive(response)
@@ -66,7 +69,8 @@ final class BundleSchemeHandler: NSObject, WKURLSchemeHandler {
     }
 
     func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
-        // 单次读取，无需中断。
+        // 静态文件是单次读取；接口请求则要记账，避免取消后仍回调导致 WebKit 抛异常。
+        LocalApiBridge.shared.cancel(urlSchemeTask)
     }
 
     /// folia://app/assets/x.js → <Bundle>/www/assets/x.js

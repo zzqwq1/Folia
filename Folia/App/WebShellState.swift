@@ -19,25 +19,35 @@ final class WebShellState: ObservableObject {
 final class AudioSessionController {
     static let shared = AudioSessionController()
 
-    private var configured = false
+    private var observersInstalled = false
+    /// 页面当前是否在播放，用于锁屏信息与后台保活。
+    private var isPlaying = false
 
+    /// 每次启动、回到前台、进入后台都要调。
+    ///
+    /// 早先这里有个 `guard !configured` 的一次性开关：只要第一遍设 category 失败
+    /// （比如启动瞬间还被别的 App 占着音频），后面就再也不会重设，
+    /// 于是「退出 App 就没声音」。现在每次都幂等地重设一遍，代价只有几毫秒。
     func configure() {
-        guard !configured else { return }
-        configured = true
+        activate()
+        if !observersInstalled {
+            observersInstalled = true
+            observeInterruptions()
+            observeLifecycle()
+            configureRemoteCommands()
+        }
+    }
 
+    /// 重新声明 category 并激活会话：切后台、进程重建、来电结束后都需要。
+    func activate() {
         let session = AVAudioSession.sharedInstance()
         do {
-            // 不加 .mixWithOthers：混音会让系统把本 App 当成「可被压低」的次要音频，
-            // 切后台、锁屏时更容易被静音。要让锁屏控制中心把它当主播放器，就得独占。
             try session.setCategory(.playback, mode: .default, options: [])
             try session.setActive(true)
         } catch {
-            // 音频会话失败不影响网页功能，只是切后台可能被系统暂停。
+            // 失败不影响网页功能，只是切后台可能被系统暂停。
             NSLog("[Folia] audio session setup failed: \(error.localizedDescription)")
         }
-
-        observeInterruptions()
-        configureRemoteCommands()
     }
 
     /// 从后台回到前台时再激活一次：系统可能在后台把会话降级。
@@ -45,12 +55,53 @@ final class AudioSessionController {
         try? AVAudioSession.sharedInstance().setActive(true)
     }
 
+    /// 网页播放器上报的播放状态 → 锁屏/控制中心。
+    ///
+    /// 不写 Now Playing 信息时，iOS 会把本 App 当成「没有在播放」，
+    /// 退到后台几秒后就掐掉音频。页面自身已经通过 MediaSession 设了标题/封面，
+    /// 这里只需要把 playbackRate 设为 1 表示「正在播放」。
+    func updatePlaybackState(_ playing: Bool) {
+        isPlaying = playing
+        if playing {
+            activate()
+            var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
+            if info[MPNowPlayingInfoPropertyPlaybackRate] == nil {
+                info[MPNowPlayingInfoPropertyPlaybackRate] = 1.0
+            }
+            info[MPNowPlayingInfoPropertyIsLiveStream] = false
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        } else if var info = MPNowPlayingInfoCenter.default().nowPlayingInfo {
+            info[MPNowPlayingInfoPropertyPlaybackRate] = 0.0
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        }
+    }
+
+    private func observeLifecycle() {
+        // 进入后台的瞬间再激活一次会话：这是系统判定「能否继续放音频」的最后时机。
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self, self.isPlaying else { return }
+            self.activate()
+        }
+
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.willEnterForegroundNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.activate()
+        }
+    }
+
     private func observeInterruptions() {
         NotificationCenter.default.addObserver(
             forName: AVAudioSession.interruptionNotification,
             object: AVAudioSession.sharedInstance(),
             queue: .main
-        ) { note in
+        ) { [weak self] note in
             guard
                 let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
                 let type = AVAudioSession.InterruptionType(rawValue: raw)
@@ -58,8 +109,9 @@ final class AudioSessionController {
 
             switch type {
             case .ended:
-                // 来电 / 其他 App 抢占结束后重新激活会话，让网页继续播放。
-                try? AVAudioSession.sharedInstance().setActive(true)
+                // 来电 / 其他 App 抢占结束后重新声明 category 再激活，
+                // 只 setActive 在部分场景下会失败，音频就再也回不来。
+                self?.activate()
             default:
                 // .began 时必须把会话让出去，否则系统会直接掐断音频。
                 break

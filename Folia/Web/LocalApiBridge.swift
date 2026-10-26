@@ -24,8 +24,14 @@ final class LocalApiBridge {
     static let upstream = "https://candy-fancy-xhtml-boundaries.trycloudflare.com"
 
     private let origin = "https://music.163.com"
-    private let queue = DispatchQueue(label: "app.folia.api", qos: .userInitiated, attributes: .concurrent)
+    /// 串行队列：这里既是 cookie 表的唯一访问点，也是「同一 task 只回调一次」的判定点。
+    /// 之前用 concurrent + URLSession 回调里直接写 cookie，多接口并发（歌词、封面、详情同时来）
+    /// 会把字典写坏，表现为 App 直接闪退回桌面。
+    private let queue = DispatchQueue(label: "app.folia.api", qos: .userInitiated)
     private var cookies: [String: String] = [:]
+    /// WKURLSchemeTask 只要重复 didReceive/didFinish，WebKit 就会抛 ObjC 异常杀掉进程。
+    /// 页面切歌时会主动取消上一条请求，这里必须记账。
+    private var activeTasks = Set<ObjectIdentifier>()
 
     private init() {
         cookies = Self.loadCookies()
@@ -40,8 +46,9 @@ final class LocalApiBridge {
     }
 
     func handle(_ task: WKURLSchemeTask) {
+        queue.async { self.activeTasks.insert(ObjectIdentifier(task)) }
         guard let url = task.request.url else {
-            Self.finish(task, status: 400, json: ["code": 400, "message": "bad url"])
+            respond(task, status: 400, json: ["code": 400, "message": "bad url"])
             return
         }
         let path = url.path
@@ -53,19 +60,33 @@ final class LocalApiBridge {
         handlePassthrough(task, url: url)
     }
 
+    /// WebKit 取消请求（切歌、页面重载、超时）时会走这里；之后任何回调都必须被丢弃。
+    func cancel(_ task: WKURLSchemeTask) {
+        queue.async { self.activeTasks.remove(ObjectIdentifier(task)) }
+    }
+
+    /// 队列上的唯一出口：每个 task 只会真正回调一次，已取消的静默丢弃。
+    private func respond(_ task: WKURLSchemeTask, status: Int, json: [String: Any], url: URL? = nil) {
+        queue.async { [weak self] in
+            guard let self, self.activeTasks.remove(ObjectIdentifier(task)) != nil else { return }
+            Self.deliver(task, status: status, json: json, url: url)
+        }
+    }
+
     /// 其它平台：不改写任何参数，直接转发。
     private func handlePassthrough(_ task: WKURLSchemeTask, url: URL) {
         queue.async { [weak self] in
             guard let self else { return }
+            guard self.activeTasks.contains(ObjectIdentifier(task)) else { return }
             guard let proxied = self.proxy(path: url.path, rawQuery: url.query, cookie: "") else {
                 NSLog("[Folia] upstream unreachable \(url.path)")
-                Self.finish(task, status: 200, json: [
+                self.respond(task, status: 200, json: [
                     "code": 502,
                     "message": "服务端未连接：\(url.path)"
                 ], url: url)
                 return
             }
-            Self.finish(task, status: 200, json: proxied, url: url)
+            self.respond(task, status: 200, json: proxied, url: url)
         }
     }
 
@@ -89,7 +110,7 @@ final class LocalApiBridge {
             : (forwarded.isEmpty ? cookieHeader() : Self.joinCookie(forwarded))
 
         queue.async { [weak self] in
-            guard let self else { return }
+            guard let self, self.activeTasks.contains(ObjectIdentifier(task)) else { return }
             if isAccountRoute {
                 NSLog("[Folia] \(route) cookie=\(effective.isEmpty ? "none" : "len\(effective.count)")")
             }
@@ -98,12 +119,12 @@ final class LocalApiBridge {
             // 主路径：转发到电脑上的服务端，它走官方加密通道，803 时能真正拿到 MUSIC_U。
             let rawQuery = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedQuery
             if let proxied = self.proxy(route: route, rawQuery: rawQuery, cookie: effective) {
-                Self.finish(task, status: 200, json: proxied, url: url)
+                self.respond(task, status: 200, json: proxied, url: url)
                 return
             }
             NSLog("[Folia] upstream unreachable, fallback to local \(route)")
             let result = self.dispatch(route: route, query: query, cookie: effective)
-            Self.finish(task, status: 200, json: result, url: url)
+            self.respond(task, status: 200, json: result, url: url)
         }
     }
 
@@ -339,7 +360,9 @@ final class LocalApiBridge {
                     }
                 }
                 if !headerCookies.isEmpty {
-                    self.absorb(setCookie: headerCookies.joined(separator: ", "))
+                    // 回调跑在 URLSession 自己的线程上，cookie 表只能回串行队列改。
+                    let joined = headerCookies.joined(separator: ", ")
+                    self.queue.sync { self.absorb(setCookie: joined) }
                 }
                 // 上游 5xx 视为不可用，让网易接口能退回本地实现。
                 if (500...599).contains(http.statusCode) { failed = true }
@@ -485,19 +508,24 @@ final class LocalApiBridge {
 
     // MARK: - 响应
 
-    private static func finish(_ task: WKURLSchemeTask, status: Int, json: [String: Any], url: URL? = nil) {
+    private static func deliver(_ task: WKURLSchemeTask, status: Int, json: [String: Any], url: URL? = nil) {
         let payload = (try? JSONSerialization.data(withJSONObject: json)) ?? Data("{}".utf8)
-        let response = HTTPURLResponse(
-            url: url ?? task.request.url ?? URL(string: "https://api.ncm.local/")!,
-            statusCode: status,
-            httpVersion: "HTTP/1.1",
-            headerFields: [
-                "Content-Type": "application/json; charset=utf-8",
-                "Content-Length": "\(payload.count)",
-                "Cache-Control": "no-store",
-                "Access-Control-Allow-Origin": "*"
-            ]
-        )!
+        let target = url ?? task.request.url ?? URL(string: "https://api.ncm.local/")
+        guard let target,
+              let response = HTTPURLResponse(
+                url: target,
+                statusCode: status,
+                httpVersion: "HTTP/1.1",
+                headerFields: [
+                    "Content-Type": "application/json; charset=utf-8",
+                    "Content-Length": "\(payload.count)",
+                    "Cache-Control": "no-store",
+                    "Access-Control-Allow-Origin": "*"
+                ]
+              ) else {
+            DispatchQueue.main.async { task.didFailWithError(URLError(.badServerResponse)) }
+            return
+        }
         DispatchQueue.main.async {
             task.didReceive(response)
             task.didReceive(payload)
