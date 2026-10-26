@@ -27,7 +27,9 @@ final class NeteaseBridge {
     // MARK: - 入口
 
     func shouldHandle(_ url: URL) -> Bool {
-        if url.host == Self.host { return true }
+        // 页面本身（index.html / assets/*）也挂在 api.ncm.local 这个 host 下，
+        // 但它们是静态资源，必须交给 BundleSchemeHandler 读磁盘；
+        // 否则首页会显示成桥接层返回的 JSON。
         return url.path.hasPrefix(Self.prefix)
     }
 
