@@ -15,6 +15,9 @@ targets:
       - path: Folia/App
       - path: Folia/Web
       - path: Folia/Views
+      - path: Folia/Resources
+        excludes:
+          - "*"
       - path: Folia/Resources/AppIcon.appiconset
         buildPhase: resources
       - path: Folia/www
