@@ -1,1 +1,47 @@
-d2orkflowsOgJ1bWVudGlvblBoYWNr
+workflows:
+  ios-unsigned:
+    name: Folia iOS unsigned
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    environment:
+      xcode: latest
+      vars:
+        XCODE_PROJECT: "ios-native/FoliaNative.xcodeproj"
+        XCODE_SCHEME: "FoliaNative"
+    scripts:
+      - name: install xcodegen
+        script: |
+          brew install xcodegen || true
+          xcodegen --version
+      - name: generate xcode project
+        script: |
+          set -e
+          cd ios-native
+          xcodegen generate
+          ls -la
+      - name: build unsigned app
+        script: |
+          set -e
+          xcodebuild \
+            -project "$XCODE_PROJECT" \
+            -scheme "$XCODE_SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            build
+      - name: wrap into ipa
+        script: |
+          set -e
+          cd ios-native/build/Build/Products/Release-iphoneos
+          rm -rf Payload
+          mkdir -p Payload
+          cp -R FoliaNative.app Payload/
+          zip -qry Folia-unsigned.ipa Payload
+          ls -lh Folia-unsigned.ipa
+    artifacts:
+      - ios-native/build/Build/Products/Release-iphoneos/Folia-unsigned.ipa
