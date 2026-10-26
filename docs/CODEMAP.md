@@ -19,9 +19,9 @@
 | services | 256+ |
 | backend/electron | 128+ |
 | utils | 128+ |
+| 其他 | 128+ |
 | hooks | 64+ |
 | src (其他) | 64+ |
-| 其他 | 64+ |
 | stores | 32+ |
 | types | 16+ |
 | i18n | 4+ |
@@ -37,6 +37,9 @@
 | 256+ | `src/types/onlineMusic.ts` |
 | 128+ | `src/types/ponder.ts` |
 | 128+ | `src/utils/appPlaybackGuards.ts` |
+| 64+ | `Folia/www/assets/lucide-icons-BWrg6OBA.js` |
+| 64+ | `Folia/www/assets/noLyricLines-BWAU2uCh.js` |
+| 64+ | `Folia/www/assets/preload-helper-vuKwV25Y.js` |
 | 64+ | `src/components/command-palette/types.ts` |
 | 64+ | `src/components/modal/settings/kit/index.ts` |
 | 64+ | `src/i18n/config.ts` |
@@ -46,6 +49,7 @@
 | 64+ | `src/services/onlineMusic/omni.ts` |
 | 64+ | `src/stores/usePlaybackStore.ts` |
 | 64+ | `src/stores/useStatusMessageStore.ts` |
+| 32+ | `Folia/www/assets/playerOverlayLayout-CwGwf6T3.js` |
 | 32+ | `dev/probes/definition.ts` |
 | 32+ | `src/components/modal/settings/kit/motion.ts` |
 | 32+ | `src/components/visualizer/colorMix.ts` |
