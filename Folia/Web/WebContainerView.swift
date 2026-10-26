@@ -85,19 +85,10 @@ final class WebContainerView: UIView {
             }
 
         // WebKit 的内容进程被杀（内存压力 / 系统回收）时会白屏。自动重载而不是留一片黑。
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(contentProcessDidTerminate),
-            name: WKWebView.webProcessDidTerminateNotification,
-            object: webView
-        )
+        // 走 WKNavigationDelegate 的 webProcessDidTerminate 回调，无需再挂通知。
     }
 
     private var remoteObservation: Any?
-
-    @objc private func contentProcessDidTerminate() {
-        webView.reload()
-    }
 
     /// 页面里的播放器是 React 状态机，没有全局 API，这里按 DOM 上的按钮与媒体元素找。
     private func forwardRemoteCommand(_ action: String) {
@@ -217,6 +208,11 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         lastInsets = .zero
         pushInsetsIfNeeded()
+    }
+
+    /// 内容进程被系统回收（内存压力）时自动重载，避免停在白屏。
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        webView.reload()
     }
 }
 

@@ -129,13 +129,17 @@ final class NeteaseBridge {
     // MARK: - 账号
 
     private func loginStatus() -> [String: Any] {
-        let account = accountPayload()
-        return ["code": 200, "data": ["code": 200] + account]
+        return ["code": 200, "data": merged(["code": 200], accountPayload())]
     }
 
     private func userAccount() -> [String: Any] {
-        let account = accountPayload()
-        return ["code": 200] + account
+        return merged(["code": 200], accountPayload())
+    }
+
+    private func merged(_ base: [String: Any], _ extra: [String: Any]) -> [String: Any] {
+        var out = base
+        for (key, value) in extra { out[key] = value }
+        return out
     }
 
     /// 用登录态打一次 /api/nuser/account/get，转成前端要的 account + profile。

@@ -8,7 +8,7 @@ import UIKit
 enum QRTool {
     private static let context = CIContext(options: nil)
     // 每次新建滤镜：CIFilter 不是线程安全的，桥接层在并发队列里调用。
-    private static func makeFilter() -> CIFilter {
+    private static func makeFilter() -> CIFilterQRCodeGenerator {
         let filter = CIFilter.qrCodeGenerator()
         filter.correctionLevel = "M"
         return filter
