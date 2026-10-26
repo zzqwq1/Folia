@@ -6,23 +6,28 @@ workflows:
     environment:
       xcode: latest
       vars:
-        XCODE_PROJECT: "ios-native/FoliaNative.xcodeproj"
-        XCODE_SCHEME: "FoliaNative"
+        XCODE_PROJECT: "Folia.xcodeproj"
+        XCODE_SCHEME: "Folia"
     scripts:
+      - name: xcodebuild version
+        script: xcodebuild -version
       - name: install xcodegen
         script: |
-          brew install xcodegen || true
+          set -e
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
           xcodegen --version
       - name: generate xcode project
         script: |
           set -e
-          cd ios-native
+          cd "$CM_BUILD_DIR"
           xcodegen generate
-          ls -la
+          ls -d Folia.xcodeproj
       - name: build unsigned app
         script: |
           set -e
-          echo "PWD=$(pwd)"
+          cd "$CM_BUILD_DIR"
           xcodebuild \
             -project "$XCODE_PROJECT" \
             -scheme "$XCODE_SCHEME" \
@@ -34,17 +39,16 @@ workflows:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGN_ENTITLEMENTS="" \
-            build
-          echo "--- products ---"
-          ls -la "$CM_BUILD_DIR/build/Build/Products/Release-iphoneos" || true
+            build 2>&1 | tee /tmp/xcodebuild.log
       - name: wrap into ipa
         script: |
           set -e
           cd "$CM_BUILD_DIR/build/Build/Products/Release-iphoneos"
           rm -rf Payload
           mkdir -p Payload
-          cp -R FoliaNative.app Payload/
+          cp -R Folia.app Payload/
           zip -qry Folia-unsigned.ipa Payload
           ls -lh Folia-unsigned.ipa
     artifacts:
       - build/Build/Products/Release-iphoneos/Folia-unsigned.ipa
+      - /tmp/xcodebuild.log

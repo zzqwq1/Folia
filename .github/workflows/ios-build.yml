@@ -13,10 +13,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Show Xcode version
-        run: xcodebuild -version
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          xcrun swift --version
 
-      - name: Build (project in repo root)
+      - name: Install xcodegen
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen --version
+
+      - name: Generate Xcode project
+        run: |
+          xcodegen generate
+          ls -d Folia.xcodeproj
+
+      - name: Build (unsigned)
         run: |
           set -o pipefail
           xcodebuild \
@@ -36,7 +50,7 @@ jobs:
         if: failure()
         run: |
           echo "=== ERROR LINES ==="
-          grep -nE "error:|error " /tmp/xcodebuild.log | head -n 60 || true
+          grep -nE "error:|error " /tmp/xcodebuild.log | head -n 80 || true
           echo "=== END ==="
 
       - name: Wrap into IPA
