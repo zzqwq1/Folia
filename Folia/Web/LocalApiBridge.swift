@@ -46,6 +46,13 @@ final class LocalApiBridge {
     /// 之前用 concurrent + URLSession 回调里直接写 cookie，多接口并发（歌词、封面、详情同时来）
     /// 会把字典写坏，表现为 App 直接闪退回桌面。
     private let queue = DispatchQueue(label: "app.folia.api", qos: .userInitiated)
+    /// cookie 表专用锁。
+    ///
+    /// 不能再用 `queue.sync` 保护 cookie：`request()` 是在 `queue` 上同步阻塞等信号量的，
+    /// URLSession 回调若在这期间 `queue.sync` 回写 cookie，就会在同一个串行队列上重入，
+    /// 直接卡死到超时——表现就是二维码一直停在「正在加载」。
+    /// 用独立锁把 cookie 表的读写和队列解耦。
+    private let cookieLock = NSLock()
     private var cookies: [String: String] = [:]
     /// WKURLSchemeTask 只要重复 didReceive/didFinish，WebKit 就会抛 ObjC 异常杀掉进程。
     /// 页面切歌时会主动取消上一条请求，这里必须记账。
@@ -279,8 +286,10 @@ final class LocalApiBridge {
             return registerAnonymous()
         case "/logout":
             let names = Self.parseCookieString(query["cookie"]).keys
-            for name in names { cookies.removeValue(forKey: name) }
-            if names.isEmpty { cookies.removeAll() }
+            Self.mutateCookies { table in
+                for name in names { table.removeValue(forKey: name) }
+                if names.isEmpty { table.removeAll() }
+            }
             persist()
             return ["code": 200]
         default:
@@ -301,26 +310,15 @@ final class LocalApiBridge {
     private func qrCreate(key: String) -> [String: Any] {
         guard !key.isEmpty else { return ["code": 400, "message": "missing key"] }
 
-        // 优先用上游的二维码。
-        // 上游 `login_qr_create` 的做法就是 `qrurl = https://music.163.com/login?codekey=<key>`
-        // 再用 QRCode.toDataURL 把它画出来，实测返回的是 180x180 的真二维码
-        // （黑色像素占 ~35%），不是占位白图。内容和本地拼的完全一致，
-        // 但它是服务端算的，URL 编码、静区这些细节不会因为手写字符串出错。
-        if let json = proxy(route: "/login/qr/create", rawQuery: "key=\(key)&qrimg=true", cookie: cookieHeader()),
-           json["code"] as? Int == 200,
-           let data = json["data"] as? [String: Any],
-           let qrimg = data["qrimg"] as? String, !qrimg.isEmpty {
-            return [
-                "code": 200,
-                "data": [
-                    "code": 200,
-                    "qrurl": data["qrurl"] as? String ?? "https://music.163.com/login?codekey=\(key)",
-                    "qrimg": qrimg
-                ]
-            ]
-        }
-
-        // 上游不可达时才本地画。
+        // 这里只做本地绘制，绝不能再调 `proxy`。
+        //
+        // `dispatch` 只在主路径转发失败后才会被调用（见 `handleNetease`），
+        // 也就是说上游刚刚已经失败过一次；此时再转发一遍只会把这段代码
+        // 在串行队列上多阻塞 10 秒，前端 20 秒的硬超时会被吃掉一半，
+        // 表现就是二维码弹窗一直停在「正在加载」。
+        //
+        // 本地二维码和上游的是同一个内容：`https://music.163.com/login?codekey=<key>`，
+        // 上游 `login_qr_create` 也只是把这个链接画成图。
         //
         // 关键约束：二维码里装的必须是「能对上轮询通道」的那把 key。
         // 轮询走 `type: 3`（eapi `client/login`），而 `unikey?type=3` 签发的 key
@@ -328,7 +326,7 @@ final class LocalApiBridge {
         // 两者是同一把 key，扫完 eapi 侧能看到 802/803，不会回 800。
         // 反过来说：不要在这里换 URL 形式、也不要另外签一把 key，否则一定对不上。
         let loginURL = "https://music.163.com/login?codekey=\(key)"
-        NSLog("[Folia] qr create upstream miss, draw locally key=\(key)")
+        NSLog("[Folia] qr create locally key=\(key)")
         guard let qrimg = QRTool.dataURL(for: loginURL), !qrimg.isEmpty else {
             return ["code": 502, "message": "二维码生成失败"]
         }
@@ -356,15 +354,17 @@ final class LocalApiBridge {
         switch code {
         case 803:
             let payloadCookie = json["cookie"] as? String ?? ""
-            NSLog(
-                "[Folia] netease 803 jsonCookie="
-                    + (payloadCookie.isEmpty
-                        ? "empty"
-                        : "len\(payloadCookie.count) hasMUSIC_U=\(payloadCookie.contains("MUSIC_U"))")
-                    + " table=len\(cookies.count) hasMUSIC_U=\(cookies["MUSIC_U"] != nil)"
-            )
+            Self.mutateCookies { table in
+                NSLog(
+                    "[Folia] netease 803 jsonCookie="
+                        + (payloadCookie.isEmpty
+                            ? "empty"
+                            : "len\(payloadCookie.count) hasMUSIC_U=\(payloadCookie.contains("MUSIC_U"))")
+                        + " table=len\(table.count) hasMUSIC_U=\(table["MUSIC_U"] != nil)"
+                )
+            }
             adoptCookie(from: json["cookie"])
-            guard cookies["MUSIC_U"] != nil else {
+            guard hasMusicU() else {
                 NSLog("[Folia] netease 803 without MUSIC_U, giving up")
                 return ["code": 502, "message": "网易云未下发登录态，请重试扫码"]
             }
@@ -534,9 +534,11 @@ final class LocalApiBridge {
                     }
                 }
                 if !headerCookies.isEmpty {
-                    // 回调跑在 URLSession 自己的线程上，cookie 表只能回串行队列改。
                     let joined = headerCookies.joined(separator: ", ")
-                    self.queue.sync { self.absorb(setCookie: joined) }
+                    // 这里绝对不能 `queue.sync`：request() 正阻塞在 queue 上等信号量，
+                    // 回调再往同一个串行队列 sync 就是自锁，必然等到超时。
+                    // absorb 内部只碰 cookieLock，与本队列无关。
+                    self.absorb(setCookie: joined)
                 }
                 // 非 2xx 一律视为不可用：上游 404 时说明路由不存在（隧道指错了服务），
                 // 5xx 时说明服务端挂了，两种情况都不应该把应答当成成功交给前端。
@@ -565,13 +567,25 @@ final class LocalApiBridge {
 
     // MARK: - Cookie
 
+    /// 在 cookie 锁内读改表。返回闭包的返回值。
+    private func mutateCookies<T>(_ body: (inout [String: String]) -> T) -> T {
+        cookieLock.lock()
+        defer { cookieLock.unlock() }
+        return body(&cookies)
+    }
+
     private func cookieHeader() -> String {
-        Self.joinCookie(cookies)
+        Self.joinCookie(mutateCookies { $0 })
     }
 
     /// 供主线程外的判定读取，避免直接碰 `cookies`。
     private func cookieHeaderValue() -> String {
         cookieHeader()
+    }
+
+    /// cookie 表里有没有真实登录态。必须和 cookie 表同一把锁下读，不能直接访问 `cookies`。
+    private func hasMusicU() -> Bool {
+        mutateCookies { $0["MUSIC_U"] != nil }
     }
 
     private static func joinCookie(_ dict: [String: String]) -> String {
@@ -596,10 +610,13 @@ final class LocalApiBridge {
     /// 合并前端带来的 cookie（前端优先，覆盖桥接层里的同名字段）。
     private func adopt(_ incoming: [String: String]) {
         guard !incoming.isEmpty else { return }
-        var changed = false
-        for (name, value) in incoming where cookies[name] != value {
-            cookies[name] = value
-            changed = true
+        let changed = mutateCookies { table -> Bool in
+            var changed = false
+            for (name, value) in incoming where table[name] != value {
+                table[name] = value
+                changed = true
+            }
+            return changed
         }
         if changed { persist() }
     }
@@ -610,10 +627,14 @@ final class LocalApiBridge {
 
     private func absorb(setCookie: String?) {
         guard let setCookie, !setCookie.isEmpty else { return }
-        var changed = false
-        for (name, val) in Self.parseSetCookie(setCookie) where cookies[name] != val {
-            cookies[name] = val
-            changed = true
+        let parsed = Self.parseSetCookie(setCookie)
+        let changed = mutateCookies { table -> Bool in
+            var changed = false
+            for (name, val) in parsed where table[name] != val {
+                table[name] = val
+                changed = true
+            }
+            return changed
         }
         if changed { persist() }
     }
@@ -682,7 +703,9 @@ final class LocalApiBridge {
     }
 
     private func persist() {
-        if let data = try? JSONSerialization.data(withJSONObject: cookies) {
+        // 先在锁内取快照，再落盘：写文件不该占着 cookie 锁。
+        let snapshot = mutateCookies { $0 }
+        if let data = try? JSONSerialization.data(withJSONObject: snapshot) {
             try? data.write(to: Self.cookieFile, options: .atomic)
         }
     }
