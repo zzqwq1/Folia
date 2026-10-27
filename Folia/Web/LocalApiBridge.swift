@@ -23,11 +23,19 @@ final class LocalApiBridge {
     /// 直接把整个路径甩给隧道是错的，必须解析出 url 参数、直接请求原始地址。
     static let lyricProxyPrefix = "/api/lyric-proxy"
 
-    /// 电脑上跑的服务端经 Cloudflare 隧道暴露的公网地址。
-    /// 换隧道/换电脑时只改这一行，然后重新打包。
-    static let upstream = "https://reproductive-advertiser-merger-treatment.trycloudflare.com"
+    /// 电脑上跑的服务端经 Cloudflare 隧道暴露的公网地址，按顺序尝试。
+    /// quick tunnel 随时会失效（失效时根路径还是 200，只是业务路由全变 404），
+    /// 所以这里留多个地址，逐个试探，第一个「能给出正常应答」的胜出。
+    /// 换隧道/换电脑时改这里，然后重新打包。
+    static let upstreams = [
+        "https://reproductive-advertiser-merger-treatment.trycloudflare.com",
+        "https://candy-fancy-xhtml-boundaries.trycloudflare.com"
+    ]
 
+    /// 标记当前可用的隧道下标；坏掉的隧道在一次运行内不再重试，避免每次登录都白等 10 秒。
+    private var upstreamIndex = 0
     private let origin = "https://music.163.com"
+
     /// 串行队列：这里既是 cookie 表的唯一访问点，也是「同一 task 只回调一次」的判定点。
     /// 之前用 concurrent + URLSession 回调里直接写 cookie，多接口并发（歌词、封面、详情同时来）
     /// 会把字典写坏，表现为 App 直接闪退回桌面。
@@ -99,12 +107,11 @@ final class LocalApiBridge {
         }
     }
 
-    /// 网易：先并 cookie，再反代；上游确实连不通时退回本地明文实现。
+    /// 网易：先并 cookie，再反代；所有隧道都不可用时退回本地明文实现。
     ///
-    /// 注意这里的判定顺序：上游返回了应答（哪怕是 404 / 500）就不算「连不通」。
-    /// 之前 /api/netease 指向只挂了网易的旧隧道，这条路径一直 404，
-    /// 前端看到的就是「NetEase gave no QR key: code 404: Not Found」。
-    /// 现在网易由同一个网关的 3103 提供，正常会返回真实 unikey。
+    /// 判定顺序很关键：只有「拿到正常业务 JSON」才算成功。上游 404 / 5xx / HTML
+    /// 一律视为不可用（见 `forward`），否则前端看到的就是
+    /// 「NetEase gave no QR key: code 404: Not Found」——旧隧道指错服务时就是这样。
     private func handleNetease(_ task: WKURLSchemeTask, url: URL) {
         var route = url.path
         if route.hasPrefix(Self.neteasePrefix) {
@@ -147,27 +154,61 @@ final class LocalApiBridge {
     /// 网易接口转发。上游 NeteaseCloudMusicApi 的路由直接挂在根上（`/login/qr/key`），
     /// 没有 `/api/netease` 这一层，所以这里要把前缀拼回去。
     private func proxy(route: String, rawQuery: String?, cookie: String) -> [String: Any]? {
-        var target = Self.upstream + route
+        var path = route
         if let rawQuery, !rawQuery.isEmpty {
             // 网易接口的 cookie 已经在 effective 里并进表了，去掉前端拼的那份，
             // 避免上游收到两份互相矛盾的 cookie。
             let kept = rawQuery.split(separator: "&").filter { !$0.hasPrefix("cookie=") }.joined(separator: "&")
-            if !kept.isEmpty { target += "?\(kept)" }
+            if !kept.isEmpty { path += "?\(kept)" }
         }
-        guard let url = URL(string: target) else { return nil }
         NSLog("[Folia] proxy \(route)")
-        return request(url, method: "GET", form: nil, cookie: cookie)
+        return forward(path, cookie: cookie)
     }
 
     /// 其它平台转发：路径原样透传。
     private func proxy(path: String, rawQuery: String?, cookie: String) -> [String: Any]? {
-        var target = Self.upstream + path
+        var target = path
         if let rawQuery, !rawQuery.isEmpty {
             target += "?\(rawQuery)"
         }
-        guard let url = URL(string: target) else { return nil }
         NSLog("[Folia] proxy \(path)")
-        return request(url, method: "GET", form: nil, cookie: cookie)
+        return forward(target, cookie: cookie)
+    }
+
+    /// 依次尝试所有隧道，返回第一个「健康」的应答。
+    ///
+    /// quick tunnel 失效时不会连不上，而是根路径照样 200、业务路由全变
+    /// `{"code":404,...,"msg":"Not Found"}`。所以只看「拿到 JSON」不够：
+    /// 这种 404 信封必须当成隧道不可用，否则会把错误原样交给前端，
+    /// 前端就报「NetEase gave no QR key: code 404: Not Found」。
+    private func forward(_ path: String, cookie: String) -> [String: Any]? {
+        let total = Self.upstreams.count
+        for offset in 0..<total {
+            let index = (upstreamIndex + offset) % total
+            let base = Self.upstreams[index]
+            guard let url = URL(string: base + path),
+                  let json = request(url, method: "GET", form: nil, cookie: cookie) else {
+                NSLog("[Folia] upstream #\(index) unreachable \(path)")
+                continue
+            }
+            if Self.isUnavailable(json) {
+                NSLog("[Folia] upstream #\(index) returned unavailable envelope \(path)")
+                continue
+            }
+            if index != upstreamIndex {
+                NSLog("[Folia] switch upstream to #\(index)")
+                upstreamIndex = index
+            }
+            return json
+        }
+        return nil
+    }
+
+    /// 上游「没有这个接口」的应答：404 信封。
+    private static func isUnavailable(_ json: [String: Any]) -> Bool {
+        if let code = json["code"] as? Int, code == 404 { return true }
+        if let msg = json["msg"] as? String, msg == "Not Found" { return true }
+        return false
     }
 
     // MARK: - 本地兜底（仅网易）
@@ -413,18 +454,19 @@ final class LocalApiBridge {
                     let joined = headerCookies.joined(separator: ", ")
                     self.queue.sync { self.absorb(setCookie: joined) }
                 }
-                // 上游 5xx 视为不可用，让网易接口能退回本地实现。
-                if (500...599).contains(http.statusCode) { failed = true }
+                // 非 2xx 一律视为不可用：上游 404 时说明路由不存在（隧道指错了服务），
+                // 5xx 时说明服务端挂了，两种情况都不应该把应答当成成功交给前端。
+                if !(200...299).contains(http.statusCode) { failed = true }
             }
             result = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
             if result == nil, let text = String(data: data, encoding: .utf8) {
                 NSLog("[Folia] api non-json response: \(text.prefix(200))")
             }
+            if failed { result = nil }
         }.resume()
 
         // 隧道不可达时最多等 10 秒。之前 25 秒会让登录弹窗长时间卡住，看起来像"未响应"。
         if semaphore.wait(timeout: .now() + 10) == .timedOut { return nil }
-        if failed && result == nil { return nil }
         return result
     }
 
