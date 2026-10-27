@@ -20,10 +20,16 @@ enum QRTool {
         filter.setValue(data, forKey: "inputMessage")
         guard let output = filter.outputImage else { return nil }
 
-        // 放大后重绘，避免小图上屏发糊；顺带留一圈白边方便扫码。
+        // 放大后重绘，避免小图上屏发糊。
         let scaled = output.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-        let padded = scaled.composited(over: CIImage(color: .white).cropped(to: scaled.extent))
-        guard let cgImage = context.createCGImage(padded, from: padded.extent) else { return nil }
+
+        // 二维码规范要求四周留 4 个模块宽的静区（quiet zone）。
+        // 之前只做了同尺寸的白色底，等于没有留白，深色主题下更是贴着边，
+        // 扫码器识别不出来；这里真的把画布往外扩 4 个模块再铺白。
+        let quiet = scaled.extent.width / output.extent.width * 4
+        let canvas = scaled.extent.insetBy(dx: -quiet, dy: -quiet)
+        let padded = scaled.composited(over: CIImage(color: .white).cropped(to: canvas))
+        guard let cgImage = context.createCGImage(padded, from: canvas) else { return nil }
         guard let png = UIImage(cgImage: cgImage).pngData() else { return nil }
         return "data:image/png;base64," + png.base64EncodedString()
     }

@@ -250,8 +250,10 @@ final class LocalApiBridge {
 
     private func qrCreate(key: String) -> [String: Any] {
         guard !key.isEmpty else { return ["code": 400, "message": "missing key"] }
+        // 二维码内容就是网易官方的登录链接，type=3 拿到的 unikey 直接就是 codekey。
         let loginURL = "https://music.163.com/login?codekey=\(key)"
         let qrimg = QRTool.dataURL(for: loginURL) ?? ""
+        guard !qrimg.isEmpty else { return ["code": 502, "message": "二维码生成失败"] }
         return [
             "code": 200,
             "data": [
@@ -264,10 +266,10 @@ final class LocalApiBridge {
 
     private func qrCheck(key: String) -> [String: Any] {
         guard !key.isEmpty else { return ["code": 400, "message": "missing key"] }
-        guard let json = post("/api/login/qrcode/client/login", form: ["key": key, "type": "1"]),
-              let code = json["code"] as? Int else {
-            return ["code": 502, "message": "网易云接口无响应"]
+        guard let json = post("/api/login/qrcode/client/login", form: ["key": key, "type": "1"]) else {
+            return ["code": 801, "message": "等待扫码"]
         }
+        guard let code = json["code"] as? Int else { return ["code": 801, "message": "等待扫码"] }
 
         switch code {
         case 803:
