@@ -312,7 +312,7 @@ final class LocalApiBridge {
     }
 
     private func request(_ url: URL, method: String, form: [String: String]?, cookie: String? = nil) -> [String: Any]? {
-        var request = URLRequest(url: url, timeoutInterval: 20)
+        var request = URLRequest(url: url, timeoutInterval: 8)
         request.httpMethod = method
         request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
         // Referer / Content-Type 是网易接口的要求；转发到隧道时不能带。
@@ -373,7 +373,8 @@ final class LocalApiBridge {
             }
         }.resume()
 
-        if semaphore.wait(timeout: .now() + 25) == .timedOut { return nil }
+        // 隧道不可达时最多等 10 秒。之前 25 秒会让登录弹窗长时间卡住，看起来像"未响应"。
+        if semaphore.wait(timeout: .now() + 10) == .timedOut { return nil }
         if failed && result == nil { return nil }
         return result
     }

@@ -587,14 +587,27 @@ var FOLIA_LATEST_VERSION = '2.0';
   function match(url) {
     if (typeof url !== 'string') return null;
     // 桥接层会把请求补成 folia://app/api/qq/xxx，也可能带 origin，这里只认路径片段。
+    // 同时把 query 解出来：QQ 的 login_qr_key 要带 channel=qq|wechat 才会给 key。
+    var qs = url.indexOf('?');
     var clean = url.split('?')[0].split('#')[0];
+    var query = {};
+    if (qs >= 0) {
+      var tail = url.slice(qs + 1).split('#')[0];
+      tail.split('&').forEach(function (pair) {
+        if (!pair) return;
+        var eq = pair.indexOf('=');
+        var k = eq < 0 ? pair : pair.slice(0, eq);
+        var v = eq < 0 ? '' : pair.slice(eq + 1);
+        try { query[decodeURIComponent(k)] = decodeURIComponent(v.replace(/\+/g, ' ')); } catch (e) { query[k] = v; }
+      });
+    }
     for (var i = 0; i < PROVIDERS.length; i += 1) {
       var p = PROVIDERS[i];
       var marker = '/api/' + p.id + '/';
       var at = clean.indexOf(marker);
       if (at >= 0) {
         var rest = clean.slice(at + marker.length).replace(/^\/+/, '');
-        return { provider: p, route: rest.split('/')[0] };
+        return { provider: p, route: rest.split('/')[0], query: query };
       }
     }
     return null;
@@ -1005,7 +1018,9 @@ var FOLIA_LATEST_VERSION = '2.0';
     var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + total + '" height="' + total
       + '" viewBox="0 0 ' + total + ' ' + total + '"><rect width="' + total + '" height="' + total
       + '" fill="#fff"/><path fill="#111" d="' + path + '"/></svg>';
-    return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+    // 只留 ASCII 的 SVG，再转 base64。percent-encoding 的 data URI 在 WKWebView 里
+    // 偶发不解码（白框），base64 由 WebKit 直接按字节解码，最稳。
+    return 'data:image/svg+xml;base64,' + btoa(svg);
   }
 
   function profile(provider, state) {
@@ -1018,7 +1033,8 @@ var FOLIA_LATEST_VERSION = '2.0';
     };
   }
 
-  function answer(provider, route) {
+  function answer(provider, route, query) {
+    query = query || {};
     var state = load(provider.id);
     if (route === 'login_channels') {
       // QQ 登录方式：只报 qq + wechat 两个渠道，界面就会出两个按钮让用户选。
@@ -1027,7 +1043,13 @@ var FOLIA_LATEST_VERSION = '2.0';
       return { code: 200, data: { channels: [], sessionMode: 'normal' } };
     }
     if (route === 'login_qr_key') {
+      // QQ 必须带 channel（qq / wechat）才给 key，与真实服务端一致；
+      // 没带就回 auth-required，前端会停在"选择登录方式"而不是一直转圈。
+      if (provider.id === 'qq' && !query.channel) {
+        return { code: 401, message: 'login_qr_key requires channel' };
+      }
       state.key = provider.id + '-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+      state.channel = query.channel || '';
       state.createdAt = Date.now();
       save(provider.id, state);
       return { code: 200, data: { unikey: state.key, key: state.key } };
@@ -1079,7 +1101,7 @@ var FOLIA_LATEST_VERSION = '2.0';
   function intercept(input) {
     var hit = match(input);
     if (!hit) return null;
-    return new Response(JSON.stringify(answer(hit.provider, hit.route)), {
+    return new Response(JSON.stringify(answer(hit.provider, hit.route, hit.query)), {
       status: 200,
       headers: { 'Content-Type': 'application/json; charset=utf-8' }
     });
@@ -1105,7 +1127,7 @@ var FOLIA_LATEST_VERSION = '2.0';
     var hit = match(this.__foliaProviderUrl);
     if (!hit) return nativeSend.apply(this, arguments);
     var xhr = this;
-    var body = JSON.stringify(answer(hit.provider, hit.route));
+    var body = JSON.stringify(answer(hit.provider, hit.route, hit.query));
     setTimeout(function () {
       try {
         Object.defineProperty(xhr, 'status', { value: 200, configurable: true });
