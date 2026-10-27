@@ -16,8 +16,12 @@ final class LocalApiBridge {
 
     /// 网页版里的网易接口前缀（前端在 folia: 协议下写死的值）。
     static let neteasePrefix = "/api/netease"
-    /// 其它平台前缀：前端在 folia://app/ 下解析出的相对路径。
-    static let otherPrefixes = ["/api/kugou", "/api/qq", "/api/bodian", "/api/lyric-proxy"]
+    /// 普通接口前缀：前端在 folia://app/ 下解析出的相对路径，经隧道转到电脑上的服务端。
+    static let otherPrefixes = ["/api/kugou", "/api/qq", "/api/bodian"]
+    /// 歌词代理前缀：`/api/lyric-proxy?url=<encodeURIComponent(原始地址)>`。
+    /// 这个接口本来就是要「把任意地址（酷狗、网易等）的内容取回来绕 CORS」，
+    /// 直接把整个路径甩给隧道是错的，必须解析出 url 参数、直接请求原始地址。
+    static let lyricProxyPrefix = "/api/lyric-proxy"
 
     /// 电脑上跑的服务端经 Cloudflare 隧道暴露的公网地址。
     /// 换隧道/换电脑时只改这一行，然后重新打包。
@@ -42,6 +46,7 @@ final class LocalApiBridge {
     func shouldHandle(_ url: URL) -> Bool {
         let path = url.path
         if path.hasPrefix(Self.neteasePrefix) { return true }
+        if path.hasPrefix(Self.lyricProxyPrefix) { return true }
         return Self.otherPrefixes.contains { path.hasPrefix($0) }
     }
 
@@ -54,6 +59,10 @@ final class LocalApiBridge {
         let path = url.path
         guard !path.hasPrefix(Self.neteasePrefix) else {
             handleNetease(task, url: url)
+            return
+        }
+        guard !path.hasPrefix(Self.lyricProxyPrefix) else {
+            handleLyricProxy(task, url: url)
             return
         }
         // 其余平台整条 URL 透传，路径和查询串都保持原样。
@@ -309,6 +318,41 @@ final class LocalApiBridge {
         return ["code": 200, "cookie": cookieHeader()]
     }
 
+    /// 歌词代理：`?url=` 里是已经过 encodeURIComponent 的原始地址。
+    /// 直接请求它并把原始响应体交还给页面，不做 JSON 包装——
+    /// 前端拿到的是歌词文本（或图片字节），包成 JSON 反而会让它解析失败。
+    private func handleLyricProxy(_ task: WKURLSchemeTask, url: URL) {
+        guard let raw = Self.query(url)["url"],
+              let target = URL(string: raw),
+              let scheme = target.scheme,
+              scheme == "http" || scheme == "https" else {
+            respond(task, status: 400, json: ["code": 400, "message": "lyric-proxy 缺少合法的 url 参数"], url: url)
+            return
+        }
+
+        var request = URLRequest(url: target, timeoutInterval: 10)
+        request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
+
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            guard let self else { return }
+            let http = response as? HTTPURLResponse
+            let text = data.flatMap { String(data: $0, encoding: .utf8) }
+            self.queue.async {
+                guard self.activeTasks.remove(ObjectIdentifier(task)) != nil else { return }
+                if let error, text == nil {
+                    Self.deliver(task, status: 200, payload: Data(), contentType: "text/plain; charset=utf-8", url: url)
+                    NSLog("[Folia] lyric-proxy failed \(error.localizedDescription) \(target.host ?? "")")
+                    return
+                }
+                let contentType = http?.allHeaderFields
+                    .first { String(describing: $0.key).lowercased() == "content-type" }
+                    .map { String(describing: $0.value) }
+                    ?? "text/plain; charset=utf-8"
+                Self.deliver(task, status: http?.statusCode ?? 200, payload: data ?? Data(), contentType: contentType, url: url)
+            }
+        }.resume()
+    }
+
     // MARK: - HTTP
 
     private func post(_ path: String, form: [String: String]) -> [String: Any]? {
@@ -516,6 +560,11 @@ final class LocalApiBridge {
 
     private static func deliver(_ task: WKURLSchemeTask, status: Int, json: [String: Any], url: URL? = nil) {
         let payload = (try? JSONSerialization.data(withJSONObject: json)) ?? Data("{}".utf8)
+        deliver(task, status: status, payload: payload, contentType: "application/json; charset=utf-8", url: url)
+    }
+
+    /// 原样投递响应体（歌词代理用：可能是歌词文本，也可能是封面图字节）。
+    private static func deliver(_ task: WKURLSchemeTask, status: Int, payload: Data, contentType: String, url: URL? = nil) {
         let target = url ?? task.request.url ?? URL(string: "https://api.ncm.local/")
         guard let target,
               let response = HTTPURLResponse(
@@ -523,7 +572,7 @@ final class LocalApiBridge {
                 statusCode: status,
                 httpVersion: "HTTP/1.1",
                 headerFields: [
-                    "Content-Type": "application/json; charset=utf-8",
+                    "Content-Type": contentType,
                     "Content-Length": "\(payload.count)",
                     "Cache-Control": "no-store",
                     "Access-Control-Allow-Origin": "*"
