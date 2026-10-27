@@ -577,8 +577,18 @@ var FOLIA_LATEST_VERSION = '2.0';
   if (window.__foliaProviderProxyInstalled) return;
   window.__foliaProviderProxyInstalled = true;
 
-  var BASE = 'https://reproductive-advertiser-merger-treatment.trycloudflare.com';
+  // 服务端入口：自己在服务器上部署的固定域名（HTTPS，地址永久不变）。
+  // 换服务器/换域名时同步改这里和 Web/LocalApiBridge.swift 的 upstreams。
+  var BASES = ['https://api.folia-api.top'];
   var IDS = ['kugou', 'qq', 'bodian'];
+
+  // 命中的基础地址（-1 表示 BASES 里没有一个能连上）。
+  // 局域网能连时记住它，后续请求不再白等隧道超时。
+  var baseIndex = 0;
+
+  function rewrite(url, index) {
+    return BASES[index] + url.slice(url.indexOf('/api/'));
+  }
 
   function target(url) {
     if (typeof url !== 'string') return null;
@@ -588,7 +598,8 @@ var FOLIA_LATEST_VERSION = '2.0';
       if (at < 0) continue;
       var rest = url.slice(at + base.length);
       if (rest !== '' && rest.charAt(0) !== '/' && rest.charAt(0) !== '?') continue;
-      return BASE + url.slice(at);
+      if (baseIndex < 0) return null;
+      return rewrite(url, baseIndex);
     }
     return null;
   }
@@ -621,36 +632,80 @@ var FOLIA_LATEST_VERSION = '2.0';
     });
   }
 
+  // 依次试 BASES：连不上就换下一个。
+  // 网络错误和下层的 502 都算「这个入口不行」；只有最后一个入口也失败才放弃。
+  function attempt(fn, url, provider) {
+    if (baseIndex < 0) return Promise.resolve(fail(provider));
+    return new Promise(function (resolve) {
+      fn(rewrite(url, baseIndex), function (ok, value) {
+        if (ok) { resolve(value); return; }
+        if (baseIndex < BASES.length - 1) {
+          baseIndex += 1;
+          resolve(attempt(fn, url, provider));
+          return;
+        }
+        resolve(fail(provider));
+      });
+    });
+  }
+
+  function fetchOnce(fetchImpl, next, init, done) {
+    var rest = typeof init === 'undefined' ? fetchImpl(next) : fetchImpl(next, init);
+    rest.then(function (res) {
+      if (!res || res.status >= 500) { done(false); return; }
+      if (res.status === 404) { done(false); return; }
+      // 网关自己判定上游不可用时也会给 502，这里一并算作入口不可用。
+      res.clone().text().then(function (text) {
+        if (text.indexOf('"status":"unavailable"') >= 0) { done(false); return; }
+        done(true, res);
+      }, function () { done(true, res); });
+    }, function () { done(false); });
+  }
+
   var nativeFetch = window.fetch;
   if (typeof nativeFetch === 'function') {
     window.fetch = function (input, init) {
       var url = typeof input === 'string' ? input : input && input.url;
-      var next = target(url);
-      if (!next) return nativeFetch.apply(this, arguments);
+      if (!target(url)) return nativeFetch.apply(this, arguments);
       var provider = providerOf(url);
-      var rest = typeof init === 'undefined' ? nativeFetch.call(this, next) : nativeFetch.call(this, next, init);
-      // 网关连不上、或网关自己判定上游不可用时（502 + status:unavailable），
-      // 统一换成明确错误体。HTTP 状态保持 200，前端才会走「显示消息」而不是无限重试。
-      return rest.then(function (res) {
-        if (!res) return fail(provider);
-        if (res.status >= 500) return fail(provider);
-        if (res.status === 404) return fail(provider);
-        return res.clone().text().then(function (text) {
-          if (text.indexOf('"status":"unavailable"') < 0) return res;
-          return new Response(text, { status: 200, headers: { 'Content-Type': 'application/json; charset=utf-8' } });
-        }, function () { return res; });
-      }, function () { return fail(provider); });
+      var self = this;
+      return attempt(function (next, done) {
+        fetchOnce(nativeFetch.bind(self), next, init, done);
+      }, url, provider);
     };
   }
 
-  // XHR 直接改地址，不需要改响应：桥接层已经把 5xx 变成可读的错误体。
+  // XHR 改地址：连不上时按同样顺序换下一个入口再重发。
+  // 这里只能在 send 阶段重试，因为 open 之后地址就固定了。
   var nativeOpen = XMLHttpRequest.prototype.open;
+  var nativeSend = XMLHttpRequest.prototype.send;
   XMLHttpRequest.prototype.open = function (method, url) {
-    var next = target(url);
-    if (!next) return nativeOpen.apply(this, arguments);
+    if (target(url)) {
+      this.__foliaProviderUrl = url;
+      this.__foliaProviderMethod = method;
+    }
+    return nativeOpen.apply(this, arguments);
+  };
+  XMLHttpRequest.prototype.send = function () {
+    var xhr = this;
+    var url = xhr.__foliaProviderUrl;
+    if (!url || baseIndex < 0) return nativeSend.apply(this, arguments);
     var args = Array.prototype.slice.call(arguments);
-    args[1] = next;
-    return nativeOpen.apply(this, args);
+    var tried = baseIndex;
+
+    function run(index) {
+      tried = index;
+      nativeOpen.call(xhr, xhr.__foliaProviderMethod || 'GET', rewrite(url, index));
+      nativeSend.apply(xhr, args);
+    }
+
+    xhr.addEventListener('error', function () {
+      if (tried >= BASES.length - 1) return;
+      baseIndex = tried + 1;
+      run(baseIndex);
+    });
+
+    return run(baseIndex);
   };
 })();
 </script>

@@ -23,12 +23,12 @@ final class LocalApiBridge {
     /// 直接把整个路径甩给隧道是错的，必须解析出 url 参数、直接请求原始地址。
     static let lyricProxyPrefix = "/api/lyric-proxy"
 
-    /// 电脑上跑的服务端经 Cloudflare 隧道暴露的公网地址，按顺序尝试。
-    /// quick tunnel 随时会失效（失效时根路径还是 200，只是业务路由全变 404），
-    /// 所以这里留多个地址，逐个试探，第一个「能给出正常应答」的胜出。
-    /// 换隧道/换电脑时改这里，然后重新打包。
+    /// 服务端地址，按顺序尝试，第一个「能给出正常应答」的胜出。
+    /// 这是自己在服务器上部署的固定域名（Cloudflare 托管解析 + HTTPS），
+    /// 地址永久不变，可以分发给任何用户，不依赖开发机或临时隧道。
+    /// 换服务器/换域名时改这里，然后重新打包。
     static let upstreams = [
-        "https://reproductive-advertiser-merger-treatment.trycloudflare.com"
+        "https://api.folia-api.top"
     ]
 
     /// 标记当前可用的隧道下标；坏掉的隧道在一次运行内不再重试，避免每次登录都白等 10 秒。
