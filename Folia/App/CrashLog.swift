@@ -19,23 +19,12 @@ enum CrashLog {
     static func install() {
         UserDefaults.standard.set(false, forKey: "NSApplicationCrashOnExceptions")
 
-        NSSetUncaughtExceptionHandler { exception in
-            let trace = exception.callStackSymbols.joined(separator: "\n")
-            write("""
-            ==== UNCAUGHT EXCEPTION ====
-            name: \(exception.name.rawValue)
-            reason: \(exception.reason ?? "-")
-            \(trace)
-            """)
-        }
+        // 这两个 API 要的是 C 函数指针，不能捕获上下文，
+        // 所以只能指向文件顶层的全局函数。
+        NSSetUncaughtExceptionHandler(foliaUncaughtExceptionHandler)
 
-        // 信号类崩溃（野指针、栈溢出）拿不到 NSException，只能记信号名。
-        // 这类崩溃基本不会出现在本壳里，留下信号足以区分即可。
         for sig in [SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGFPE] {
-            signal(sig, { code in
-                write("==== FATAL SIGNAL \(code) ====")
-                exit(code)
-            })
+            signal(sig, foliaFatalSignalHandler)
         }
     }
 
@@ -64,4 +53,22 @@ enum CrashLog {
         }
         NSLog("[Folia] %@", text)
     }
+}
+
+/// 未捕获的 ObjC 异常：WKURLSchemeTask 重复回调、数组越界等都会走到这里。
+private func foliaUncaughtExceptionHandler(_ exception: NSException) {
+    let trace = exception.callStackSymbols.joined(separator: "\n")
+    CrashLog.write("""
+    ==== UNCAUGHT EXCEPTION ====
+    name: \(exception.name.rawValue)
+    reason: \(exception.reason ?? "-")
+    \(trace)
+    """)
+}
+
+/// 信号类崩溃（野指针、栈溢出）拿不到 NSException，只能记信号名。
+private func foliaFatalSignalHandler(_ code: Int32) {
+    CrashLog.write("==== FATAL SIGNAL \(code) ====")
+    signal(code, SIG_DFL)
+    raise(code)
 }
