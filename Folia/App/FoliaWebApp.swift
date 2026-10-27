@@ -26,6 +26,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        CrashLog.install()
+        CrashLog.note("==== app launch ====")
         AudioSessionController.shared.configure()
         return true
     }

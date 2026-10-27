@@ -64,8 +64,13 @@ final class LocalApiBridge {
 
     // MARK: - 入口
 
+    /// 内置诊断日志接口：页面里访问 `/api/_diagnostics/crash-log` 就能读回本地崩溃日志。
+    /// 用户不接电脑也能把「到底怎么闪退的」拿出来。
+    static let diagnosticsPrefix = "/api/_diagnostics"
+
     func shouldHandle(_ url: URL) -> Bool {
         let path = url.path
+        if path.hasPrefix(Self.diagnosticsPrefix) { return true }
         if path.hasPrefix(Self.neteasePrefix) { return true }
         if path.hasPrefix(Self.lyricProxyPrefix) { return true }
         return Self.otherPrefixes.contains { path.hasPrefix($0) }
@@ -78,6 +83,12 @@ final class LocalApiBridge {
             return
         }
         let path = url.path
+        // 诊断接口必须在 bridge 的串行队列上跑：它要读磁盘上的日志文件，
+        // 避开与写日志的并发竞争，读到不撕裂的内容。
+        guard !path.hasPrefix(Self.diagnosticsPrefix) else {
+            queue.async { [weak self] in self?.handleDiagnostics(task, url: url) }
+            return
+        }
         guard !path.hasPrefix(Self.neteasePrefix) else {
             handleNetease(task, url: url)
             return
@@ -246,6 +257,18 @@ final class LocalApiBridge {
             }
             self.respond(task, status: 200, json: result, url: url)
         }
+    }
+
+    // MARK: - 诊断
+
+    private func handleDiagnostics(_ task: WKURLSchemeTask, url: URL) {
+        let text = (try? String(contentsOf: CrashLog.fileURL ?? URL(fileURLWithPath: "/dev/null"),
+                                encoding: .utf8)) ?? "（还没有日志）"
+        respond(task, status: 200, json: [
+            "code": 200,
+            "path": CrashLog.fileURL?.path ?? "-",
+            "log": text
+        ], url: url)
     }
 
     // MARK: - 反向代理
@@ -617,18 +640,24 @@ final class LocalApiBridge {
                 .data(using: .utf8)
         }
 
-        var result: [String: Any]?
-        var failed = false
+        // `data`, `response`, `error` 以及下面所有局部变量都只属于 URLSession 的回调闭包。
+        // 唯一的跨线程交接点是 `box`：信号量 signal 之前的最后一次写入，读侧在 wait 之后才读，
+        // 形成明确的 happens-before 关系（DispatchSemaphore 保证这一点）。
+        //
+        // 用类而不是两个 `var` 局部变量：Swift 6 里直接跨线程写局部 `var` 会报并发错误，
+        // 而且编译器可能把读不到结果的重排当真，`result` 永远读到 nil。
+        final class Box: @unchecked Sendable {
+            var value: [String: Any]?
+            var failed = false
+        }
+        let box = Box()
+
         let semaphore = DispatchSemaphore(value: 0)
         URLSession.shared.dataTask(with: request) { data, response, _ in
             defer { semaphore.signal() }
-            guard let data else {
-                failed = true
-                return
-            }
+            // 注意顺序：下面 guard 在 data 缺失时会提前 return，
+            // failed 必须在 guard 之前写，否则「非 2xx 且无 body」会被当成成功。
             if let http = response as? HTTPURLResponse {
-                // 不能写 `allHeaderFields as? [String: String]`：只要有一个非字符串值，
-                // 整个转换就会失败，Set-Cookie 会被静默丢掉，登录态随之丢失。
                 var headerCookies: [String] = []
                 for (key, value) in http.allHeaderFields {
                     guard String(describing: key).lowercased() == "set-cookie" else { continue }
@@ -640,27 +669,31 @@ final class LocalApiBridge {
                 }
                 if !headerCookies.isEmpty {
                     let joined = headerCookies.joined(separator: ", ")
-                    // 这里绝对不能 `queue.sync`：request() 正阻塞在 queue 上等信号量，
-                    // 回调再往同一个串行队列 sync 就是自锁，必然等到超时。
+                    // 这里绝对不能 `queue.sync`：request() 正阻塞在调用方的队列上等信号量，
+                    // 回调再往那个串行队列 sync 就是自锁，必然等到超时。
                     // absorb 内部只碰 cookieLock，与本队列无关。
                     self.absorb(setCookie: joined)
                 }
                 // 非 2xx 一律视为不可用：上游 404 时说明路由不存在（隧道指错了服务），
                 // 5xx 时说明服务端挂了，两种情况都不应该把应答当成成功交给前端。
-                if !(200...299).contains(http.statusCode) { failed = true }
+                if !(200...299).contains(http.statusCode) { box.failed = true }
             }
-            result = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-            if result == nil, let text = String(data: data, encoding: .utf8) {
+            guard let data else {
+                box.failed = true
+                return
+            }
+            box.value = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            if box.value == nil, let text = String(data: data, encoding: .utf8) {
                 NSLog("[Folia] api non-json response: \(text.prefix(200))")
             }
-            if failed { result = nil }
+            if box.failed { box.value = nil }
         }.resume()
 
         // 必须比服务端自己的上游超时（12s）长，否则我们会在服务端把 504 信封写回来之前就放弃，
         // 拿不到那个信封 → forward 全部 miss → 落到本地兜底 → 前端拿到假 code:200 →
         // 进歌单闪退、播放卡 00:00。歌单详情实测最慢要 8.8s，加上隧道往返留到 35s。
         if semaphore.wait(timeout: .now() + 35) == .timedOut { return nil }
-        return result
+        return box.value
     }
 
     private static var userAgent: String {

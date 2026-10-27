@@ -53,6 +53,7 @@ final class WebContainerView: UIView {
             forMainFrameOnly: true
         ))
         userContent.add(AudioStateRelay(), name: "foliaAudioState")
+        userContent.add(JSLogRelay(), name: "foliaJSLog")
         config.userContentController = userContent
 
         webView = WKWebView(frame: bounds, configuration: config)
@@ -73,6 +74,9 @@ final class WebContainerView: UIView {
 
         addSubview(webView)
 
+        // 必须持有，否则会被立刻释放，长按手势失效。
+        diagnostics = DiagnosticsOverlay(webView: webView)
+
         reloadObservation = state.$reloadToken
             .dropFirst()
             .receive(on: DispatchQueue.main)
@@ -92,6 +96,7 @@ final class WebContainerView: UIView {
     }
 
     private var remoteObservation: Any?
+    private var diagnostics: DiagnosticsOverlay?
 
     /// 页面里的播放器是 React 状态机，没有全局 API，这里按 DOM 上的按钮与媒体元素找。
     private func forwardRemoteCommand(_ action: String) {
@@ -248,6 +253,24 @@ final class WebContainerView: UIView {
         }
         return nativeOpen ? nativeOpen.apply(window, arguments) : null;
       };
+      // 把页面里的未捕获错误回传原生。React 渲染时抛的 TypeError
+      // 在 WKWebView 里只会让页面白掉/退回加载界面，控制台看不到，
+      // 必须落到本地日志里才能定位是哪个字段为空。
+      var report = function(kind, detail){
+        try { window.webkit.messageHandlers.foliaJSLog.postMessage(kind + ' ' + detail); } catch (e) {}
+      };
+      window.addEventListener('error', function(e){
+        var t = e && e.target;
+        if (t && t !== window && (t.src || t.href)) {
+          report('RESOURCE', (t.tagName || '') + ' ' + (t.src || t.href));
+          return;
+        }
+        report('ERROR', (e && e.message) + ' @ ' + (e && e.filename) + ':' + (e && e.lineno));
+      }, true);
+      window.addEventListener('unhandledrejection', function(e){
+        var r = e && e.reason;
+        report('REJECTION', (r && (r.stack || r.message)) || String(r));
+      });
     })();
     """
 }
@@ -295,6 +318,9 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         let now = Date()
         contentProcessRestarts = contentProcessRestarts.filter { now.timeIntervalSince($0) < 60 }
         contentProcessRestarts.append(now)
+        // 这是与「ObjC 异常闪退」完全不同的另一条路径：网页把 WebProcess 搞死了。
+        // 计进日志才能区分到底是哪一种。
+        CrashLog.note("==== web content process terminated (#\(contentProcessRestarts.count)) url=\(webView.url?.absoluteString ?? "-") ====")
 
         if contentProcessRestarts.count <= 2 {
             webView.reload()
@@ -319,6 +345,86 @@ private final class AudioStateRelay: NSObject, WKScriptMessageHandler {
                                didReceive message: WKScriptMessage) {
         guard let state = message.body as? String else { return }
         AudioSessionController.shared.updatePlaybackState(state == "playing")
+    }
+}
+
+// MARK: - 页面日志回传
+
+/// 网页里的未捕获错误 / 资源加载失败，落到本地日志，供「闪退」定位。
+private final class JSLogRelay: NSObject, WKScriptMessageHandler {
+    func userContentController(_ userContentController: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        guard let body = message.body as? String else { return }
+        CrashLog.note("JS \(body)")
+    }
+}
+
+// MARK: - 诊断面板
+
+/// 长按左上角触发：把本地崩溃日志直接铺在屏幕上，截图即可发出来。
+/// 不接电脑也能拿到现场，这是排查「闪退」最快的路径。
+final class DiagnosticsOverlay: NSObject {
+    private weak var webView: WKWebView?
+    private var panel: UIView?
+    private static let size: CGFloat = 64
+
+    init(webView: WKWebView) {
+        self.webView = webView
+        super.init()
+        let long = UILongPressGestureRecognizer(target: self, action: #selector(handle(_:)))
+        long.minimumPressDuration = 1.2
+        long.numberOfTouchesRequired = 1
+        // 只挂在左上角的窄条上，避免抢走页面里的长按操作。
+        let strip = UIView(frame: CGRect(x: 0, y: 0, width: Self.size, height: Self.size))
+        strip.backgroundColor = .clear
+        strip.isUserInteractionEnabled = true
+        strip.addGestureRecognizer(long)
+        strip.autoresizingMask = [.flexibleRightMargin, .flexibleBottomMargin]
+        webView.addSubview(strip)
+    }
+
+    @objc private func handle(_ g: UILongPressGestureRecognizer) {
+        guard g.state == .began else { return }
+        if panel != nil { hide() } else { show() }
+    }
+
+    private func show() {
+        guard let web = webView, let host = web.superview else { return }
+        let text: String = {
+            guard let url = CrashLog.fileURL,
+                  let body = try? String(contentsOf: url, encoding: .utf8) else { return "（还没有日志）" }
+            // 只留最后一屏，太长反而看不清。
+            return String(body.suffix(4000))
+        }()
+
+        let container = UIView(frame: host.bounds)
+        container.backgroundColor = UIColor.black.withAlphaComponent(0.92)
+        container.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+
+        let label = UILabel(frame: container.bounds.insetBy(dx: 16, dy: 48))
+        label.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        label.numberOfLines = 0
+        label.font = .monospacedSystemFont(ofSize: 9, weight: .regular)
+        label.textColor = .white
+        label.text = text
+        label.lineBreakMode = .byCharWrapping
+        container.addSubview(label)
+
+        let close = UIButton(type: .system)
+        close.setTitle("关闭", for: .normal)
+        close.frame = CGRect(x: 16, y: 8, width: 160, height: 32)
+        close.addTarget(self, action: #selector(hideTapped), for: .touchUpInside)
+        container.addSubview(close)
+
+        host.addSubview(container)
+        panel = container
+    }
+
+    @objc private func hideTapped() { hide() }
+
+    private func hide() {
+        panel?.removeFromSuperview()
+        panel = nil
     }
 }
 
