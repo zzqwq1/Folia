@@ -90,7 +90,12 @@ final class LocalApiBridge {
         }
     }
 
-    /// 网易：先并 cookie，再反代；上游挂了退回本地明文实现。
+    /// 网易：先并 cookie，再反代；上游确实连不通时退回本地明文实现。
+    ///
+    /// 注意这里的判定顺序：上游返回了应答（哪怕是 404 / 500）就不算「连不通」。
+    /// 之前 /api/netease 指向只挂了网易的旧隧道，这条路径一直 404，
+    /// 前端看到的就是「NetEase gave no QR key: code 404: Not Found」。
+    /// 现在网易由同一个网关的 3103 提供，正常会返回真实 unikey。
     private func handleNetease(_ task: WKURLSchemeTask, url: URL) {
         var route = url.path
         if route.hasPrefix(Self.neteasePrefix) {
