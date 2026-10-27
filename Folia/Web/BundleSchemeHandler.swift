@@ -14,6 +14,34 @@ final class BundleSchemeHandler: NSObject, WKURLSchemeHandler {
     /// 用串行队列 + 顶层 GCD 桥接：WebKit 允许在非主线程回调任务。
     private let queue = DispatchQueue(label: "app.folia.bundle-scheme", qos: .userInitiated)
 
+    /// 静态任务的记账表，只在 `queue` 上读写。
+    ///
+    /// WebKit 会在页面重载、切歌、取消导航时 `stop` 掉还没回完的 task，
+    /// 之后任何 `didReceive/didFinish` 都是 ObjC 异常，直接杀进程（闪退）。
+    /// 之前这里完全没记账，`stop` 时只通知了 LocalApiBridge，
+    /// 于是读文件的这一步照样回调——这是「进歌单闪退」的第二条来源。
+    private var active = Set<ObjectIdentifier>()
+
+    /// 判定与投递必须在同一个队列块里，否则中间仍会露出被 `stop` 的时间窗。
+    private func finish(_ task: WKURLSchemeTask, response: HTTPURLResponse?, data: Data?, error: Error?) {
+        queue.async { [weak self] in
+            guard let self, self.active.remove(ObjectIdentifier(task)) != nil else { return }
+            DispatchQueue.main.async {
+                if let error {
+                    task.didFailWithError(error)
+                    return
+                }
+                guard let response, let data else {
+                    task.didFailWithError(URLError(.badServerResponse))
+                    return
+                }
+                task.didReceive(response)
+                task.didReceive(data)
+                task.didFinish()
+            }
+        }
+    }
+
     init(root: URL) {
         self.root = root.standardizedFileURL
         super.init()
@@ -31,14 +59,18 @@ final class BundleSchemeHandler: NSObject, WKURLSchemeHandler {
             return
         }
 
+        // 先入账再排读盘：读盘是异步的，若反过来，`stop` 可能先到、入账后到，
+        // 就把一个已取消的任务又记成活的了。
+        queue.async { self.active.insert(ObjectIdentifier(urlSchemeTask)) }
+
         queue.async { [weak self] in
             guard let self else { return }
             guard let fileURL = self.resolve(url) else {
-                DispatchQueue.main.async { urlSchemeTask.didFailWithError(URLError(.fileDoesNotExist)) }
+                self.finish(urlSchemeTask, response: nil, data: nil, error: URLError(.fileDoesNotExist))
                 return
             }
             guard let data = try? Data(contentsOf: fileURL, options: .mappedIfSafe) else {
-                DispatchQueue.main.async { urlSchemeTask.didFailWithError(URLError(.cannotLoadFromNetwork)) }
+                self.finish(urlSchemeTask, response: nil, data: nil, error: URLError(.cannotLoadFromNetwork))
                 return
             }
 
@@ -56,21 +88,18 @@ final class BundleSchemeHandler: NSObject, WKURLSchemeHandler {
                     "Access-Control-Allow-Methods": "GET, POST, OPTIONS"
                 ]
             ) else {
-                DispatchQueue.main.async { urlSchemeTask.didFailWithError(URLError(.badServerResponse)) }
+                self.finish(urlSchemeTask, response: nil, data: nil, error: URLError(.badServerResponse))
                 return
             }
 
-            DispatchQueue.main.async {
-                urlSchemeTask.didReceive(response)
-                urlSchemeTask.didReceive(data)
-                urlSchemeTask.didFinish()
-            }
+            self.finish(urlSchemeTask, response: response, data: data, error: nil)
         }
     }
 
     func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
-        // 静态文件是单次读取；接口请求则要记账，避免取消后仍回调导致 WebKit 抛异常。
+        // 接口请求由 LocalApiBridge 自己记账；静态任务记在这里，两边都要撤。
         LocalApiBridge.shared.cancel(urlSchemeTask)
+        queue.async { self.active.remove(ObjectIdentifier(urlSchemeTask)) }
     }
 
     /// folia://app/assets/x.js → <Bundle>/www/assets/x.js

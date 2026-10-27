@@ -97,10 +97,56 @@ final class LocalApiBridge {
 
     /// 队列上的唯一出口：每个 task 只会真正回调一次，已取消的静默丢弃。
     private func respond(_ task: WKURLSchemeTask, status: Int, json: [String: Any], url: URL? = nil) {
+        let payload = (try? JSONSerialization.data(withJSONObject: json)) ?? Data("{}".utf8)
+        deliver(task, status: status, payload: payload, contentType: "application/json; charset=utf-8", url: url, owns: true)
+    }
+
+    /// 所有回调的统一出口。
+    ///
+    /// `owns` 表示这次投递是否负责把 task 从记账表里摘掉（只有走 `respond` 的才摘；
+    /// 直接投递的调用方自己已经摘过了）。
+    ///
+    /// 判定「还在不在表里」和「把回调排到主线程」必须在同一个队列块里完成：
+    /// 只要中间露出时间窗，WebKit 就可能在这段时间里 `stop` 掉这个 task，
+    /// 之后任何 `didReceive/didFinish` 都会抛 ObjC 异常直接杀进程——表现就是闪退。
+    private func deliver(_ task: WKURLSchemeTask, status: Int, payload: Data,
+                         contentType: String, url: URL? = nil, owns: Bool = false) {
         queue.async { [weak self] in
-            guard let self, self.activeTasks.remove(ObjectIdentifier(task)) != nil else { return }
-            Self.deliver(task, status: status, json: json, url: url)
+            if let self {
+                let id = ObjectIdentifier(task)
+                if owns {
+                    guard self.activeTasks.remove(id) != nil else { return }
+                } else {
+                    guard self.activeTasks.contains(id) else { return }
+                }
+            }
+            DispatchQueue.main.async {
+                Self.push(task, status: status, payload: payload, contentType: contentType, url: url)
+            }
         }
+    }
+
+    /// 真正调 WebKit。这里已经在主线程，也不再做任何判定。
+    private static func push(_ task: WKURLSchemeTask, status: Int, payload: Data, contentType: String, url: URL?) {
+        let target = url ?? task.request.url ?? URL(string: "https://api.ncm.local/")
+        guard let target,
+              let response = HTTPURLResponse(
+                url: target,
+                statusCode: status,
+                httpVersion: "HTTP/1.1",
+                headerFields: [
+                    "Content-Type": contentType,
+                    "Content-Length": "\(payload.count)",
+                    "Cache-Control": "no-store",
+                    "Access-Control-Allow-Origin": "*"
+                ]
+              ) else {
+            task.didFailWithError(URLError(.badServerResponse))
+            return
+        }
+        task.didReceive(response)
+        task.didReceive(payload)
+        task.didFinish()
     }
 
     /// 其它平台：不改写任何参数，直接转发。
@@ -168,10 +214,23 @@ final class LocalApiBridge {
 
             // 主路径：转发到自己的服务端，它走官方加密通道，803 时能真正拿到 MUSIC_U。
             let rawQuery = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedQuery
-            if let proxied = self.proxy(route: route, rawQuery: rawQuery, cookie: effective) {
+            switch self.proxy(route: route, rawQuery: rawQuery, cookie: effective) {
+            case .ok(let proxied):
                 if route == "/login/qr/key" { self.noteQRKey(proxied, source: "tunnel\(self.upstreamIndex)") }
                 self.respond(task, status: 200, json: proxied, url: url)
                 return
+            case .upstreamTimeout(let status):
+                // 服务端自己的上游超时（12s）。这是「慢」，不是「这个路由不存在」，
+                // 绝不能落进本地兜底：本地兜底没有 /playlist/detail、/song/url/v1 这些路由，
+                // 只会回一个假的 code:200，前端当成功解析后字段全空 —— 进歌单闪退、播放卡 00:00。
+                NSLog("[Folia] upstream timeout \(route) -> \(status)")
+                self.respond(task, status: status, json: [
+                    "code": status,
+                    "message": "服务端上游超时，请稍后重试"
+                ], url: url)
+                return
+            case nil:
+                break
             }
             NSLog("[Folia] upstream unreachable, fallback to local \(route)")
             let result = self.dispatch(route: route, query: query, cookie: effective)
@@ -210,7 +269,18 @@ final class LocalApiBridge {
     /// `upstreams` 的元素自带 `/api/netease` 前缀，而这里的 route 是剥掉前缀后的
     /// 相对路径（`/login/qr/key`），所以拼回去就是 `https://host/api/netease/login/qr/key`。
     /// 酷狗/QQ 的 route 本身已经带 `/api/xxx`，直接拼即可，两种都能对上。
-    private func proxy(route: String, rawQuery: String?, cookie: String) -> [String: Any]? {
+    ///
+    /// 返回值区分三态，调用方必须据此决定行为：
+    /// - `.ok(JSON)`   拿到正常业务 JSON，直接交给前端
+    /// - `.upstreamTimeout`  服务端自己的上游超时（12s），这是「慢」而不是「错」，
+    ///   必须原样回 504，绝不能回落到本地兜底——本地兜底没有这个路由，
+    ///   只会返回一个假的 code:200，前端把它当成功解析后字段全空，进歌单就崩。
+    private enum ForwardResult {
+        case ok([String: Any])
+        case upstreamTimeout(Int)
+    }
+
+    private func proxy(route: String, rawQuery: String?, cookie: String) -> ForwardResult? {
         var path = route
         if let rawQuery, !rawQuery.isEmpty {
             // 网易接口的 cookie 已经在 effective 里并进表了，去掉前端拼的那份，
@@ -229,7 +299,11 @@ final class LocalApiBridge {
             target += "?\(rawQuery)"
         }
         NSLog("[Folia] proxy \(path)")
-        return forward(target, cookie: cookie)
+        guard let result = forward(target, cookie: cookie) else { return nil }
+        switch result {
+        case .ok(let json): return json
+        case .upstreamTimeout: return nil
+        }
     }
 
     /// 依次尝试所有隧道，返回第一个「健康」的应答。
@@ -238,14 +312,25 @@ final class LocalApiBridge {
     /// `{"code":404,...,"msg":"Not Found"}`。所以只看「拿到 JSON」不够：
     /// 这种 404 信封必须当成隧道不可用，否则会把错误原样交给前端，
     /// 前端就报「NetEase gave no QR key: code 404: Not Found」。
-    private func forward(_ path: String, cookie: String) -> [String: Any]? {
+    ///
+    /// 服务端把自己上游的失败也包成 200 + `{"code":504,"message":"netease upstream timeout ..."}`，
+    /// 这种信封同样不能当成功交给前端（前端 `C()` 在 online 模式下只看 `code`，
+    /// 会把它当成正常数据），必须单独识别成 `.upstreamTimeout`。
+    private func forward(_ path: String, cookie: String) -> ForwardResult? {
         let total = Self.upstreams.count
+        var timedOut: Int?
         for offset in 0..<total {
             let index = (upstreamIndex + offset) % total
             let base = Self.upstreams[index]
             guard let url = URL(string: base + path),
                   let json = request(url, method: "GET", form: nil, cookie: cookie) else {
                 NSLog("[Folia] upstream #\(index) unreachable \(path)")
+                continue
+            }
+            if Self.isUpstreamTimeout(json) {
+                // 同一条隧道换个时间重试也不会更快，直接把它记下来，别再耗第二次 30 秒。
+                NSLog("[Folia] upstream #\(index) reported its own upstream timeout \(path)")
+                timedOut = 504
                 continue
             }
             if Self.isUnavailable(json) {
@@ -256,8 +341,9 @@ final class LocalApiBridge {
                 NSLog("[Folia] switch upstream to #\(index)")
                 upstreamIndex = index
             }
-            return json
+            return .ok(json)
         }
+        if let status = timedOut { return .upstreamTimeout(status) }
         return nil
     }
 
@@ -266,6 +352,15 @@ final class LocalApiBridge {
         if let code = json["code"] as? Int, code == 404 { return true }
         if let msg = json["msg"] as? String, msg == "Not Found" { return true }
         return false
+    }
+
+    /// 服务端自报的上游超时：`{"code":504,"message":"netease upstream timeout ..."}`。
+    ///
+    /// 只认 504/502 且 message 明确提到 upstream，避免把业务里正常的 502/504 误判。
+    private static func isUpstreamTimeout(_ json: [String: Any]) -> Bool {
+        guard let code = json["code"] as? Int, code == 504 || code == 502 else { return false }
+        let message = (json["message"] as? String) ?? ""
+        return message.lowercased().contains("upstream")
     }
 
     // MARK: - 本地兜底（仅网易）
@@ -293,7 +388,17 @@ final class LocalApiBridge {
             persist()
             return ["code": 200]
         default:
-            return ["code": 200, "message": "local fallback: unsupported route \(route)"]
+            // 这里绝不能回 code:200。
+            //
+            // 之前返回 `{"code":200,"message":"local fallback: unsupported route ..."}`，
+            // 前端 `er()` 只看 `code`（`e.code != null && Number(e.code) !== 200`），
+            // 于是把它当成合法成功响应：`getPlaylistDetail` 拿到没有 `playlist` 的对象，
+            // `getAudioSource` 拿到没有 `data` 的对象、`data[0]` 是 undefined，
+            // 逐层取值时抛 TypeError —— 表现就是进歌单闪退、播放卡在 00:00。
+            // 回 502 才能让前端走自己的错误分支（`tr()` 抛出 unavailable），
+            // 由播放器给出「不可用」提示，而不是崩溃。
+            NSLog("[Folia] local fallback has no route \(route)")
+            return ["code": 502, "message": "服务端暂不可用：\(route)"]
         }
     }
 
@@ -465,7 +570,7 @@ final class LocalApiBridge {
             self.queue.async {
                 guard self.activeTasks.remove(ObjectIdentifier(task)) != nil else { return }
                 if let error, text == nil {
-                    Self.deliver(task, status: 200, payload: Data(), contentType: "text/plain; charset=utf-8", url: url)
+                    self.deliver(task, status: 200, payload: Data(), contentType: "text/plain; charset=utf-8", url: url)
                     NSLog("[Folia] lyric-proxy failed \(error.localizedDescription) \(target.host ?? "")")
                     return
                 }
@@ -473,7 +578,7 @@ final class LocalApiBridge {
                     .first { String(describing: $0.key).lowercased() == "content-type" }
                     .map { String(describing: $0.value) }
                     ?? "text/plain; charset=utf-8"
-                Self.deliver(task, status: http?.statusCode ?? 200, payload: data ?? Data(), contentType: contentType, url: url)
+                self.deliver(task, status: http?.statusCode ?? 200, payload: data ?? Data(), contentType: contentType, url: url)
             }
         }.resume()
     }
@@ -486,7 +591,7 @@ final class LocalApiBridge {
     }
 
     private func request(_ url: URL, method: String, form: [String: String]?, cookie: String? = nil) -> [String: Any]? {
-        var request = URLRequest(url: url, timeoutInterval: 8)
+        var request = URLRequest(url: url, timeoutInterval: 30)
         request.httpMethod = method
         request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
         // Referer / Content-Type 是网易接口的要求；转发到隧道时不能带。
@@ -551,8 +656,10 @@ final class LocalApiBridge {
             if failed { result = nil }
         }.resume()
 
-        // 隧道不可达时最多等 10 秒。之前 25 秒会让登录弹窗长时间卡住，看起来像"未响应"。
-        if semaphore.wait(timeout: .now() + 10) == .timedOut { return nil }
+        // 必须比服务端自己的上游超时（12s）长，否则我们会在服务端把 504 信封写回来之前就放弃，
+        // 拿不到那个信封 → forward 全部 miss → 落到本地兜底 → 前端拿到假 code:200 →
+        // 进歌单闪退、播放卡 00:00。歌单详情实测最慢要 8.8s，加上隧道往返留到 35s。
+        if semaphore.wait(timeout: .now() + 35) == .timedOut { return nil }
         return result
     }
 
@@ -711,36 +818,6 @@ final class LocalApiBridge {
     }
 
     // MARK: - 响应
-
-    private static func deliver(_ task: WKURLSchemeTask, status: Int, json: [String: Any], url: URL? = nil) {
-        let payload = (try? JSONSerialization.data(withJSONObject: json)) ?? Data("{}".utf8)
-        deliver(task, status: status, payload: payload, contentType: "application/json; charset=utf-8", url: url)
-    }
-
-    /// 原样投递响应体（歌词代理用：可能是歌词文本，也可能是封面图字节）。
-    private static func deliver(_ task: WKURLSchemeTask, status: Int, payload: Data, contentType: String, url: URL? = nil) {
-        let target = url ?? task.request.url ?? URL(string: "https://api.ncm.local/")
-        guard let target,
-              let response = HTTPURLResponse(
-                url: target,
-                statusCode: status,
-                httpVersion: "HTTP/1.1",
-                headerFields: [
-                    "Content-Type": contentType,
-                    "Content-Length": "\(payload.count)",
-                    "Cache-Control": "no-store",
-                    "Access-Control-Allow-Origin": "*"
-                ]
-              ) else {
-            DispatchQueue.main.async { task.didFailWithError(URLError(.badServerResponse)) }
-            return
-        }
-        DispatchQueue.main.async {
-            task.didReceive(response)
-            task.didReceive(payload)
-            task.didFinish()
-        }
-    }
 
     private static func query(_ url: URL) -> [String: String] {
         guard let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else {
