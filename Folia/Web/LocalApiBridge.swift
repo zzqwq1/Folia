@@ -21,7 +21,7 @@ final class LocalApiBridge {
 
     /// 电脑上跑的服务端经 Cloudflare 隧道暴露的公网地址。
     /// 换隧道/换电脑时只改这一行，然后重新打包。
-    static let upstream = "https://candy-fancy-xhtml-boundaries.trycloudflare.com"
+    static let upstream = "https://reproductive-advertiser-merger-treatment.trycloudflare.com"
 
     private let origin = "https://music.163.com"
     /// 串行队列：这里既是 cookie 表的唯一访问点，也是「同一 task 只回调一次」的判定点。
