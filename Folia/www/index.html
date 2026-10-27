@@ -557,6 +557,7 @@ var FOLIA_LATEST_VERSION = '2.0';
   window.__foliaOfflineProvidersInstalled = true;
 
   var PROVIDERS = [
+    { id: 'netease', nickname: '网易云用户' },
     { id: 'qq', nickname: 'QQ 音乐用户' },
     { id: 'kugou', nickname: '酷狗用户' },
     { id: 'bodian', nickname: '波点用户' }
@@ -579,35 +580,86 @@ var FOLIA_LATEST_VERSION = '2.0';
   }
 
   var QR_TEXT = {
+    netease: 'https://music.163.com/',
     qq: 'https://y.qq.com/',
     kugou: 'https://www.kugou.com/',
     bodian: 'https://www.bodian.music/'
   };
 
+  // 前端各 provider 真实发出去的 URL 形状（从 providerRegistry 里逐条核对出来的）：
+  //   酷狗  `/api/kugou/login/qr/key?timestamp=...`   → REST 路径，来自 Ws 映射表
+  //   QQ    `/api/qq/login/qr/key?channel=qq&timestamp=...` → 同上，来自 Xu 映射表
+  //   波点  `/api/bodian?op=qr_key&uid=-1&token=...`   → op 走 query，路径只有 /api/bodian
+  // 之前只认 `/api/<id>/login_qr_key` 这种接口名，三种形状一个都没命中，
+  // 请求全部漏到隧道并 404，所以四个平台都弹不出二维码。这里按真实形状重新匹配。
+  var ROUTE_BY_PATH = {
+    '/login/qr/key': 'login_qr_key',
+    '/login/qr/create': 'login_qr_create',
+    '/login/qr/check': 'login_qr_check',
+    '/login/qr/cancel': 'login_qr_cancel',
+    '/login/channels': 'login_channels',
+    '/login/status': 'login_status',
+    '/login/refresh': 'login_status',
+    '/logout': 'logout'
+  };
+  // 波点的 op 取值；qr_create 在 Ph() 里没被改写，原样传 'qr_create'。
+  var ROUTE_BY_OP = {
+    qr_key: 'login_qr_key',
+    qr_create: 'login_qr_create',
+    qr_check: 'login_qr_check',
+    qr_cancel: 'login_qr_cancel',
+    login_status: 'login_status',
+    logout: 'logout'
+  };
+
+  function parseQuery(url) {
+    var query = {};
+    var qs = url.indexOf('?');
+    if (qs < 0) return query;
+    var tail = url.slice(qs + 1).split('#')[0];
+    var pairs = tail.split('&');
+    for (var i = 0; i < pairs.length; i += 1) {
+      var pair = pairs[i];
+      if (!pair) continue;
+      var eq = pair.indexOf('=');
+      var k = eq < 0 ? pair : pair.slice(0, eq);
+      var v = eq < 0 ? '' : pair.slice(eq + 1);
+      try {
+        query[decodeURIComponent(k)] = decodeURIComponent(v.replace(/\+/g, ' '));
+      } catch (e) {
+        query[k] = v;
+      }
+    }
+    return query;
+  }
+
   function match(url) {
     if (typeof url !== 'string') return null;
-    // 桥接层会把请求补成 folia://app/api/qq/xxx，也可能带 origin，这里只认路径片段。
-    // 同时把 query 解出来：QQ 的 login_qr_key 要带 channel=qq|wechat 才会给 key。
-    var qs = url.indexOf('?');
     var clean = url.split('?')[0].split('#')[0];
-    var query = {};
-    if (qs >= 0) {
-      var tail = url.slice(qs + 1).split('#')[0];
-      tail.split('&').forEach(function (pair) {
-        if (!pair) return;
-        var eq = pair.indexOf('=');
-        var k = eq < 0 ? pair : pair.slice(0, eq);
-        var v = eq < 0 ? '' : pair.slice(eq + 1);
-        try { query[decodeURIComponent(k)] = decodeURIComponent(v.replace(/\+/g, ' ')); } catch (e) { query[k] = v; }
-      });
-    }
+    var query = parseQuery(url);
     for (var i = 0; i < PROVIDERS.length; i += 1) {
       var p = PROVIDERS[i];
-      var marker = '/api/' + p.id + '/';
-      var at = clean.indexOf(marker);
-      if (at >= 0) {
-        var rest = clean.slice(at + marker.length).replace(/^\/+/, '');
-        return { provider: p, route: rest.split('/')[0], query: query };
+      var base = '/api/' + p.id;
+      var at = clean.indexOf(base);
+      if (at < 0) continue;
+      var rest = clean.slice(at + base.length);
+      // 必须正好是 /api/<id> 或 /api/<id>/...，避免 /api/qq2 这类误命中。
+      if (rest !== '' && rest.charAt(0) !== '/') continue;
+      rest = rest.replace(/\/+$/, '');
+
+      if (rest === '' || rest === '/') {
+        // 波点形状：/api/bodian?op=qr_key
+        var opRoute = ROUTE_BY_OP[String(query.op || '')];
+        if (opRoute) return { provider: p, route: opRoute, query: query };
+        continue;
+      }
+      // 酷狗 / QQ 形状：/api/qq/login/qr/key
+      var pathRoute = ROUTE_BY_PATH[rest];
+      if (pathRoute) return { provider: p, route: pathRoute, query: query };
+      // 兼容接口名直连的老形状：/api/qq/login_qr_key
+      var nameRoute = rest.replace(/^\//, '');
+      if (nameRoute.indexOf('login_') === 0 || nameRoute === 'logout') {
+        return { provider: p, route: nameRoute, query: query };
       }
     }
     return null;
@@ -1052,11 +1104,28 @@ var FOLIA_LATEST_VERSION = '2.0';
       state.channel = query.channel || '';
       state.createdAt = Date.now();
       save(provider.id, state);
-      return { code: 200, data: { unikey: state.key, key: state.key } };
+      // QQ 读 data.unikey；酷狗读 qrcode / qrkey / key / ticket（顶层或 data 里都扫）；
+      // 波点读顶层 key。三套字段全给，谁都拿得到。
+      return {
+        code: 200,
+        key: state.key,
+        qrcode: state.key,
+        qrkey: state.key,
+        data: { unikey: state.key, key: state.key, qrcode: state.key, qrkey: state.key }
+      };
     }
     if (route === 'login_qr_create') {
       var image = qrImage(QR_TEXT[provider.id] || provider.id);
-      return { code: 200, data: { qrimg: image, imageUrl: image, qrcode: image, base64: image, url: image } };
+      // 波点从顶层 imageUrl 取；QQ 从 data.qrimg 取；酷狗从 base64/qrimg/qrcode/url 取。
+      return {
+        code: 200,
+        imageUrl: image,
+        qrimg: image,
+        base64: image,
+        qrcode: image,
+        url: image,
+        data: { qrimg: image, imageUrl: image, base64: image, qrcode: image, url: image }
+      };
     }
     if (route === 'login_qr_check') {
       if (!state.userId) {
@@ -1064,10 +1133,14 @@ var FOLIA_LATEST_VERSION = '2.0';
         state.nickname = provider.nickname;
       }
       save(provider.id, state);
-      // 网易云读 data.status（4=成功），QQ 读顶层 code（803=成功），两边都给。
+      // 网易读 data.status（4=成功），QQ 读顶层 code（803=成功），
+      // 酷狗读 data/top 层的 status 或 code（4=成功）。三种都满足。
       return {
         code: 803,
         status: 4,
+        key: state.key,
+        token: 'offline-' + provider.id,
+        cookie: 'offline=' + provider.id,
         data: {
           code: 803,
           status: 4,
@@ -1075,19 +1148,23 @@ var FOLIA_LATEST_VERSION = '2.0';
           cookie: 'offline=' + provider.id,
           profile: profile(provider, state)
         },
-        cookie: 'offline=' + provider.id,
         profile: profile(provider, state)
       };
     }
     if (route === 'login_status') {
       if (!state.userId) return { code: 301, data: null };
+      var statusProfile = profile(provider, state);
       return {
         code: 200,
+        // 网易的 getLoginStatus 读顶层 profile，QQ/酷狗的登录态读取路径不同，两处都给。
+        profile: statusProfile,
+        account: statusProfile,
         data: {
           code: 200,
           status: 4,
           token: 'offline-' + provider.id,
-          profile: profile(provider, state)
+          profile: statusProfile,
+          account: statusProfile
         }
       };
     }
