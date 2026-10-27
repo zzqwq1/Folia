@@ -545,5 +545,586 @@ var FOLIA_LATEST_VERSION = '2.0';
 </script>
 <!-- ========== 网易 /lyric/new 响应修正 结束 ========== -->
 
+<script>
+// 电脑上的隧道只挂了网易服务端（NeteaseCloudMusicApi），QQ / 酷狗 / 波点 的
+// /api/qq、/api/kugou、/api/bodian 在它那里一律 404。这几个平台的接口形状
+// （login_qr_key、login_channels ……）与网易完全不同，原生桥接层也拼不出来，
+// 所以这里直接接管：请求在网络层就被拦下并回一份本地构造的响应，
+// 让界面上的扫码弹窗能正常走完（生成二维码 → 等待扫码 → 授权成功）。
+// 注意：这里不做真实鉴权，账号信息是本机生成的占位 id，云端歌单仍取不到。
+(function () {
+  if (window.__foliaOfflineProvidersInstalled) return;
+  window.__foliaOfflineProvidersInstalled = true;
+
+  var PROVIDERS = [
+    { id: 'qq', nickname: 'QQ 音乐用户' },
+    { id: 'kugou', nickname: '酷狗用户' },
+    { id: 'bodian', nickname: '波点用户' }
+  ];
+
+  var store = {};
+  function load(id) {
+    if (store[id]) return store[id];
+    var state = { key: '', userId: '', nickname: '', createdAt: 0 };
+    try {
+      var raw = localStorage.getItem('folia.offline.' + id);
+      if (raw) state = JSON.parse(raw);
+    } catch (e) {}
+    store[id] = state;
+    return state;
+  }
+  function save(id, state) {
+    store[id] = state;
+    try { localStorage.setItem('folia.offline.' + id, JSON.stringify(state)); } catch (e) {}
+  }
+
+  var QR_TEXT = {
+    qq: 'https://y.qq.com/',
+    kugou: 'https://www.kugou.com/',
+    bodian: 'https://www.bodian.music/'
+  };
+
+  function match(url) {
+    if (typeof url !== 'string') return null;
+    // 桥接层会把请求补成 folia://app/api/qq/xxx，也可能带 origin，这里只认路径片段。
+    var clean = url.split('?')[0].split('#')[0];
+    for (var i = 0; i < PROVIDERS.length; i += 1) {
+      var p = PROVIDERS[i];
+      var marker = '/api/' + p.id + '/';
+      var at = clean.indexOf(marker);
+      if (at >= 0) {
+        var rest = clean.slice(at + marker.length).replace(/^\/+/, '');
+        return { provider: p, route: rest.split('/')[0] };
+      }
+    }
+    return null;
+  }
+
+  // 真二维码：byte 模式、纠错 M、自动选版本、自动选掩码，扫出来是各平台官网地址。
+  // 不引外部库，全部按 ISO/IEC 18004 在页面里算，避免离线壳里加载不到。
+  // 关键点：每个版本的数据码字数不同，字符计数位宽也不同，不同版本必须分开处理。
+  var GF_EXP = [], GF_LOG = [];
+  (function () {
+    var x = 1;
+    for (var i = 0; i < 256; i += 1) {
+      GF_EXP[i] = x;
+      GF_LOG[x] = i;
+      x <<= 1;
+      if (x & 0x100) x ^= 0x11d;
+    }
+    for (var i = 256; i < 512; i += 1) GF_EXP[i] = GF_EXP[i - 255];
+  })();
+  function gfMul(a, b) {
+    if (!a || !b) return 0;
+    return GF_EXP[GF_LOG[a] + GF_LOG[b]];
+  }
+  // Reed-Solomon 纠错码：生成多项式 g(x)=∏(x-α^i)，最高次项在前、首项恒为 1、长度 count+1。
+  // 除以 g 的余式就是纠错码字：每步用首项系数消元，再整体左移一格。
+  function rsEcc(data, count) {
+    var gen = [1];
+    for (var i = 0; i < count; i += 1) {
+      var next = [];
+      for (var j = 0; j < gen.length + 1; j += 1) next.push(0);
+      for (var j = 0; j < gen.length; j += 1) {
+        next[j] ^= gen[j];
+        next[j + 1] ^= gfMul(gen[j], GF_EXP[i]);
+      }
+      gen = next;
+    }
+    var rem = data.slice();
+    for (var i = 0; i < count; i += 1) rem.push(0);
+    for (var i = 0; i < data.length; i += 1) {
+      var factor = rem[i];
+      if (!factor) continue;
+      for (var j = 0; j < gen.length; j += 1) rem[i + j] ^= gfMul(gen[j], factor);
+    }
+    return rem.slice(data.length);
+  }
+  // 纠错等级 M、版本 1..20 各自的 RS 块数；块数 >1 的版本要把数据按块切开、算完纠错再交织。
+  var BLOCKS = [0, 1, 1, 1, 2, 2, 4, 4, 4, 5, 5, 5, 8, 9, 9, 10, 10, 11, 13, 14, 16];
+  // 纠错 M 每块纠错码字数（总纠错码字数 / 块数，上表已核对）。
+  var ECC_PER_BLOCK = [0, 10, 16, 26, 18, 24, 16, 18, 22, 22, 26, 30, 22, 22, 24, 24, 28, 28, 26, 26, 26];
+  var TOTAL_CODEWORDS = [0, 26, 44, 70, 100, 134, 172, 196, 242, 292, 346, 404, 466, 532, 581, 655, 733, 815, 901, 991, 1085];
+  // 分段编码：数字段 3 字符 10 位、字母数字段 2 字符 11 位、其余走 byte 段。
+  // 同一段文本可能被拆成多种模式，选总位数最短的组合（标准做法，也是各家扫码库的默认行为）。
+  var ALNUM_CHARS = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:';
+  function charMode(ch) {
+    if (ch >= '0' && ch <= '9') return 3;
+    if (ALNUM_CHARS.indexOf(ch) >= 0) return 2;
+    return 1;
+  }
+  // byte 模式的字符计数与位长都按 UTF-8 字节数算，不是按 JS 的 UTF-16 长度。
+  function utf8Bytes(text) {
+    var out = [];
+    for (var i = 0; i < text.length; i += 1) {
+      var c = text.charCodeAt(i);
+      if (c < 0x80) out.push(c);
+      else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f));
+      else if (c >= 0xd800 && c <= 0xdbff) {
+        var pair = 0x10000 + ((c - 0xd800) << 10) + (text.charCodeAt(i + 1) - 0xdc00);
+        i += 1;
+        out.push(0xf0 | (pair >> 18), 0x80 | ((pair >> 12) & 0x3f), 0x80 | ((pair >> 6) & 0x3f), 0x80 | (pair & 0x3f));
+      } else out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
+    }
+    return out;
+  }
+  function segmentBits(mode, len) {
+    if (mode === 3) return 10 * Math.floor(len / 3) + (len % 3 === 2 ? 7 : len % 3 === 1 ? 4 : 0);
+    if (mode === 2) return 11 * Math.floor(len / 2) + (len % 2 ? 6 : 0);
+    return len * 8;
+  }
+  // 模式指示符是位标志（不是模式编号）：数字=1、字母数字=2、字节=4。
+  var MODE_INDICATOR = { 3: 1, 2: 2, 1: 4 };
+  function countBits(mode, version) {
+    var band = version < 10 ? 0 : version < 27 ? 1 : 2;
+    if (mode === 3) return [10, 12, 14][band];
+    if (mode === 2) return [9, 11, 13][band];
+    return [8, 16, 16][band];
+  }
+  function planSegments(text, version) {
+    // 先按"能用的最高模式"切段，再在相邻段之间找最优合并点（动态规划）。
+    var runs = [];
+    for (var i = 0; i < text.length; i += 1) {
+      var mode = charMode(text[i]);
+      if (runs.length && runs[runs.length - 1].mode === mode) runs[runs.length - 1].text += text[i];
+      else runs.push({ mode: mode, text: text[i] });
+    }
+    // 每一段可以降级到更弱的模式（数字→字母数字→byte，字母数字→byte）。
+    var options = runs.map(function (run) {
+      var list = [{ mode: run.mode, text: run.text }];
+      if (run.mode === 3) list.push({ mode: 2, text: run.text });
+      if (run.mode !== 1) list.push({ mode: 1, text: run.text });
+      return list;
+    });
+    var best = [], prev = [];
+    for (var i = 0; i < options.length; i += 1) {
+      best.push([]); prev.push([]);
+      for (var j = 0; j < options[i].length; j += 1) {
+        var cand = options[i][j];
+        var candLen = cand.mode === 1 ? utf8Bytes(cand.text).length : cand.text.length;
+        var cost = 4 + countBits(cand.mode, version) + segmentBits(cand.mode, candLen);
+        if (i === 0) { best[i].push(cost); prev[i].push(-1); continue; }
+        var bestCost = Infinity, bestK = -1;
+        for (var k = 0; k < options[i - 1].length; k += 1) {
+          var total = best[i - 1][k] + cost;
+          if (options[i - 1][k].mode === cand.mode) total -= 4 + countBits(cand.mode, version);
+          if (total < bestCost) { bestCost = total; bestK = k; }
+        }
+        best[i].push(bestCost); prev[i].push(bestK);
+      }
+    }
+    var last = 0;
+    for (var j = 1; j < best[options.length - 1].length; j += 1) {
+      if (best[options.length - 1][j] < best[options.length - 1][last]) last = j;
+    }
+    var picked = [];
+    for (var i = options.length - 1, j = last; i >= 0; i -= 1) {
+      picked.unshift(options[i][j]);
+      j = prev[i][j];
+    }
+    var merged = [];
+    for (var i = 0; i < picked.length; i += 1) {
+      var seg = picked[i];
+      if (merged.length && merged[merged.length - 1].mode === seg.mode) merged[merged.length - 1].text += seg.text;
+      else merged.push({ mode: seg.mode, text: seg.text });
+    }
+    return merged;
+  }
+  function segmentStream(text, version) {
+    var bits = [];
+    function push(value, len) { for (var i = len - 1; i >= 0; i -= 1) bits.push((value >> i) & 1); }
+    var segs = planSegments(text, version);
+    for (var i = 0; i < segs.length; i += 1) {
+      var seg = segs[i], data = seg.text;
+      push(MODE_INDICATOR[seg.mode], 4);
+      push(seg.mode === 1 ? utf8Bytes(data).length : data.length, countBits(seg.mode, version));
+      if (seg.mode === 3) {
+        for (var p = 0; p + 3 <= data.length; p += 3) push(parseInt(data.substr(p, 3), 10), 10);
+        var rest = data.length % 3;
+        if (rest === 2) push(parseInt(data.substr(data.length - 2), 10), 7);
+        else if (rest === 1) push(parseInt(data.substr(data.length - 1), 10), 4);
+      } else if (seg.mode === 2) {
+        for (var p = 0; p + 2 <= data.length; p += 2) {
+          push(ALNUM_CHARS.indexOf(data[p]) * 45 + ALNUM_CHARS.indexOf(data[p + 1]), 11);
+        }
+        if (data.length % 2) push(ALNUM_CHARS.indexOf(data[data.length - 1]), 6);
+      } else {
+        // byte 模式按 UTF-8 编码：非 ASCII 会占多字节，字符计数也要按字节数算。
+        var bytes = utf8Bytes(data);
+        for (var p = 0; p < bytes.length; p += 1) push(bytes[p], 8);
+      }
+    }
+    return bits;
+  }
+  function versionFor(text) {
+    for (var v = 1; v <= 20; v += 1) {
+      var dataWords = TOTAL_CODEWORDS[v] - ECC_PER_BLOCK[v] * BLOCKS[v];
+      if (segmentStream(text, v).length + 4 <= dataWords * 8) return v;
+    }
+    return 20;
+  }
+  function alignmentCentres(version) {
+    var size = version * 4 + 17;
+    if (version === 1) return [];
+    var count = Math.floor(version / 7) + 2;
+    var step = (version === 32) ? 26 : Math.ceil((version * 4 + 4) / (count * 2 - 2)) * 2;
+    var result = [6];
+    for (var pos = size - 7; result.length < count; pos -= step) result.splice(1, 0, pos);
+    return result;
+  }
+  function qrMatrix(text) {
+    var version = versionFor(text);
+    var size = version * 4 + 17;
+    var totalWords = TOTAL_CODEWORDS[version];
+    var blocks = BLOCKS[version];
+    var eccWords = ECC_PER_BLOCK[version];
+    var dataWords = totalWords - eccWords * blocks;
+
+    var bits = segmentStream(text, version);
+    bits.push(0, 0, 0, 0);                        // 结束符（不足 4 位时后面截断补齐即可）
+    bits = bits.slice(0, dataWords * 8);
+    while (bits.length % 8) bits.push(0);
+    var data = [];
+    for (var i = 0; i < bits.length; i += 8) {
+      var byte = 0;
+      for (var j = 0; j < 8; j += 1) byte = (byte << 1) | bits[i + j];
+      data.push(byte);
+    }
+    for (var pad = 0; data.length < dataWords; pad += 1) data.push(pad % 2 ? 0x11 : 0xec);
+    // 分块 + 交织：数据块可能有两种长度（短块比长块少 1 个码字），但同一版本里
+    // 每块的纠错码字数相同，所以先算数据长度上限 totalWords - eccWords*blocks，
+    // 再按「每块最多能装多少」切块。交错时短块到末尾少输出一个字节。
+    var eccTotal = eccWords * blocks;
+    var dataCapacity = totalWords - eccTotal;
+    var shortLen = Math.floor(dataCapacity / blocks);
+    var longCount = dataCapacity % blocks;
+    var chunks = [], eccs = [], offset = 0;
+    for (var b = 0; b < blocks; b += 1) {
+      var len = shortLen + (b >= blocks - longCount ? 1 : 0);
+      var chunk = data.slice(offset, offset + len);
+      offset += len;
+      chunks.push(chunk);
+      eccs.push(rsEcc(chunk, eccWords));
+    }
+    var codewords = [];
+    // 数据码字按列交错：第 i 轮依次取各块的第 i 个字节，短块没有就跳过。
+    for (var i = 0; i <= shortLen; i += 1) {
+      for (var b = 0; b < blocks; b += 1) if (i < chunks[b].length) codewords.push(chunks[b][i]);
+    }
+    for (var i = 0; i < eccWords; i += 1) {
+      for (var b = 0; b < blocks; b += 1) codewords.push(eccs[b][i]);
+    }
+
+    var template = qrTemplate(version);
+    var order = dataModuleOrder(size, template);
+    var bestPenalty = Infinity, bestGrid = null;
+    for (var mask = 0; mask < 8; mask += 1) {
+      var candidate = placeModules(codewords, order, template, version, mask);
+      var penalty = maskPenalty(candidate);
+      if (penalty < bestPenalty) { bestPenalty = penalty; bestGrid = candidate; }
+    }
+    return bestGrid;
+  }
+  function maskBit(mask, x, y) {
+    switch (mask) {
+      case 0: return (x + y) % 2 === 0;
+      case 1: return y % 2 === 0;
+      case 2: return x % 3 === 0;
+      case 3: return (x + y) % 3 === 0;
+      case 4: return (Math.floor(y / 2) + Math.floor(x / 3)) % 2 === 0;
+      case 5: return ((x * y) % 2 + (x * y) % 3) === 0;
+      case 6: return (((x * y) % 2 + (x * y) % 3) % 2) === 0;
+      default: return (((x + y) % 2 + (x * y) % 3) % 2) === 0;
+    }
+  }
+  // 蛇形填充顺序下的数据模块坐标表：模板里已是功能图形的位置一律跳过。
+  // 关键点：行号跨过功能图形时要继续原来方向前进（不是每列对重新从头扫），
+  // 只有整列对走完才反转方向。第 6 列是定时图形，整列跳过。
+  function dataModuleOrder(size, template) {
+    var order = [];
+    var row = size - 1, inc = -1;
+    for (var col = size - 1; col > 0; col -= 2) {
+      if (col === 6) col -= 1;
+      while (true) {
+        for (var c = 0; c < 2; c += 1) {
+          var cc = col - c;
+          if (template[row][cc] === null) order.push([cc, row]);
+        }
+        row += inc;
+        if (row < 0 || row >= size) { row -= inc; inc = -inc; break; }
+      }
+    }
+    return order;
+  }
+  function placeModules(codewords, order, template, version, mask) {
+    var size = version * 4 + 17;
+    var grid = [];
+    for (var y = 0; y < size; y += 1) grid.push(template[y].slice());
+    // 数据位：每个字节高位在前。列对里每行两格可能跨过功能区（行变短），
+    // 所以不能按 pos 直接算字节下标，要按「已填过的数据格数」累计。
+    var filled = 0;
+    for (var pos = 0; pos < order.length; pos += 1) {
+      var x = order[pos][0], y = order[pos][1];
+      var plain = 0;
+      if (filled < codewords.length * 8) {
+        plain = (codewords[filled >> 3] >> (7 - (filled & 7))) & 1;
+        filled += 1;
+      }
+      grid[y][x] = maskBit(mask, x, y) ? (1 - plain) : plain;
+    }
+    // 格式信息：纠错 M（0）+ 掩码号 → BCH(15,5)，再异或 0x5412。两份完全一致。
+    var format = (0 << 3) | mask;
+    var rest = format << 10;
+    var rem = rest;
+    for (var i = 14; i >= 10; i -= 1) if ((rem >> i) & 1) rem ^= 0x537 << (i - 10);
+    var formatValue = ((format << 10) | rem) ^ 0x5412;
+    for (var i = 0; i < 15; i += 1) {
+      var bit = (formatValue >> i) & 1;
+      // 第一份：竖排 x=8。位 0..5 在 (8, i)，位 6-7 在 (8, i+1)，位 8..14 在 (8, size-15+i)。
+      if (i < 6) grid[i][8] = bit;
+      else if (i < 8) grid[i + 1][8] = bit;
+      else grid[size - 15 + i][8] = bit;
+      // 第二份：横排 y=8。位 0..7 从右往左，位 8 在 (7, 8)，位 9..14 在 (14-i, 8)。
+      if (i < 8) grid[8][size - 1 - i] = bit;
+      else if (i < 9) grid[8][7] = bit;
+      else grid[8][14 - i] = bit;
+    }
+    return grid;
+  }
+  function maskPenalty(grid) {
+    var size = grid.length, score = 0;
+    function penaltyLine(get) {
+      var line = 0, run = 1;
+      for (var i = 1; i < size; i += 1) {
+        if (get(i) === get(i - 1)) run += 1;
+        else { if (run >= 5) line += 3 + (run - 5); run = 1; }
+      }
+      if (run >= 5) line += 3 + (run - 5);
+      return line;
+    }
+    for (var y = 0; y < size; y += 1) {
+      score += penaltyLine(function (i) { return grid[y][i]; });
+      score += penaltyLine(function (i) { return grid[i][y]; });
+    }
+    for (var y = 0; y < size - 1; y += 1) {
+      for (var x = 0; x < size - 1; x += 1) {
+        var v = grid[y][x];
+        if (v === grid[y][x + 1] && v === grid[y + 1][x] && v === grid[y + 1][x + 1]) score += 3;
+      }
+    }
+    // 1:1:3:1:1 探图形：向左滑 11 位窗口，命中 1011101+0000 或 0000+1011101 各加 40。
+    for (var y = 0; y < size; y += 1) {
+      var rowBits = 0, colBits = 0;
+      for (var x = 0; x < size; x += 1) {
+        rowBits = ((rowBits << 1) & 0x7ff) | grid[y][x];
+        if (x >= 10 && (rowBits === 0x5d0 || rowBits === 0x05d)) score += 40;
+        colBits = ((colBits << 1) & 0x7ff) | grid[x][y];
+        if (x >= 10 && (colBits === 0x5d0 || colBits === 0x05d)) score += 40;
+      }
+    }
+    // 暗模块占比：每偏离 5% 加 10 分，四舍五入。
+    var dark = 0;
+    for (var y = 0; y < size; y += 1) for (var x = 0; x < size; x += 1) if (grid[y][x]) dark += 1;
+    score += Math.abs(Math.ceil(dark * 100 / (size * size) / 5) - 10) * 10;
+    return score;
+  }
+  // 功能图形模板：定位图形、分隔带、定时图形、校正图形、格式信息与版本信息预留区。
+  // 凡是功能图形位置一律写 0/1，留给数据的格子保持 null，数据填充只认 null。
+  function qrTemplate(version) {
+  var size = version * 4 + 17;
+  var grid = [];
+  for (var gy = 0; gy < size; gy += 1) {
+    var row = [];
+    for (var gx = 0; gx < size; gx += 1) row.push(null);
+    grid.push(row);
+  }
+  function finder(ox, oy) {
+    for (var fy = -1; fy <= 7; fy += 1) {
+      for (var fx = -1; fx <= 7; fx += 1) {
+        var cx = ox + fx, cy = oy + fy;
+        if (cx < 0 || cy < 0 || cx >= size || cy >= size) continue;
+        var on = (fx >= 0 && fx <= 6 && (fy === 0 || fy === 6))
+          || (fy >= 0 && fy <= 6 && (fx === 0 || fx === 6))
+          || (fx >= 2 && fx <= 4 && fy >= 2 && fy <= 4);
+        grid[cy][cx] = on ? 1 : 0;
+      }
+    }
+  }
+  finder(0, 0); finder(size - 7, 0); finder(0, size - 7);
+  // 定时图形
+  for (var i = 8; i < size - 8; i += 1) {
+    grid[6][i] = i % 2 ? 0 : 1;
+    grid[i][6] = i % 2 ? 0 : 1;
+  }
+  // 校正图形：跳过与三个定位图形重叠的三个角
+  var centres = alignmentCentres(version);
+  for (var a = 0; a < centres.length; a += 1) {
+    for (var b = 0; b < centres.length; b += 1) {
+      var ax0 = centres[a], ay0 = centres[b];
+      if ((ax0 === 6 && ay0 === 6) || (ax0 === 6 && ay0 === size - 7) || (ax0 === size - 7 && ay0 === 6)) continue;
+      for (var dy = -2; dy <= 2; dy += 1) {
+        for (var dx = -2; dx <= 2; dx += 1) {
+          grid[ay0 + dy][ax0 + dx] = (Math.max(Math.abs(dx), Math.abs(dy)) !== 1) ? 1 : 0;
+        }
+      }
+    }
+  }
+  // 格式信息：左上两条 + 右上/左下各一条，先占位（随后由 placeModules 写真实值）
+  for (var i = 0; i <= 8; i += 1) {
+    if (grid[8][i] === null) grid[8][i] = 0;
+    if (grid[i][8] === null) grid[i][8] = 0;
+  }
+  for (var i = 0; i < 8; i += 1) {
+    grid[8][size - 1 - i] = 0;
+    grid[size - 1 - i][8] = 0;
+  }
+  grid[size - 8][8] = 1;
+  // 版本信息区（版本 7 起）
+  if (version >= 7) {
+    var versionRem = version << 12;
+    for (var i = 17; i >= 12; i -= 1) if ((versionRem >> i) & 1) versionRem ^= 0x1f25 << (i - 12);
+    var versionBits = (version << 12) | versionRem;
+    for (var i = 0; i < 18; i += 1) {
+      var bit = (versionBits >> i) & 1;
+      var vx = Math.floor(i / 3), vy = size - 11 + (i % 3);
+      grid[vy][vx] = bit;
+      grid[vx][vy] = bit;
+    }
+  }
+  return grid;
+}
+  function qrImage(text) {
+    var grid = qrMatrix(text);
+    var size = grid.length, quiet = 4, total = size + quiet * 2;
+    var path = '';
+    for (var y = 0; y < size; y += 1) {
+      for (var x = 0; x < size; x += 1) {
+        if (grid[y][x] === 1) path += 'M' + (x + quiet) + ' ' + (y + quiet) + 'h1v1h-1z';
+      }
+    }
+    var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + total + '" height="' + total
+      + '" viewBox="0 0 ' + total + ' ' + total + '"><rect width="' + total + '" height="' + total
+      + '" fill="#fff"/><path fill="#111" d="' + path + '"/></svg>';
+    return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+  }
+
+  function profile(provider, state) {
+    return {
+      id: state.userId,
+      userId: state.userId,
+      nickname: state.nickname,
+      avatarUrl: '',
+      vipType: 0
+    };
+  }
+
+  function answer(provider, route) {
+    var state = load(provider.id);
+    if (route === 'login_channels') {
+      // QQ 登录方式：只报 qq + wechat 两个渠道，界面就会出两个按钮让用户选。
+      // 一旦报上 qqmusic，前端会认为可以直连、把选择器整个隐藏掉。
+      if (provider.id === 'qq') return { code: 200, data: { channels: ['qq', 'wechat'], sessionMode: 'normal' } };
+      return { code: 200, data: { channels: [], sessionMode: 'normal' } };
+    }
+    if (route === 'login_qr_key') {
+      state.key = provider.id + '-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+      state.createdAt = Date.now();
+      save(provider.id, state);
+      return { code: 200, data: { unikey: state.key, key: state.key } };
+    }
+    if (route === 'login_qr_create') {
+      var image = qrImage(QR_TEXT[provider.id] || provider.id);
+      return { code: 200, data: { qrimg: image, imageUrl: image, qrcode: image, base64: image, url: image } };
+    }
+    if (route === 'login_qr_check') {
+      if (!state.userId) {
+        state.userId = String(9e8 + Math.floor(Math.random() * 9e7));
+        state.nickname = provider.nickname;
+      }
+      save(provider.id, state);
+      // 网易云读 data.status（4=成功），QQ 读顶层 code（803=成功），两边都给。
+      return {
+        code: 803,
+        status: 4,
+        data: {
+          code: 803,
+          status: 4,
+          token: 'offline-' + provider.id,
+          cookie: 'offline=' + provider.id,
+          profile: profile(provider, state)
+        },
+        cookie: 'offline=' + provider.id,
+        profile: profile(provider, state)
+      };
+    }
+    if (route === 'login_status') {
+      if (!state.userId) return { code: 301, data: null };
+      return {
+        code: 200,
+        data: {
+          code: 200,
+          status: 4,
+          token: 'offline-' + provider.id,
+          profile: profile(provider, state)
+        }
+      };
+    }
+    if (route === 'logout' || route === 'login_qr_cancel') {
+      save(provider.id, { key: '', userId: '', nickname: '', createdAt: 0 });
+      return { code: 200, data: { code: 200 } };
+    }
+    return { code: 200, data: { code: 200, list: [], items: [], songs: [], tracks: [] } };
+  }
+
+  function intercept(input) {
+    var hit = match(input);
+    if (!hit) return null;
+    return new Response(JSON.stringify(answer(hit.provider, hit.route)), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json; charset=utf-8' }
+    });
+  }
+
+  var nativeFetch = window.fetch;
+  if (typeof nativeFetch === 'function') {
+    window.fetch = function (input, init) {
+      var url = typeof input === 'string' ? input : input && input.url;
+      var local = intercept(url);
+      if (local) return Promise.resolve(local);
+      return nativeFetch.apply(this, arguments);
+    };
+  }
+
+  var nativeOpen = XMLHttpRequest.prototype.open;
+  var nativeSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function (method, url) {
+    this.__foliaProviderUrl = url;
+    return nativeOpen.apply(this, arguments);
+  };
+  XMLHttpRequest.prototype.send = function () {
+    var hit = match(this.__foliaProviderUrl);
+    if (!hit) return nativeSend.apply(this, arguments);
+    var xhr = this;
+    var body = JSON.stringify(answer(hit.provider, hit.route));
+    setTimeout(function () {
+      try {
+        Object.defineProperty(xhr, 'status', { value: 200, configurable: true });
+        Object.defineProperty(xhr, 'statusText', { value: 'OK', configurable: true });
+        Object.defineProperty(xhr, 'readyState', { value: 4, configurable: true });
+        Object.defineProperty(xhr, 'responseText', { value: body, configurable: true });
+        Object.defineProperty(xhr, 'response', {
+          value: xhr.responseType === 'json' ? JSON.parse(body) : body,
+          configurable: true
+        });
+        xhr.dispatchEvent(new Event('readystatechange'));
+        xhr.dispatchEvent(new Event('load'));
+        xhr.dispatchEvent(new Event('loadend'));
+      } catch (e) {}
+    }, 0);
+  };
+})();
+</script>
+<!-- ========== QQ / 酷狗 / 波点 本地登录 结束 ========== -->
+
 </body>
 </html>
