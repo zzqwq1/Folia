@@ -24,11 +24,13 @@ enum QRTool {
         let scaled = output.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
 
         // 二维码规范要求四周留 4 个模块宽的静区（quiet zone）。
-        // 之前只做了同尺寸的白色底，等于没有留白，深色主题下更是贴着边，
-        // 扫码器识别不出来；这里真的把画布往外扩 4 个模块再铺白。
-        let quiet = scaled.extent.width / output.extent.width * 4
+        // 之前只做了同尺寸的白色底，等于没有留白，扫码器识别不出来。
+        // CIImage 里透明区的 RGB 是 0，直接铺白会把透明当成黑色画出来，
+        // 所以先用白色底铺满整张画布，再把二维码合成上去。
+        let quiet = scale * 4
         let canvas = scaled.extent.insetBy(dx: -quiet, dy: -quiet)
-        let padded = scaled.composited(over: CIImage(color: .white).cropped(to: canvas))
+        let white = CIImage(color: .white).cropped(to: canvas)
+        let padded = scaled.composited(over: white)
         guard let cgImage = context.createCGImage(padded, from: canvas) else { return nil }
         guard let png = UIImage(cgImage: cgImage).pngData() else { return nil }
         return "data:image/png;base64," + png.base64EncodedString()

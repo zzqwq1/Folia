@@ -28,8 +28,7 @@ final class LocalApiBridge {
     /// 所以这里留多个地址，逐个试探，第一个「能给出正常应答」的胜出。
     /// 换隧道/换电脑时改这里，然后重新打包。
     static let upstreams = [
-        "https://reproductive-advertiser-merger-treatment.trycloudflare.com",
-        "https://candy-fancy-xhtml-boundaries.trycloudflare.com"
+        "https://reproductive-advertiser-merger-treatment.trycloudflare.com"
     ]
 
     /// 标记当前可用的隧道下标；坏掉的隧道在一次运行内不再重试，避免每次登录都白等 10 秒。
@@ -250,10 +249,12 @@ final class LocalApiBridge {
 
     private func qrCreate(key: String) -> [String: Any] {
         guard !key.isEmpty else { return ["code": 400, "message": "missing key"] }
-        // 二维码内容就是网易官方的登录链接，type=3 拿到的 unikey 直接就是 codekey。
+        // 网易 /login/qr/create?qrimg=true 在官方域名下回的是纯白占位图（真图由 JS 在前端画），
+        // 手机上直接显示就是「二维码弹不出来」。这里本地生成：内容是官方登录链接。
         let loginURL = "https://music.163.com/login?codekey=\(key)"
-        let qrimg = QRTool.dataURL(for: loginURL) ?? ""
-        guard !qrimg.isEmpty else { return ["code": 502, "message": "二维码生成失败"] }
+        guard let qrimg = QRTool.dataURL(for: loginURL), !qrimg.isEmpty else {
+            return ["code": 502, "message": "二维码生成失败"]
+        }
         return [
             "code": 200,
             "data": [
