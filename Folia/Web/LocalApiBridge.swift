@@ -33,6 +33,9 @@ final class LocalApiBridge {
 
     /// 标记当前可用的隧道下标；坏掉的隧道在一次运行内不再重试，避免每次登录都白等 10 秒。
     private var upstreamIndex = 0
+    /// 最近一次二维码 key 是在哪条隧道上签发的（"-" 表示本地兜底生成）。
+    /// 校验时用它判断这个 key 上游还认不认。
+    private var qrKeySource = ""
     private let origin = "https://music.163.com"
 
     /// 串行队列：这里既是 cookie 表的唯一访问点，也是「同一 task 只回调一次」的判定点。
@@ -125,7 +128,12 @@ final class LocalApiBridge {
         // 对账号类接口必须忽略，否则会把匿名态当登录态。
         let forwarded = Self.parseCookieString(query["cookie"])
         let isAccountRoute = route == "/login/status" || route == "/user/account"
-        let effective = isAccountRoute
+        // 扫码校验也必须用「已登录」的那份 cookie。
+        // 前端轮询时带的是它自己存的匿名 cookie（没有 MUSIC_U），若拿它去转发，
+        // 上游会把这次扫码当成另一次会话，回 803 却没有 MUSIC_U，
+        // 前端就会报「网易云未下发登录态，请重试扫码」。
+        let needsLoginCookie = isAccountRoute || route == "/login/qr/check"
+        let effective = needsLoginCookie
             ? (forwarded["MUSIC_U"] != nil ? Self.joinCookie(forwarded) : cookieHeader())
             : (forwarded.isEmpty ? cookieHeader() : Self.joinCookie(forwarded))
 
@@ -136,19 +144,45 @@ final class LocalApiBridge {
             }
             if !forwarded.isEmpty { self.adopt(forwarded) }
 
+            // 二维码会话是有状态的：上游的 unikey 只跟签发它的那台服务端 + 那个 cookie 会话有效。
+            // 隧道抖动换了一条、或二维码由本地兜底生成（上游不认识这个 key）时，
+            // 继续转发只会拿到 801/「未下发登录态」这类假答案，
+            // 所以 key 对不上时直接用本地实现校验，它拿到 803 一样会给 MUSIC_U。
+            if route == "/login/qr/check", !self.keyIsFromCurrentUpstream(query["key"] ?? "") {
+                NSLog("[Folia] qr key not from current upstream, use local check")
+                let result = self.dispatch(route: route, query: query, cookie: effective)
+                self.respond(task, status: 200, json: result, url: url)
+                return
+            }
+
             // 主路径：转发到电脑上的服务端，它走官方加密通道，803 时能真正拿到 MUSIC_U。
             let rawQuery = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedQuery
             if let proxied = self.proxy(route: route, rawQuery: rawQuery, cookie: effective) {
+                if route == "/login/qr/key" { self.noteQRKey(proxied, source: "tunnel\(self.upstreamIndex)") }
                 self.respond(task, status: 200, json: proxied, url: url)
                 return
             }
             NSLog("[Folia] upstream unreachable, fallback to local \(route)")
             let result = self.dispatch(route: route, query: query, cookie: effective)
+            if route == "/login/qr/key" { self.noteQRKey(result, source: "-") }
             self.respond(task, status: 200, json: result, url: url)
         }
     }
 
     // MARK: - 反向代理
+
+    /// 记下「这个 key 是谁签发的」。上游应答形如 `{"data":{"unikey":"..."}}`。
+    private func noteQRKey(_ json: [String: Any], source: String) {
+        let data = json["data"] as? [String: Any]
+        guard let key = data?["unikey"] as? String, !key.isEmpty else { return }
+        qrKeySource = source + "|" + key
+        NSLog("[Folia] qr key from \(source)")
+    }
+
+    /// key 是否由当前这条隧道签发；本地兜底生成的 key 一律走本地校验。
+    private func keyIsFromCurrentUpstream(_ key: String) -> Bool {
+        key.isEmpty || qrKeySource == "tunnel\(upstreamIndex)|\(key)"
+    }
 
     /// 网易接口转发。上游 NeteaseCloudMusicApi 的路由直接挂在根上（`/login/qr/key`），
     /// 没有 `/api/netease` 这一层，所以这里要把前缀拼回去。
