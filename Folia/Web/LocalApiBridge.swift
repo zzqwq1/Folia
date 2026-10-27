@@ -286,7 +286,7 @@ final class LocalApiBridge {
             return registerAnonymous()
         case "/logout":
             let names = Self.parseCookieString(query["cookie"]).keys
-            Self.mutateCookies { table in
+            _ = mutateCookies { (table: inout [String: String]) -> Void in
                 for name in names { table.removeValue(forKey: name) }
                 if names.isEmpty { table.removeAll() }
             }
@@ -354,7 +354,7 @@ final class LocalApiBridge {
         switch code {
         case 803:
             let payloadCookie = json["cookie"] as? String ?? ""
-            Self.mutateCookies { table in
+            _ = mutateCookies { (table: inout [String: String]) -> Void in
                 NSLog(
                     "[Folia] netease 803 jsonCookie="
                         + (payloadCookie.isEmpty
@@ -610,7 +610,7 @@ final class LocalApiBridge {
     /// 合并前端带来的 cookie（前端优先，覆盖桥接层里的同名字段）。
     private func adopt(_ incoming: [String: String]) {
         guard !incoming.isEmpty else { return }
-        let changed = mutateCookies { table -> Bool in
+        let changed = mutateCookies { (table: inout [String: String]) -> Bool in
             var changed = false
             for (name, value) in incoming where table[name] != value {
                 table[name] = value
@@ -628,7 +628,7 @@ final class LocalApiBridge {
     private func absorb(setCookie: String?) {
         guard let setCookie, !setCookie.isEmpty else { return }
         let parsed = Self.parseSetCookie(setCookie)
-        let changed = mutateCookies { table -> Bool in
+        let changed = mutateCookies { (table: inout [String: String]) -> Bool in
             var changed = false
             for (name, val) in parsed where table[name] != val {
                 table[name] = val
