@@ -62,6 +62,9 @@ private struct OfflineNotice: View {
                     .font(.footnote)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
+                Text("网络恢复后会自动重新加载。")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
                 if let detail {
                     // 现场信息：真机上一眼能看出是脚本没跑到、还是资源没下来。
                     Text(detail)

@@ -37,6 +37,15 @@ final class WebShellState: ObservableObject {
         }
     }
 
+    /// 文档到了但页面一直没画出来（模块卡在 CDN、Service Worker 吐空壳等）。
+    ///
+    /// 这种失败不会触发 `didFailProvisionalNavigation`：导航本身是成功的，
+    /// 所以不能复用网络错误码，否则用户会看到「当前网络不可用」这种误导性文案。
+    func noteStalled(detail: String? = nil) {
+        failureDetail = detail
+        offlineReason = "页面没能启动起来"
+    }
+
     func clearLoadFailure() {
         offlineReason = nil
         failureDetail = nil
@@ -209,4 +218,6 @@ final class AudioSessionController {
 
 extension Notification.Name {
     static let foliaRemoteCommand = Notification.Name("app.folia.remote-command")
+    /// 网络从不可用恢复到可用。壳据此自动重载停在失败提示上的页面。
+    static let foliaNetworkRestored = Notification.Name("app.folia.network-restored")
 }

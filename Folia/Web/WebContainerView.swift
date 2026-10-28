@@ -20,6 +20,8 @@ final class WebContainerView: UIView {
     private var lastInsets: UIEdgeInsets = .zero
     /// 内容进程被回收的次数与时间窗，用来防止「重载→立刻再挂→再重载」的死循环。
     private var contentProcessRestarts: [Date] = []
+    /// 首屏卡住后的自动重试时间窗，同样用来限流。
+    private var stallRetries: [Date] = []
 
     /// 线上站点的域名。导航策略、诊断与重载都以它为基准。
     private static let siteHost = "app.folia-api.top"
@@ -36,6 +38,7 @@ final class WebContainerView: UIView {
     private var keepAliveTimer: Timer?
     private var foregroundObservation: Any?
     private var backgroundObservation: Any?
+    private var networkObservation: Any?
 
     init(state: WebShellState) {
         self.state = state
@@ -99,7 +102,7 @@ final class WebContainerView: UIView {
         reloadObservation = state.$reloadToken
             .dropFirst()
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in self?.webView.reload() }
+            .sink { [weak self] _ in self?.hardReload() }
 
         webView.load(URLRequest(url: Self.startURL, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30))
         scheduleProgressWatchdog()
@@ -112,6 +115,23 @@ final class WebContainerView: UIView {
             }
 
         observeLifecycle()
+        observeNetwork()
+    }
+
+    /// 用户点「重试」时走这条路。
+    ///
+    /// 原先直接 `webView.reload()` 有两个坑：一是失败现场里 `webView.url` 常常是 `about:blank`，
+    /// `reload()` 只是把空白页又读一遍，用户看到的就是「点了没反应」；
+    /// 二是它沿用缓存策略，之前那次坏掉的重定向/或者 Service Worker 吐出的空响应会被原样再用一次。
+    /// 所以这里固定回到起点 URL，并绕开本地缓存重新取。
+    private func hardReload() {
+        CrashLog.note("==== manual reload ====")
+        didReachFirstPaint = false
+        state.clearLoadFailure()
+        webView.load(URLRequest(url: Self.startURL,
+                                cachePolicy: .reloadIgnoringLocalCacheData,
+                                timeoutInterval: 30))
+        scheduleProgressWatchdog()
     }
 
     private var remoteObservation: Any?
@@ -119,7 +139,7 @@ final class WebContainerView: UIView {
     deinit {
         stopKeepAliveTimer()
         // block 型观察者不会随 self 释放自动注销，留着会在下一次通知时回调到已释放对象上。
-        let tokens: [Any?] = [remoteObservation, foregroundObservation, backgroundObservation]
+        let tokens: [Any?] = [remoteObservation, foregroundObservation, backgroundObservation, networkObservation]
         for token in tokens.compactMap({ $0 }) {
             NotificationCenter.default.removeObserver(token)
         }
@@ -138,6 +158,11 @@ final class WebContainerView: UIView {
             // 回前台不改变意图：该响的继续响，轮询照旧。
             self.refreshAudioKeepAlive()
             self.enforcePlaybackIfNeeded(reason: "foreground")
+            // 断网时用户往往先去开 Wi-Fi 再切回来，这里接着自己重试一次，
+            // 不用等他再点「重试」。
+            if self.state.offlineReason != nil {
+                self.hardReload()
+            }
         }
         backgroundObservation = NotificationCenter.default.addObserver(
             forName: UIApplication.didEnterBackgroundNotification,
@@ -146,6 +171,21 @@ final class WebContainerView: UIView {
         ) { [weak self] _ in
             guard let self else { return }
             self.refreshAudioKeepAlive()
+        }
+    }
+
+    /// 网络恢复时自动把停在失败提示上的页面拉起来。
+    ///
+    /// 用户的实际操作永远是「看到没网 → 去设置里连 Wi-Fi → 切回来」，
+    /// 如果非要他再点一次「重试」，大多数人会以为 App 坏了。
+    private func observeNetwork() {
+        networkObservation = NotificationCenter.default.addObserver(
+            forName: .foliaNetworkRestored,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self, self.state.offlineReason != nil else { return }
+            self.hardReload()
         }
     }
 
@@ -311,13 +351,20 @@ final class WebContainerView: UIView {
         (function(){
           var splash = document.getElementById('app-splash');
           var root = document.getElementById('root');
+          var scripts = document.scripts || [];
+          var loaded = 0;
+          for (var i = 0; i < scripts.length; i += 1) {
+            if (scripts[i].src) { loaded += 1; }
+          }
           return [
             'url=' + location.href,
             'readyState=' + document.readyState,
             'ua=' + (navigator.userAgent || '').slice(-40),
             'shell=' + (document.documentElement.getAttribute('data-folia-shell') || '-'),
             'splash=' + (splash ? (splash.className || 'visible') : 'gone'),
-            'rootChildren=' + (root ? root.children.length : -1)
+            'rootChildren=' + (root ? root.children.length : -1),
+            'scripts=' + loaded,
+            'online=' + (navigator.onLine ? '1' : '0')
           ].join('\\n');
         })();
         """
@@ -326,8 +373,29 @@ final class WebContainerView: UIView {
                 guard let self, !self.didReachFirstPaint else { return }
                 let detail = (result as? String) ?? (error?.localizedDescription ?? "页面无响应")
                 CrashLog.note("==== first paint timeout ====\n\(detail)")
-                self.state.noteLoadFailure(-3, detail: detail)
+                self.state.noteStalled(detail: detail)
+                self.retryLoadForStall()
             }
+        }
+    }
+
+    /// 卡住时是否还能自动重试：一分钟内最多三次，避免「卡住 → 重载 → 又卡住」的抖动。
+    private func retryLoadForStall() {
+        let now = Date()
+        stallRetries = stallRetries.filter { now.timeIntervalSince($0) < 60 }
+        guard stallRetries.count < 3 else {
+            CrashLog.note("==== stall retry exhausted, waiting for manual reload ====")
+            return
+        }
+        stallRetries.append(now)
+        CrashLog.note("==== stall retry #\(stallRetries.count) ====")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self else { return }
+            self.didReachFirstPaint = false
+            self.webView?.load(URLRequest(url: Self.startURL,
+                                          cachePolicy: .reloadIgnoringLocalCacheData,
+                                          timeoutInterval: 30))
+            self.scheduleProgressWatchdog()
         }
     }
 
@@ -797,8 +865,22 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         guard contentProcessRestarts.count < 2 else { return }
         contentProcessRestarts.append(now)
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak webView] in
-            webView?.load(URLRequest(url: Self.startURL))
+            webView?.load(URLRequest(url: Self.startURL,
+                                     cachePolicy: .reloadIgnoringLocalCacheData,
+                                     timeoutInterval: 30))
         }
+    }
+
+    /// 导航已提交、文档也到了，但主 bundle 没跑起来（`didFailProvisionalNavigation` 不会触发）。
+    ///
+    /// 现场里最常见的是「页面只剩一张静态壳」：导航看起来成功了，
+    /// 用户看到的是纯黑或半截页面，点哪儿都没反应，也没有任何重试入口。
+    /// 这里补一条导航级失败通道，界面至少能给出可点的「重试」。
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        let code = (error as NSError).code
+        guard code != NSURLErrorCancelled else { return }
+        CrashLog.note("==== navigation failed \(code) \(error.localizedDescription) ====")
+        state.noteLoadFailure(code)
     }
     /// 内容进程被系统回收（内存压力）时自动恢复，但要限流：
     /// 无脑 reload 会形成「加载界面 → 立刻再被杀 → 再 reload」的死循环，
