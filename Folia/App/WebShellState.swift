@@ -10,6 +10,22 @@ final class WebShellState: ObservableObject {
     func reload() {
         reloadToken += 1
     }
+
+    /// 线上页打不开时（离线、被墙、DNS 故障）要让界面说清楚，
+    /// 否则用户只看到一片深色背景，会误判成「又闪退了」。
+    @Published private(set) var offlineReason: String?
+
+    func noteLoadFailure(_ code: Int) {
+        guard -1009 != code else {
+            offlineReason = "当前网络不可用"
+            return
+        }
+        offlineReason = "页面加载失败（\(code)）"
+    }
+
+    func clearLoadFailure() {
+        offlineReason = nil
+    }
 }
 
 /// 后台播放所需的音频会话。

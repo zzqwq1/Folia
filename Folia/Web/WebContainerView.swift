@@ -72,7 +72,9 @@ final class WebContainerView: UIView {
         webView.uiDelegate = self
 
         // 让 UA 带 FoliaApp：网页版据此进入「壳模式」，关掉整页 86% 缩放，安全区改用实测值。
-        webView.customUserAgent = Self.userAgent
+        // 必须走 applicationNameForUserAgent：直接给 customUserAgent 会被系统整串改写，
+        // 首次请求就可能不带标记，页面于是按普通浏览器渲染（整页缩放、安全区错误）。
+        config.applicationNameForUserAgent = "FoliaApp/2.0"
 
         addSubview(webView)
 
@@ -200,7 +202,7 @@ final class WebContainerView: UIView {
     /// 网易云扫码登录的兜底。
     ///
     /// 服务端的 `/login/qr/create` 只有带 `qrimg=true` 才返回 base64 图片，
-    /// 而本地包里调的是不带该参数的地址，拿到的是空字符串，界面上就一直转圈。
+    /// 不带该参数拿到的是空字符串，界面上就一直转圈。
     /// 这里两头都补：请求上补参数；万一还是空，就用 `QRTool` 本地把 `qrurl` 画出来。
     private func installLoginHelpers() {
         let js = """
@@ -252,6 +254,26 @@ final class WebContainerView: UIView {
         let base = WKWebView().value(forKey: "userAgent") as? String ?? ""
         // 尾巴上追加标记，保留原有 Safari/WebKit 版本信息，页面识别与兼容判断都不受影响。
         return base.isEmpty ? "FoliaApp/2.0" : "\(base) FoliaApp/2.0"
+    }
+
+    /// 在页面里核对壳标记是否真的生效，没生效就补一次。
+    ///
+    /// 页面入口脚本按 UA 判定壳模式；一旦判定失败，整页会按移动浏览器渲染（86% 缩放）。
+    /// 这里是最后一道保险：UA 对不上就直接把标记写进去，不依赖时序。
+    /// 线上页的模块入口有自己的私有标记，两边都置上，任何一侧判定成功都能进壳模式。
+    private func ensureShellFlag() {
+        let js = """
+        (function () {
+          var root = document.documentElement;
+          if (root && root.getAttribute('data-folia-shell') !== '1') {
+            root.setAttribute('data-folia-shell', '1');
+          }
+          if (window.__FOLIA_SHELL__ === undefined) {
+            try { window.__FOLIA_SHELL__ = 'ios'; } catch (e) {}
+          }
+        })();
+        """
+        webView?.evaluateJavaScript(js, completionHandler: nil)
     }
 
     // MARK: - 安全区
@@ -366,6 +388,8 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         lastInsets = .zero
         pushInsetsIfNeeded()
+        ensureShellFlag()
+        state.clearLoadFailure()
         installAudioKeeper()
         installLoginHelpers()
         // App 启动时会被系统重新激活会话；每次页面加载完再补一次，
@@ -379,6 +403,7 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         // -999 是「被新导航取消」，属正常流程。
         guard code != NSURLErrorCancelled else { return }
         CrashLog.note("==== provisional navigation failed \(code) \(error.localizedDescription) ====")
+        state.noteLoadFailure(code)
         let now = Date()
         contentProcessRestarts = contentProcessRestarts.filter { now.timeIntervalSince($0) < 60 }
         guard contentProcessRestarts.count < 2 else { return }
