@@ -194,8 +194,13 @@ final class AudioSessionController {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            guard let self, self.isPlaying else { return }
+            guard let self else { return }
+            // 先无条件把会话立起来：即便本 App 认为「没在播」，
+            // 网页侧也可能刚从后台恢复播放，会话不通就一点声都没有。
             self.reactivate()
+            if self.isPlaying {
+                self.beginBackgroundTask()
+            }
         }
 
         NotificationCenter.default.addObserver(
@@ -219,13 +224,14 @@ final class AudioSessionController {
             else { return }
 
             switch type {
-            case .ended:
-                // 来电 / 其他 App 抢占结束后重新声明 category 再激活，
-                // 只 setActive 在部分场景下会失败，音频就再也回不来。
-                self?.activate()
-            default:
+            case .began:
                 // .began 时必须把会话让出去，否则系统会直接掐断音频。
-                break
+                NSLog("[Folia] audio interrupted")
+            default:
+                // 通话 / 其他 App 抢占结束后重新声明 category 再激活。
+                // 只 setActive 在部分机型上会失败，而页面那边此时已经判为暂停，
+                // 不把通路要回来就是「前后台都没声音」。
+                self?.activate()
             }
         }
     }

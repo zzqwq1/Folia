@@ -168,6 +168,7 @@ final class WebContainerView: UIView {
             // 回前台时系统会重新激活会话，可能把媒体按停；这里补放一次。
             // 前台续播只此一次，不进轮询，避免影响用户在前台主动暂停。
             self.forceResumeAudio(reason: "foreground")
+            CrashLog.note("==== foreground resume done (audible=\(self.wantsAudible ? 1 : 0) paused=\(self.userPaused ? 1 : 0)) ====")
             // 断网时用户往往先去开 Wi-Fi 再切回来，这里接着自己重试一次，
             // 不用等他再点「重试」。
             if self.state.offlineReason != nil {
@@ -218,16 +219,15 @@ final class WebContainerView: UIView {
         wantsAudible = true
         userPaused = false
         AudioSessionController.shared.updatePlaybackState(true)
+        CrashLog.note("==== intent audible (state=\(UIApplication.shared.applicationState.rawValue)) ====")
         startKeepAliveTimer()
     }
 
-    /// 页面自己暂停了（用户按暂停、或播完）：不再续播。
+    /// 页面自己暂停了。
     ///
-    /// `wantsAudible` 必须保留。它代表的是「用户想听这首歌」这个意图，
-    /// 而暂停只是暂停；一旦这里把它清掉，页面任何一次自我暂停
-    /// （切歌瞬间、缓冲卡顿、切歌词重建播放器）都会让保活彻底停摆，
-    /// 之后系统把媒体掐断就再也没人放回去 —— 这正是「还是会自动暂停」的来源。
-    /// 真正的用户暂停由 `handleRemoteCommand` 的 pause 分支单独处理。
+    /// 只有「页面在前台可见」时的 pause 才会走到这里，所以可以当成用户主动收手：
+    /// 停掉保活轮询，否则 4 秒后又被放回去，表现就是「点了暂停又自己唱」。
+    /// 后台的 pause 由 JS 侧直接过滤掉了，那是系统掐断，必须让保活管。
     fileprivate func markPausedIntent() {
         stopKeepAliveTimer()
     }
@@ -236,6 +236,7 @@ final class WebContainerView: UIView {
         guard keepAliveTimer == nil else { return }
         let timer = Timer(timeInterval: 4.0, repeats: true) { [weak self] _ in
             guard let self, self.wantsAudible else { return }
+            // 后台每一拍都重试一次 play：系统掐断媒体、缓冲结束、页面自暂停都在这一拍里被兜住。
             self.enforcePlaybackIfNeeded(reason: "keepalive")
         }
         // 挂 .common：滚动视图追踪模式下定时器也会照常触发，后台也照常。
@@ -260,12 +261,20 @@ final class WebContainerView: UIView {
     private func enforcePlaybackIfNeeded(reason: String) {
         guard wantsAudible, !userPaused else { return }
         guard UIApplication.shared.applicationState != .active else { return }
+        // 会话一旦被系统打断（通话、别的 App 抢占、锁屏静音），只调 play() 是没有声音的：
+        // 音频通路本身已经不通。这里每拍先把会话要回来，再补 play。
+        // 只 setActive 不 setCategory，所以不会像早期那样把播放器按停。
+        AudioSessionController.shared.reactivate()
         resumeAudio(reason: reason)
     }
 
     /// 回前台时的补放：不看前后台状态，其余条件与轮询一致。
+    ///
+    /// 用户很可能就是从后台回来发现「没声音」：会话在后台已被降级，
+    /// 所以这里必须先补一次 `setActive`，否则 play() 成功了也是静音。
     private func forceResumeAudio(reason: String) {
         guard wantsAudible, !userPaused else { return }
+        AudioSessionController.shared.reactivate()
         resumeAudio(reason: reason)
     }
 
@@ -547,7 +556,10 @@ final class WebContainerView: UIView {
             if (!el || el.tagName !== 'AUDIO') { return; }
             // 播完的 pause 不算用户意图，否则一轮播完就不再续播。
             if (el.ended) { return; }
-            post('intent-pause');
+            // 只有页面在前台可见时的 pause 才可能是用户主动按的。
+            // 后台里出现的 pause 一定是被系统掐断的（会话降级、锁屏、切后台），
+            // 必须交给保活放回去，否则就是「后台没声音、回来也没有」。
+            if (document.visibilityState === 'visible') { post('intent-pause'); }
           }, true);
 
           var lastState = '';
