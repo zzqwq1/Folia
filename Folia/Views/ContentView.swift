@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import Combine
 
 struct ContentView: View {
@@ -8,7 +9,7 @@ struct ContentView: View {
         ZStack {
             Color(red: 0x09 / 255, green: 0x09 / 255, blue: 0x0b / 255)
                 .ignoresSafeArea()
-            WebShellView()
+            WebShellView(state: state)
                 .ignoresSafeArea()
             if let reason = state.offlineReason {
                 OfflineNotice(reason: reason, detail: state.failureDetail) { state.reload() }
@@ -19,6 +20,17 @@ struct ContentView: View {
             AudioSessionController.shared.configure()
         }
     }
+}
+
+/// 把承载线上页的 WKWebView 容器接进 SwiftUI。
+struct WebShellView: UIViewRepresentable {
+    let state: WebShellState
+
+    func makeUIView(context: Context) -> WebContainerView {
+        WebContainerView(state: state)
+    }
+
+    func updateUIView(_ uiView: WebContainerView, context: Context) {}
 }
 
 /// 线上页加载失败时的提示层。壳加载的是线上站点，断网就没有页面可用，

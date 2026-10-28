@@ -96,9 +96,6 @@ final class WebContainerView: UIView {
 
         addSubview(webView)
 
-        // 必须持有，否则会被立刻释放，长按手势失效。
-        diagnostics = DiagnosticsOverlay(webView: webView)
-
         reloadObservation = state.$reloadToken
             .dropFirst()
             .receive(on: DispatchQueue.main)
@@ -118,7 +115,6 @@ final class WebContainerView: UIView {
     }
 
     private var remoteObservation: Any?
-    private var diagnostics: DiagnosticsOverlay?
 
     deinit {
         stopKeepAliveTimer()
