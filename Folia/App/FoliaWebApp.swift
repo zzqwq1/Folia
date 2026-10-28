@@ -28,6 +28,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         CrashLog.install()
         CrashLog.note("==== app launch ====")
+        // 冷启动先把上一轮 WebContent 进程留下的内存/磁盘缓存清掉再建 WebView：
+        // 「大退后进歌单闪退」就是新进程在同一份缓存上重建页面被再次压死。
+        CacheSweeper.sweepOnColdLaunch()
         AudioSessionController.shared.configure()
         return true
     }

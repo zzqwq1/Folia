@@ -25,6 +25,18 @@ final class WebContainerView: UIView {
     private static let siteHost = "app.folia-api.top"
     private static let startURL = URL(string: "https://app.folia-api.top/")!
 
+    /// 页面调过 `audio.play()` 而还没被用户按暂停：这是「该有声」的唯一依据。
+    ///
+    /// 用户只按过一次播放，之后无论是切后台、锁屏、Siri 抢占还是 WebKit 自己把
+    /// 媒体元素按下暂停，都算被迫中断，壳负责把它放回去。用户亲手按的暂停会清掉它。
+    private var wantsAudible = false
+    /// 用户亲手按了暂停，串行下发中的远程命令据此不会再把它放回去。
+    private var userPaused = false
+    /// 保活轮询：后台时每两秒确认一次「该响的还在响」。
+    private var keepAliveTimer: Timer?
+    private var foregroundObservation: Any?
+    private var backgroundObservation: Any?
+
     init(state: WebShellState) {
         self.state = state
         super.init(frame: .zero)
@@ -55,10 +67,16 @@ final class WebContainerView: UIView {
         ))
         userContent.add(AudioStateRelay(), name: "foliaAudioState")
         userContent.add(JSLogRelay(), name: "foliaJSLog")
-        userContent.add(QRFallbackRelay(), name: "foliaQrFallback")
+        let qrRelay = QRFallbackRelay()
+        userContent.add(qrRelay, name: "foliaQrFallback")
+        let intentRelay = AudioIntentRelay()
+        intentRelay.container = self
+        userContent.add(intentRelay, name: "foliaAudioIntent")
         config.userContentController = userContent
 
         webView = WKWebView(frame: bounds, configuration: config)
+        // 两个回传通道都要拿到 webView：一个往页面塞本地画的二维码，一个做播放意图。
+        qrRelay.webView = webView
         webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         webView.isOpaque = false
         webView.backgroundColor = backgroundColor
@@ -93,15 +111,141 @@ final class WebContainerView: UIView {
         remoteObservation = NotificationCenter.default
             .addObserver(forName: .foliaRemoteCommand, object: nil, queue: .main) { [weak self] note in
                 guard let action = note.object as? String else { return }
-                self?.forwardRemoteCommand(action)
+                self?.handleRemoteCommand(action)
             }
 
-        // WebKit 的内容进程被杀（内存压力 / 系统回收）时会白屏。自动重载而不是留一片黑。
-        // 走 WKNavigationDelegate 的 webProcessDidTerminate 回调，无需再挂通知。
+        observeLifecycle()
     }
 
     private var remoteObservation: Any?
     private var diagnostics: DiagnosticsOverlay?
+
+    deinit {
+        stopKeepAliveTimer()
+        // block 型观察者不会随 self 释放自动注销，留着会在下一次通知时回调到已释放对象上。
+        let tokens: [Any?] = [remoteObservation, foregroundObservation, backgroundObservation]
+        for token in tokens.compactMap({ $0 }) {
+            NotificationCenter.default.removeObserver(token)
+        }
+    }
+
+    /// 前后台切换是后台播放的主战场：进后台立刻确认会话并起保活轮询，
+    /// 回前台再确认一次（系统可能在后台把会话降级，或把媒体元素按掉）。
+    private func observeLifecycle() {
+        foregroundObservation = NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            AudioSessionController.shared.configure()
+            // 回前台不改变意图：该响的继续响，轮询照旧。
+            self.refreshAudioKeepAlive()
+            self.enforcePlaybackIfNeeded(reason: "foreground")
+        }
+        backgroundObservation = NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.refreshAudioKeepAlive()
+        }
+    }
+
+    /// 让轮询与当前意图对齐：该响就起，不该响就停。
+    private func refreshAudioKeepAlive() {
+        if wantsAudible && !userPaused {
+            AudioSessionController.shared.reactivate()
+            startKeepAliveTimer()
+        } else {
+            stopKeepAliveTimer()
+        }
+    }
+
+    // MARK: - 后台保活
+
+    /// 页面调过 play，且用户没有亲手暂停 —— 这就是「该有声」。
+    fileprivate func markAudibleIntent() {
+        wantsAudible = true
+        userPaused = false
+        AudioSessionController.shared.updatePlaybackState(true)
+        startKeepAliveTimer()
+    }
+
+    /// 页面自己暂停了（用户按暂停、或播完）：不再续播。
+    fileprivate func markPausedIntent() {
+        wantsAudible = false
+        stopKeepAliveTimer()
+    }
+
+    private func startKeepAliveTimer() {
+        guard keepAliveTimer == nil else { return }
+        let timer = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in
+            guard let self, self.wantsAudible else { return }
+            AudioSessionController.shared.reactivate()
+            self.enforcePlaybackIfNeeded(reason: "keepalive")
+        }
+        // 挂 .common：滚动视图追踪模式下定时器也会照常触发，后台也照常。
+        RunLoop.main.add(timer, forMode: .common)
+        keepAliveTimer = timer
+    }
+
+    private func stopKeepAliveTimer() {
+        keepAliveTimer?.invalidate()
+        keepAliveTimer = nil
+    }
+
+    /// 会话激活失败时 iOS 会把媒体按停；这里把「该响的」重新放回去。
+    ///
+    /// 只在 `wantsAudible` 为真时动手，且每轮只做一次 `play()`：
+    /// 页面自己的播放器仍然是唯一的状态源，壳只是保证它不被系统静默掐断。
+    private func enforcePlaybackIfNeeded(reason: String) {
+        guard wantsAudible, !userPaused else { return }
+        let js = """
+        (function(){
+          try {
+            // 双 deck 交叉淡化（automix）下有两个 audio：只放回当前被掐掉的那个，
+            // 另一个本来就是停的，不能一起放，否则会两声齐唱。
+            var list = document.querySelectorAll('audio');
+            var resumed = 0;
+            for (var i = 0; i < list.length; i += 1) {
+              var el = list[i];
+              if (!el.paused || el.ended || !el.src) { continue; }
+              var p = el.play();
+              if (p && p.catch) { p.catch(function(){}); }
+              resumed += 1;
+            }
+            return resumed > 0 ? 'resumed' : 'noop';
+          } catch (e) { return 'error'; }
+        })();
+        """
+        webView?.evaluateJavaScript(js) { result, _ in
+            guard let flag = result as? String, flag == "resumed" else { return }
+            CrashLog.note("==== audio resumed (\(reason)) ====")
+        }
+    }
+
+    /// 远程命令要先更新意图，再转发给页面：否则线控按了暂停，保活轮询会把它又放回去。
+    private func handleRemoteCommand(_ action: String) {
+        switch action {
+        case "play", "toggle":
+            if action == "play" || !wantsAudible {
+                markAudibleIntent()
+            } else {
+                // toggle 在「正在响」时表示暂停。
+                wantsAudible = false
+                stopKeepAliveTimer()
+            }
+        case "pause":
+            wantsAudible = false
+            stopKeepAliveTimer()
+        default:
+            // 切歌不改变意图。
+            break
+        }
+        forwardRemoteCommand(action)
+    }
 
     /// 页面里的播放器是 React 状态机，没有全局 API，这里按 DOM 上的按钮与媒体元素找。
     private func forwardRemoteCommand(_ action: String) {
@@ -251,6 +395,11 @@ final class WebContainerView: UIView {
     }
 
     /// 后台播放保活 + 播放状态上报给原生（锁屏/控制中心据此判断「正在播放」）。
+    ///
+    /// 页面自己不会在切后台时暂停；真正被掐断的是 iOS 在会话失效后按停媒体元素，
+    /// 或者 WebKit 的内容进程被系统短暂挂起。所以这里做两件事：
+    /// 1. 记录页面的播放意图（`play()` / `pause()` 被调用即上报），意图在原生这边保存；
+    /// 2. 后台每两秒确认一次会话有效，并把「该响但被按停」的媒体放回去。
     private func installAudioKeeper() {
         let js = """
         (function(){
@@ -276,6 +425,33 @@ final class WebContainerView: UIView {
               });
             }
           } catch (e) {}
+
+          var post = function(kind){
+            try {
+              window.webkit.messageHandlers.foliaAudioIntent.postMessage(kind);
+            } catch (e) {}
+          };
+
+          // 页面调用 play() 即视为「要出声」，交给原生在后台守住；
+          // pause() 分两种：用户按的（element.pause）和系统按的（没有调用栈来源），
+          // 这里只上报真实调用，系统静默按停不会触发它，靠原生轮询发现并恢复。
+          var mediaProto = HTMLMediaElement.prototype;
+          var nativePlay = mediaProto.play;
+          var nativePause = mediaProto.pause;
+          mediaProto.play = function(){
+            var out = nativePlay.apply(this, arguments);
+            try { if (this.tagName === 'AUDIO') { post('intent-play'); } } catch (e) {}
+            return out;
+          };
+          mediaProto.pause = function(){
+            try {
+              if (this.tagName === 'AUDIO') {
+                // 播放结束后的 pause 不算用户意图，否则一轮播完就再也不续。
+                if (!this.ended) { post('intent-pause'); }
+              }
+            } catch (e) {}
+            return nativePause.apply(this, arguments);
+          };
 
           var lastState = '';
           var report = function(){
@@ -376,7 +552,9 @@ final class WebContainerView: UIView {
           var QUARK_URL = 'https://pan.quark.cn/s/934c480d5b9c';
 
           // 版本号只认页面里的两个常量：站点改了这里就有，壳自己不写死任何版本。
-          var cur = (typeof FOLIA_VERSION === 'string' && FOLIA_VERSION) || '';
+          // 「当前版本」例外：线上页停在 1.8.5，而这个包是 2.0，显示 1.8.5 会让人以为装错了，
+          // 所以用壳带进来的实际版本覆盖，最新版本仍由站点决定。
+          var cur = (window.__foliaAppVersion || (typeof FOLIA_VERSION === 'string' && FOLIA_VERSION) || '');
           var latest = (typeof FOLIA_LATEST_VERSION === 'string' && FOLIA_LATEST_VERSION) || '';
 
           var verNum = document.getElementById('donate-version-num');
@@ -546,6 +724,9 @@ final class WebContainerView: UIView {
     (function(){
       document.documentElement.setAttribute('data-folia-shell', '1');
       window.__FOLIA_SHELL__ = 'ios';
+      // 壳的实际版本（project.yml 的 MARKETING_VERSION），赞赏弹窗的「当前版本」用它，
+      // 免得线上页停在旧常量上，用户以为装错了包。
+      window.__foliaAppVersion = '\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.0")';
       // 注意不能把 navigator.serviceWorker 改成 undefined：线上页里 registerSW.js 会直接
       // 抛 TypeError，PWA 注册失败会让页面自己挂掉；WKWebView 里 register 本身就是空操作。
       // WKWebView 里 window.open 不开新窗口，站外链接改由原生导航策略接管外跳。
@@ -685,6 +866,26 @@ private final class AudioStateRelay: NSObject, WKScriptMessageHandler {
     }
 }
 
+// MARK: - 播放意图上报
+
+/// 页面调了 `play()` 还是 `pause()`。原生据此认定「该不该有声」，
+/// 后台被系统按停时才知道要不要放回去。
+private final class AudioIntentRelay: NSObject, WKScriptMessageHandler {
+    weak var container: WebContainerView?
+
+    func userContentController(_ userContentController: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        guard let kind = message.body as? String else { return }
+        DispatchQueue.main.async { [weak container] in
+            if kind == "intent-play" {
+                container?.markAudibleIntent()
+            } else if kind == "intent-pause" {
+                container?.markPausedIntent()
+            }
+        }
+    }
+}
+
 // MARK: - 页面日志回传
 
 /// 网页里的未捕获错误 / 资源加载失败，落到本地日志，供「闪退」定位。
@@ -700,6 +901,8 @@ private final class JSLogRelay: NSObject, WKScriptMessageHandler {
 
 /// 服务端没给二维码图片时，用 `qrurl` 在本地画一张，再塞回页面的二维码弹窗。
 private final class QRFallbackRelay: NSObject, WKScriptMessageHandler {
+    weak var webView: WKWebView?
+
     func userContentController(_ userContentController: WKUserContentController,
                                didReceive message: WKScriptMessage) {
         guard let url = message.body as? String,
@@ -717,199 +920,14 @@ private final class QRFallbackRelay: NSObject, WKScriptMessageHandler {
             // 二维码弹窗里那张图：方形、边长 120 以上，且当前没有可用图源。
             if (box.width < 100 || Math.abs(box.width - box.height) > 8) { continue; }
             var blank = !img.getAttribute('src') || img.getAttribute('src').indexOf('data:') === 0 && img.naturalWidth === 0;
-            if (!blank && img.complete && img.naturalWidth > 0) { continue; }
-            img.removeAttribute('srcset');
+            if (!blank) { continue; }
             img.setAttribute('src', src);
-            try { img.style.opacity = '1'; } catch (e) {}
-            return;
-          }
-          // 页面上没有现成的 img 时才兜底：替换掉“正在加载二维码”的占位文字。
-          var all = document.querySelectorAll('div,p,span');
-          for (var j = 0; j < all.length; j += 1) {
-            var el = all[j];
-            if (el.children.length > 0) { continue; }
-            if ((el.textContent || '').indexOf('二维码') < 0) { continue; }
-            var holder = el.parentElement;
-            if (!holder) { continue; }
-            var pic = document.createElement('img');
-            pic.src = src;
-            pic.style.cssText = 'width:200px;height:200px;display:block;margin:8px auto;border-radius:8px;background:#fff';
-            holder.appendChild(pic);
             return;
           }
         })('\(dataURL)');
         """
-        message.webView?.evaluateJavaScript(js, completionHandler: nil)
-    }
-}
-
-// MARK: - 诊断面板
-
-/// 长按左上角触发：把本地崩溃日志直接铺在屏幕上，截图即可发出来。
-/// 不接电脑也能拿到现场，这是排查「闪退」最快的路径。
-final class DiagnosticsOverlay: NSObject {
-    private weak var webView: WKWebView?
-    private var panel: UIView?
-    private static let size: CGFloat = 64
-
-    init(webView: WKWebView) {
-        self.webView = webView
-        super.init()
-        let long = UILongPressGestureRecognizer(target: self, action: #selector(handle(_:)))
-        long.minimumPressDuration = 1.2
-        long.numberOfTouchesRequired = 1
-        // 只挂在左上角的窄条上，避免抢走页面里的长按操作。
-        let strip = UIView(frame: CGRect(x: 0, y: 0, width: Self.size, height: Self.size))
-        strip.backgroundColor = .clear
-        strip.isUserInteractionEnabled = true
-        strip.addGestureRecognizer(long)
-        strip.autoresizingMask = [.flexibleRightMargin, .flexibleBottomMargin]
-        webView.addSubview(strip)
-    }
-
-    @objc private func handle(_ g: UILongPressGestureRecognizer) {
-        guard g.state == .began else { return }
-        if panel != nil { hide() } else { show() }
-    }
-
-    private func show() {
-        guard let web = webView, let host = web.superview else { return }
-        let container = UIView(frame: host.bounds)
-        container.backgroundColor = UIColor.black.withAlphaComponent(0.92)
-        container.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-
-        let label = UILabel(frame: container.bounds.insetBy(dx: 16, dy: 56))
-        label.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        label.numberOfLines = 0
-        label.font = .monospacedSystemFont(ofSize: 9, weight: .regular)
-        label.textColor = .white
-        label.text = "（读取中…）"
-        label.lineBreakMode = .byCharWrapping
-        container.addSubview(label)
-
-        // 再给两个按钮：原生日志 + 播放探针。播放失败的原因几乎都在探针里
-        // （play() 被拒 / 媒体错误码 / 音频 CDN 探测结果），比 Swift 日志有用得多。
-        let close = UIButton(type: .system)
-        close.setTitle("关闭", for: .normal)
-        close.frame = CGRect(x: 16, y: 12, width: 72, height: 32)
-        close.addTarget(self, action: #selector(hideTapped), for: .touchUpInside)
-        container.addSubview(close)
-
-        let native = UIButton(type: .system)
-        native.setTitle("原生日志", for: .normal)
-        native.frame = CGRect(x: 96, y: 12, width: 96, height: 32)
-        native.addTarget(self, action: #selector(showNativeLog), for: .touchUpInside)
-        container.addSubview(native)
-
-        let audio = UIButton(type: .system)
-        audio.setTitle("播放探针", for: .normal)
-        audio.frame = CGRect(x: 200, y: 12, width: 96, height: 32)
-        audio.addTarget(self, action: #selector(showAudioProbe), for: .touchUpInside)
-        container.addSubview(audio)
-
-        // 现场勘验：直接把页面此刻的真实数值铺出来。
-        // 「进度条不动」可能是没声音，也可能是状态机把时间写丢了，
-        // 只有这两组数字能区分，光看界面看不出来。
-        let live = UIButton(type: .system)
-        live.setTitle("现场", for: .normal)
-        live.frame = CGRect(x: 304, y: 12, width: 72, height: 32)
-        live.addTarget(self, action: #selector(showLiveState), for: .touchUpInside)
-        container.addSubview(live)
-
-        host.addSubview(container)
-        panel = container
-        showAudioProbe()
-    }
-
-    @objc private func showNativeLog() {
-        guard let label = panel?.subviews.compactMap({ $0 as? UILabel }).first else { return }
-        guard let url = CrashLog.fileURL,
-              let body = try? String(contentsOf: url, encoding: .utf8) else {
-            label.text = "（还没有日志）"
-            return
-        }
-        // 只留最后一屏，太长反而看不清。
-        label.text = String(body.suffix(4000))
-    }
-
-    /// 读页面里播放探针收集到的现场。页面不可用（加载失败）时给一句明确的提示，
-    /// 免得看起来像「面板坏了」。
-    @objc private func showAudioProbe() {
-        guard let web = webView else { return }
-        web.evaluateJavaScript(
-            "window.__folioAudioProbe ? window.__folioAudioProbe.dump() : '(页面里没有探针，可能还没加载完)'"
-        ) { [weak self] result, error in
-            DispatchQueue.main.async {
-                guard let label = self?.panel?.subviews.compactMap({ $0 as? UILabel }).first else { return }
-                if let error {
-                    label.text = "读取失败：\(error.localizedDescription)"
-                    return
-                }
-                let text = (result as? String) ?? "（没有数据）"
-                label.text = "==== 播放探针 ====\n" + (text.isEmpty ? "（还没有事件，先点一下播放）" : text)
-            }
+        DispatchQueue.main.async { [weak self] in
+            self?.webView?.evaluateJavaScript(js, completionHandler: nil)
         }
     }
-
-    /// 页面上此刻的真实数值：哪个 deck 在放、音频元素自己的 currentTime 与 duration。
-    /// 「进度条不动」时这两组数字一对就知道卡在哪一层。
-    @objc private func showLiveState() {
-        guard let web = webView else { return }
-        let js = """
-        (function(){
-          var out = [];
-          var list = document.querySelectorAll('audio');
-          out.push('audio 元素数: ' + list.length);
-          for (var i = 0; i < list.length; i += 1) {
-            var a = list[i];
-            out.push('[' + i + '] paused=' + a.paused + ' ended=' + a.ended +
-              ' t=' + a.currentTime.toFixed(2) + ' dur=' + (isFinite(a.duration) ? a.duration.toFixed(1) : '-') +
-              ' rs=' + a.readyState + ' ns=' + a.networkState +
-              ' err=' + (a.error ? a.error.code : '-'));
-            out.push('    src=' + ((a.currentSrc || a.getAttribute('src') || '-').slice(-70)));
-          }
-          try {
-            var bars = document.querySelectorAll('[role="slider"]');
-            for (var j = 0; j < bars.length; j += 1) {
-              out.push('slider aria-valuenow=' + bars[j].getAttribute('aria-valuenow') +
-                ' aria-valuemax=' + bars[j].getAttribute('aria-valuemax'));
-            }
-          } catch (e) {}
-          if (window.__folioAudioProbe) {
-            out.push('---- 探针 ----');
-            out.push(window.__folioAudioProbe.dump());
-          }
-          return out.join('\\n');
-        })();
-        """
-        web.evaluateJavaScript(js) { [weak self] result, error in
-            DispatchQueue.main.async {
-                guard let label = self?.panel?.subviews.compactMap({ $0 as? UILabel }).first else { return }
-                if let error {
-                    label.text = "读取失败：\(error.localizedDescription)"
-                    return
-                }
-                label.text = "==== 现场 ====\n" + ((result as? String) ?? "（没有数据）")
-            }
-        }
-    }
-
-    @objc private func hideTapped() { hide() }
-
-    private func hide() {
-        panel?.removeFromSuperview()
-        panel = nil
-    }
-}
-
-// MARK: - SwiftUI 包装
-
-struct WebShellView: UIViewRepresentable {
-    @EnvironmentObject private var state: WebShellState
-
-    func makeUIView(context: Context) -> WebContainerView {
-        WebContainerView(state: state)
-    }
-
-    func updateUIView(_ uiView: WebContainerView, context: Context) {}
 }

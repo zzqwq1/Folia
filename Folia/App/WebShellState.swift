@@ -2,6 +2,7 @@ import Foundation
 import AVFoundation
 import MediaPlayer
 import UIKit
+import WebKit
 
 /// WKWebView 内嵌官方 Folia 网页版的运行状态。
 final class WebShellState: ObservableObject {
@@ -39,6 +40,34 @@ final class WebShellState: ObservableObject {
     func clearLoadFailure() {
         offlineReason = nil
         failureDetail = nil
+    }
+}
+
+/// 冷启动时的缓存清理。
+///
+/// 「大退后进歌单闪退」的现场是 WebContent 进程被系统回收：进程连同它的堆一起没了，
+/// 重启后 WKWebView 又要在同一份磁盘缓存上重建整个页面，很容易二次被压死。
+/// 所以冷启动先把两层临时缓存清掉：
+///
+/// - `WKWebsiteDataTypeMemoryCache`：内存缓存（进程死了本来也会消失，顺手清）；
+/// - `WKWebsiteDataTypeDiskCache`：HTTP 磁盘缓存，图片与脚本体量最大的一块。
+///
+/// 明确不碰 `LocalStorage` / `Cookies` / `IndexedDB` / `ServiceWorkers`：
+/// 登录态、歌单队列、播放设置全在里面，清掉等于把用户踢下线。
+enum CacheSweeper {
+    /// 一个进程只清一次：热启动时清会把正在用的资源也打掉。
+    private static var swept = false
+
+    static func sweepOnColdLaunch() {
+        guard !swept else { return }
+        swept = true
+        let types: Set<String> = [
+            WKWebsiteDataTypeMemoryCache,
+            WKWebsiteDataTypeDiskCache,
+        ]
+        WKWebsiteDataStore.default().removeData(ofTypes: types, modifiedSince: .distantPast) {
+            CrashLog.note("==== cold launch: cleared memory + disk cache ====")
+        }
     }
 }
 
