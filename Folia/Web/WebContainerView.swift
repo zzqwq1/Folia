@@ -169,6 +169,11 @@ final class WebContainerView: UIView {
             if let handBackPosition {
                 // 原生放的是「同一首、第几秒」，页面必须接着这个数，而不是它自己记住的旧值。
                 self.resumePageAt(handBackPosition)
+                // 会话放开之后再确认一次：此时页面那条 WebAudio 通路才真正可用，
+                // 播放器仍停在切后台那一刻的话，这一步才是「回前台有声音」的关键。
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                    self?.resumePageAt(handBackPosition)
+                }
             }
             // 会话在后台被降级过，回前台要重新声明一次。
             // 这里只用 `reactivate()`（setActive），不走重设 category：
@@ -178,13 +183,6 @@ final class WebContainerView: UIView {
                 // 没接管过（或后台没响成）：系统可能把媒体按停，补放一次。
                 // 前台续播只此一次，不进轮询，避免影响用户在前台主动暂停。
                 self.forceResumeAudio(reason: "foreground")
-            } else {
-                // 原生确实放到了某一秒：页面那条 WebAudio 通路刚被系统放开，
-                // 但播放器可能仍停在切后台那一刻。稍后再对齐并确认页面真的在响。
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-                    guard let self else { return }
-                    self.resumePageAt(handBackPosition)
-                }
             }
             CrashLog.note("==== foreground resume done (audible=\(self.wantsAudible ? 1 : 0) paused=\(self.userPaused ? 1 : 0) handback=\(handBackPosition == nil ? 0 : 1)) ====")
             // 断网时用户往往先去开 Wi-Fi 再切回来，这里接着自己重试一次，
