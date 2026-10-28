@@ -390,34 +390,72 @@ final class DiagnosticsOverlay: NSObject {
 
     private func show() {
         guard let web = webView, let host = web.superview else { return }
-        let text: String = {
-            guard let url = CrashLog.fileURL,
-                  let body = try? String(contentsOf: url, encoding: .utf8) else { return "（还没有日志）" }
-            // 只留最后一屏，太长反而看不清。
-            return String(body.suffix(4000))
-        }()
-
         let container = UIView(frame: host.bounds)
         container.backgroundColor = UIColor.black.withAlphaComponent(0.92)
         container.autoresizingMask = [.flexibleWidth, .flexibleHeight]
 
-        let label = UILabel(frame: container.bounds.insetBy(dx: 16, dy: 48))
+        let label = UILabel(frame: container.bounds.insetBy(dx: 16, dy: 56))
         label.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         label.numberOfLines = 0
         label.font = .monospacedSystemFont(ofSize: 9, weight: .regular)
         label.textColor = .white
-        label.text = text
+        label.text = "（读取中…）"
         label.lineBreakMode = .byCharWrapping
         container.addSubview(label)
 
+        // 再给两个按钮：原生日志 + 播放探针。播放失败的原因几乎都在探针里
+        // （play() 被拒 / 媒体错误码 / 音频 CDN 探测结果），比 Swift 日志有用得多。
         let close = UIButton(type: .system)
         close.setTitle("关闭", for: .normal)
-        close.frame = CGRect(x: 16, y: 8, width: 160, height: 32)
+        close.frame = CGRect(x: 16, y: 12, width: 72, height: 32)
         close.addTarget(self, action: #selector(hideTapped), for: .touchUpInside)
         container.addSubview(close)
 
+        let native = UIButton(type: .system)
+        native.setTitle("原生日志", for: .normal)
+        native.frame = CGRect(x: 96, y: 12, width: 96, height: 32)
+        native.addTarget(self, action: #selector(showNativeLog), for: .touchUpInside)
+        container.addSubview(native)
+
+        let audio = UIButton(type: .system)
+        audio.setTitle("播放探针", for: .normal)
+        audio.frame = CGRect(x: 200, y: 12, width: 96, height: 32)
+        audio.addTarget(self, action: #selector(showAudioProbe), for: .touchUpInside)
+        container.addSubview(audio)
+
         host.addSubview(container)
         panel = container
+        showAudioProbe()
+    }
+
+    @objc private func showNativeLog() {
+        guard let label = panel?.subviews.compactMap({ $0 as? UILabel }).first else { return }
+        guard let url = CrashLog.fileURL,
+              let body = try? String(contentsOf: url, encoding: .utf8) else {
+            label.text = "（还没有日志）"
+            return
+        }
+        // 只留最后一屏，太长反而看不清。
+        label.text = String(body.suffix(4000))
+    }
+
+    /// 读页面里播放探针收集到的现场。页面不可用（加载失败）时给一句明确的提示，
+    /// 免得看起来像「面板坏了」。
+    @objc private func showAudioProbe() {
+        guard let web = webView else { return }
+        web.evaluateJavaScript(
+            "window.__folioAudioProbe ? window.__folioAudioProbe.dump() : '(页面里没有探针，可能还没加载完)'"
+        ) { [weak self] result, error in
+            DispatchQueue.main.async {
+                guard let label = self?.panel?.subviews.compactMap({ $0 as? UILabel }).first else { return }
+                if let error {
+                    label.text = "读取失败：\(error.localizedDescription)"
+                    return
+                }
+                let text = (result as? String) ?? "（没有数据）"
+                label.text = "==== 播放探针 ====\n" + (text.isEmpty ? "（还没有事件，先点一下播放）" : text)
+            }
+        }
     }
 
     @objc private func hideTapped() { hide() }

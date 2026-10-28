@@ -322,17 +322,11 @@
     <div id="root"></div>
 
 <!-- ========== 赞赏弹窗 开始 ========== -->
-<style>#donate-mask{-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);z-index:2147482500;background:#000000ad;justify-content:center;align-items:center;padding:20px;display:none;position:fixed;inset:0}#donate-mask.show{display:flex}#donate-card{text-align:center;background:#fff;border-radius:18px;width:340px;max-width:86vw;padding:20px 20px 16px;animation:.24s dp;box-shadow:0 18px 60px #00000073}#donate-card .donate-title{color:#1f1f1f;letter-spacing:.02em;font-size:17px;font-weight:700}#donate-card img{border-radius:10px;width:min(62vw,240px);margin:0 auto 6px;display:block}#donate-card .donate-version{color:#666;background:#f6f7f9;border-radius:10px;justify-content:center;align-items:center;gap:10px;margin:0 0 14px;padding:8px 10px;font-size:12px;display:flex}#donate-card .donate-version b{color:#1f1f1f;font-weight:700}#donate-card #donate-get-latest{color:#ff4d6d;cursor:pointer;font-weight:600;text-decoration:none}#donate-card #donate-get-latest[data-busy="1"]{opacity:.55;pointer-events:none}#donate-card .donate-row{justify-content:center;gap:14px;margin-top:14px;display:flex}#donate-card .donate-col{flex:1;max-width:150px}#donate-card .donate-col img{width:100%}#donate-card .donate-col .q-label{color:#555;font-size:12px}#donate-card p{color:#666;margin:10px 0 0;font-size:13px;line-height:1.5}#donate-card p.hint{color:#9a9a9a;margin-top:4px;font-size:12px}#donate-close{color:#333;cursor:pointer;background:#f2f3f5;border:0;border-radius:999px;margin-top:14px;padding:9px 34px;font-size:14px}@keyframes dp{0%{opacity:0;transform:scale(.88)}to{opacity:1;transform:scale(1)}}</style>
+<style>#donate-mask{-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);z-index:2147482500;background:#000000ad;justify-content:center;align-items:center;padding:20px;display:none;position:fixed;inset:0}#donate-mask.show{display:flex}#donate-card{text-align:center;background:#fff;border-radius:18px;width:340px;max-width:86vw;padding:20px 20px 16px;animation:.24s dp;box-shadow:0 18px 60px #00000073}#donate-card .donate-title{color:#1f1f1f;letter-spacing:.02em;font-size:17px;font-weight:700}#donate-card img{border-radius:10px;width:min(62vw,240px);margin:0 auto 6px;display:block}#donate-card .donate-row{justify-content:center;gap:14px;margin-top:14px;display:flex}#donate-card .donate-col{flex:1;max-width:150px}#donate-card .donate-col img{width:100%}#donate-card .donate-col .q-label{color:#555;font-size:12px}#donate-card p{color:#666;margin:10px 0 0;font-size:13px;line-height:1.5}#donate-card p.hint{color:#9a9a9a;margin-top:4px;font-size:12px}#donate-close{color:#333;cursor:pointer;background:#f2f3f5;border:0;border-radius:999px;margin-top:14px;padding:9px 34px;font-size:14px}@keyframes dp{0%{opacity:0;transform:scale(.88)}to{opacity:1;transform:scale(1)}}</style>
 
 <div id="donate-mask">
   <div id="donate-card">
     <div class="donate-title">给 Ex 赞赏</div>
-    <div class="donate-version">
-      <span>当前版本 <b id="donate-version-num">2.0</b></span>
-      <span>·</span>
-      <span>最新版本 <b id="donate-latest-num">2.0</b></span>
-      <a id="donate-get-latest" href="javascript:void(0)">获取</a>
-    </div>
     <div class="donate-row">
       <div class="donate-col">
         <img src="/appreciate-qr.jpg" alt="赞赏码">
@@ -350,10 +344,6 @@
 </div>
 
 <script>
-// 版本号唯一来源：下面的赞赏弹窗和更新公告脚本都读这两个值，避免多处版本号不一致。
-// FOLIA_VERSION = 本 App 当前版本；FOLIA_LATEST_VERSION = 最新可下载版本。
-var FOLIA_VERSION = '2.0';
-var FOLIA_LATEST_VERSION = '2.0';
 (function(){
   try {
     var p = new URLSearchParams(window.location.search);
@@ -363,12 +353,6 @@ var FOLIA_LATEST_VERSION = '2.0';
   var mask = document.getElementById('donate-mask');
   if (!mask) return;
 
-  // 用全局版本号回填，保证「当前版本」和「最新版本」显示的是同一处来源。
-  var verNum = document.getElementById('donate-version-num');
-  if (verNum && typeof FOLIA_VERSION === 'string' && FOLIA_VERSION) { verNum.textContent = FOLIA_VERSION; }
-  var latestNum = document.getElementById('donate-latest-num');
-  if (latestNum && typeof FOLIA_LATEST_VERSION === 'string' && FOLIA_LATEST_VERSION) { latestNum.textContent = FOLIA_LATEST_VERSION; }
-
   var KEY = 'folia.donate.shown';
   var shown = false;
   try { shown = sessionStorage.getItem(KEY) === '1'; } catch (e) {}
@@ -377,74 +361,12 @@ var FOLIA_LATEST_VERSION = '2.0';
     try { sessionStorage.setItem(KEY, '1'); } catch (e) {}
   }
 
-  var QUARK_URL = 'https://pan.quark.cn/s/934c480d5b9c';
-  var getLatestBtn = document.getElementById('donate-get-latest');
-  if (getLatestBtn) {
-    getLatestBtn.addEventListener('click', function(e){
-      e.preventDefault();
-      try { window.open(QUARK_URL, '_blank'); } catch(err) { location.href = QUARK_URL; }
-    });
-  }
-
   document.getElementById('donate-close').addEventListener('click', function(){ mask.classList.remove('show'); });
   mask.addEventListener('click', function(e){ if (e.target === mask) mask.classList.remove('show'); });
 })();
 </script>
 <!-- ========== 赞赏弹窗 结束 ========== -->
 
-<!-- ========== 版本更新公告（每个版本只弹一次） ========== -->
-<div id="update-mask" style="display:none;position:fixed;inset:0;z-index:2147483500;background:rgba(0,0,0,.62);backdrop-filter:blur(14px);align-items:center;justify-content:center;padding:20px">
-  <div style="width:100%;max-width:340px;background:#fff;border-radius:22px;padding:24px 22px 18px;box-shadow:0 24px 60px rgba(0,0,0,.35);text-align:center;color:#111">
-    <div style="font-size:17px;font-weight:700;letter-spacing:.2px">🎉 Folia 1.8 新版本</div>
-    <p style="margin:14px 0 0;font-size:14px;line-height:1.7;color:#333">最新 <b style="color:#ff4d6d">1.8</b> 版本已发布，请及时下载！</p>
-    <p style="margin:10px 0 0;font-size:12px;color:#999">点击下方按钮前往夸克网盘下载</p>
-    <div style="margin-top:18px;display:flex;gap:10px">
-      <button id="update-open-quark" style="flex:1;border:0;border-radius:999px;padding:11px 0;font-size:14px;font-weight:600;color:#fff;background:linear-gradient(135deg,#ff7e9d,#ff4d6d);cursor:pointer">立即更新</button>
-      <button id="update-close" style="flex:1;border:0;border-radius:999px;padding:11px 0;font-size:14px;font-weight:600;color:#444;background:#f2f3f5;cursor:pointer">我知道了</button>
-    </div>
-  </div>
-</div>
-<script>
-(function () {
-  var LATEST = (typeof FOLIA_LATEST_VERSION === 'string' && FOLIA_LATEST_VERSION) || '2.0';
-  var CUR = (typeof FOLIA_VERSION === 'string' && FOLIA_VERSION) || '2.0';
-  if (CUR === LATEST) return;
-
-  var KEY = 'folia.update.seen.' + LATEST;
-  try { if (localStorage.getItem(KEY)) return; } catch (e) {}
-
-  var mask = document.getElementById('update-mask');
-  if (!mask) return;
-
-  function show() { mask.style.display = 'flex'; }
-  function close() {
-    mask.style.display = 'none';
-    try { localStorage.setItem(KEY, '1'); } catch (e) {}
-  }
-
-  document.getElementById('update-close').addEventListener('click', close);
-  document.getElementById('update-open-quark')?.addEventListener('click', function(){
-    try { window.open('https://pan.quark.cn/s/934c480d5b9c', '_blank'); }
-    catch(err) { location.href = 'https://pan.quark.cn/s/934c480d5b9c'; }
-    close();
-  });
-  mask.addEventListener('click', function (e) { if (e.target === mask) close(); });
-
-  var waited = 0;
-  var timer = setInterval(function () {
-    waited += 400;
-    var donate = document.getElementById('donate-mask');
-    var donateOpen = donate && donate.classList.contains('show');
-    if (!donateOpen) {
-      clearInterval(timer);
-      setTimeout(show, 400);
-    } else if (waited > 30000) {
-      clearInterval(timer);
-    }
-  }, 400);
-})();
-</script>
-<!-- ========== 版本更新公告 结束 ========== -->
 
 <!-- ========== 网易 /lyric/new 响应修正 ========== -->
 <script>
@@ -710,6 +632,202 @@ var FOLIA_LATEST_VERSION = '2.0';
 })();
 </script>
 <!-- ========== QQ / 酷狗 / 波点 隧道登录 结束 ========== -->
+
+<!-- ========== 播放诊断探针 开始 ========== -->
+<script>
+// 播放链是 React 状态机，出错时界面上只有「一闪就暂停」，看不到真正原因。
+// 这里把 <audio> 的全部事件和失败原因收集到 window.__folioAudio 里，
+// 由原生诊断面板（长按左上角）读取显示，不用接电脑也能定位。
+(function () {
+  if (window.__folioAudioProbe) return;
+  var log = [];
+  var probe = window.__folioAudioProbe = {
+    events: log,
+    note: function (tag, detail) {
+      log.push(Math.round(performance.now()) + 'ms ' + tag + ' ' + (detail == null ? '' : detail));
+      if (log.length > 120) log.shift();
+    },
+    dump: function () { return log.join('\n'); }
+  };
+
+  var ERROR_TEXT = {
+    1: 'MEDIA_ERR_ABORTED',
+    2: 'MEDIA_ERR_NETWORK',
+    3: 'MEDIA_ERR_DECODE',
+    4: 'MEDIA_ERR_SRC_NOT_SUPPORTED'
+  };
+
+  function describe(el) {
+    var src = el.currentSrc || el.getAttribute('src') || '';
+    return 'src=' + src.slice(-60) + ' rs=' + el.readyState + ' ns=' + el.networkState +
+           ' dur=' + (isFinite(el.duration) ? el.duration.toFixed(1) : '-') +
+           ' t=' + el.currentTime.toFixed(2) + ' paused=' + el.paused;
+  }
+
+  function attach(el) {
+    if (!el || el.__folioProbe) return;
+    el.__folioProbe = true;
+    probe.note('attach', describe(el));
+    ['play', 'playing', 'pause', 'ended', 'waiting', 'stalled', 'suspend', 'emptied', 'abort',
+     'loadstart', 'canplay', 'loadedmetadata'].forEach(function (name) {
+      el.addEventListener(name, function () {
+        if (name === 'play' || name === 'pause' || name === 'ended' || name === 'playing' ||
+            name === 'abort' || name === 'emptied') {
+          probe.note(name, describe(el));
+        }
+      }, true);
+    });
+    el.addEventListener('error', function () {
+      var e = el.error;
+      probe.note('ERROR', (e ? (ERROR_TEXT[e.code] || e.code) + ' ' + e.message : 'unknown') + ' | ' + describe(el));
+    }, true);
+  }
+
+  function scan() {
+    document.querySelectorAll('audio,video').forEach(attach);
+  }
+
+  // 播放失败最常见的落点是 play() 的 promise 被拒：AbortError（被新的 load 打断）、
+  // NotSupportedError（源不可用）、NotAllowedError（手势限制）。
+  var nativePlay = HTMLMediaElement.prototype.play;
+  HTMLMediaElement.prototype.play = function () {
+    var el = this;
+    probe.note('play()', describe(el));
+    var p;
+    try { p = nativePlay.apply(this, arguments); } catch (e) {
+      probe.note('play() threw', e && e.name);
+      throw e;
+    }
+    if (p && p.catch) {
+      p.catch(function (e) {
+        probe.note('play() rejected', (e && e.name) + ' ' + (e && e.message));
+      });
+    }
+    return p;
+  };
+
+  new MutationObserver(scan).observe(document.documentElement, { childList: true, subtree: true });
+  document.addEventListener('DOMContentLoaded', scan);
+  scan();
+
+  // 自定义协议（folia://）下没有同源限制，音频地址能否真的取到字节只能自己探。
+  // 播放「一闪就暂停」时，如果这里 HEAD 拿不到 200，就说明音频 CDN 被网络挡了，
+  // 和播放器逻辑无关。
+  var probed = {};
+  probe.probeSrc = function (src) {
+    if (!src || src.indexOf('blob:') === 0 || probed[src]) return;
+    probed[src] = true;
+    probe.note('probe-src', src.slice(0, 100));
+    var xhr = new XMLHttpRequest();
+    try {
+      xhr.open('GET', src, true);
+      xhr.responseType = 'arraybuffer';
+      // 只取前 8KB 就够判断了，别把整首歌拉下来。
+      xhr.setRequestHeader('Range', 'bytes=0-8191');
+      xhr.onreadystatechange = function () {
+        if (xhr.readyState !== 4) return;
+        probe.note('probe-result', 'status=' + xhr.status +
+          ' type=' + (xhr.getResponseHeader('Content-Type') || '-') +
+          ' bytes=' + (xhr.response ? xhr.response.byteLength : 0));
+      };
+      xhr.onerror = function () { probe.note('probe-error', 'network'); };
+      xhr.send();
+    } catch (e) {
+      probe.note('probe-threw', e && e.name);
+    }
+  };
+
+  var lastSrc = '';
+  setInterval(function () {
+    var el = document.querySelector('audio');
+    if (!el) return;
+    var src = el.currentSrc || el.getAttribute('src') || '';
+    if (src && src !== lastSrc) {
+      lastSrc = src;
+      probe.probeSrc(src);
+    }
+  }, 800);
+})();
+</script>
+<!-- ========== 播放诊断探针 结束 ========== -->
+
+<!-- ========== 播放中途被掐断后的自动续播 开始 ========== -->
+<script>
+// 系统层面有两个东西会在播放中途把声音掐掉，而页面自己不知道：
+//   1. 来电 / 其他 App 抢占 → 音频会话被打断，WebAudio 静默；
+//   2. 锁屏控制中心送来 playback 事件 → 同样的结果。
+// 两种情况在 DOM 上看起来都只是「audio 被暂停了」，播放器状态机于是停在暂停。
+//
+// 这里只在「本来在放（已经放过一段时间、不是用户按的暂停、当前曲目没播完）」时续播一次，
+// 并且限频，避免和用户手动暂停打架。
+(function () {
+  if (window.__folioAutoResume) return;
+  var guard = window.__folioAutoResume = { enabled: true, attempts: 0 };
+
+  var lastPlayedAt = 0;
+  var stoppedAt = 0;
+  var wasSounding = false;
+
+  function currentAudio() {
+    var list = document.querySelectorAll('audio');
+    for (var i = 0; i < list.length; i += 1) {
+      if (!list[i].paused && !list[i].ended) return list[i];
+    }
+    for (var j = 0; j < list.length; j += 1) {
+      if (list[j].currentTime > 0 && !list[j].ended) return list[j];
+    }
+    return list[0] || null;
+  }
+
+  document.addEventListener('playing', function (e) {
+    if (e.target && e.target.tagName === 'AUDIO') {
+      wasSounding = true;
+      lastPlayedAt = Date.now();
+      guard.attempts = 0;
+    }
+  }, true);
+
+  document.addEventListener('pause', function (e) {
+    if (!e.target || e.target.tagName !== 'AUDIO') return;
+    var el = e.target;
+    // 播完了不算掐断；刚开播就停（用户手速/换歌）也不算。
+    if (el.ended || el.currentTime < 1) return;
+    if (Date.now() - lastPlayedAt < 500) return;
+    wasSounding = true;
+    stoppedAt = Date.now();
+  }, true);
+
+  function tryResume() {
+    if (!guard.enabled || !wasSounding) return;
+    if (Date.now() - stoppedAt < 300) return;
+    if (guard.attempts >= 3) return;
+    var el = currentAudio();
+    if (!el || !el.paused || el.ended || !el.currentSrc) return;
+    guard.attempts += 1;
+    var p = el.play();
+    if (p && p.catch) { p.catch(function () {}); }
+    if (window.__folioAudioProbe) window.__folioAudioProbe.note('auto-resume', '#' + guard.attempts);
+  }
+
+  // 回到前台是最典型的「被打断后回来」场景。
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible') { stoppedAt = 0; tryResume(); }
+  });
+  window.addEventListener('pageshow', function () { stoppedAt = 0; tryResume(); });
+  window.addEventListener('focus', function () { stoppedAt = 0; tryResume(); });
+
+  // 用户自己按暂停时先关掉守卫：点播放器按钮会先触发 pointerdown，
+  // 比 pause 事件早，这样不会把用户的操作当成「被打断」。
+  document.addEventListener('pointerdown', function (e) {
+    var t = e.target;
+    var el = t && t.closest ? t.closest('button,[role="button"]') : null;
+    if (!el) return;
+    var label = (el.getAttribute('aria-label') || '') + (el.getAttribute('data-testid') || '') + (el.textContent || '');
+    if (/暂停|pause/i.test(label)) { guard.enabled = false; setTimeout(function () { guard.enabled = true; }, 1200); }
+  }, true);
+})();
+</script>
+<!-- ========== 播放中途被掐断后的自动续播 结束 ========== -->
 
 </body>
 </html>

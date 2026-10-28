@@ -121,13 +121,22 @@ final class AudioSessionController {
 
     /// 锁屏控制中心/耳机线控按钮。
     ///
-    /// WKWebView 里的 <audio> 不会自动注册远程控制事件，这里占住这组事件，
-    /// 再通过 JS 转给页面自身的播放器，锁屏才能暂停/继续而不是显示成「未在播放」。
+    /// **这里刻意只保留切歌，禁掉 play / pause / togglePlayPause。**
+    ///
+    /// WKWebView 里的 <audio> 走 WebAudio 的 createMediaElementSource 后，声音由页面自己的
+    /// AudioContext 输出，系统侧没有一条「正在播放」的媒体轨道。这种状态下 App 一旦把
+    /// MPRemoteCommandCenter 的播放命令全部接过来，iOS 就会把本 App 当成「当前正在播放的
+    /// 媒体应用」，并反复送来 pauseCommand；iOS 每次送来 playback 类事件时还会
+    /// deactivate 一次 AVAudioSession，WebAudio 随之被打断 —— 用户看到的就是
+    /// 「点了播放，进度条刚动一下又自动暂停」。
+    ///
+    /// 不接管这几个命令时，锁屏只显示标题/封面而不提供播放按钮；换来的是一按播放能一直放。
+    /// 切歌命令不受影响：它们不涉及会话激活，也不会被系统主动重发。
     private func configureRemoteCommands() {
         let center = MPRemoteCommandCenter.shared()
-        center.playCommand.isEnabled = true
-        center.pauseCommand.isEnabled = true
-        center.togglePlayPauseCommand.isEnabled = true
+        center.playCommand.isEnabled = false
+        center.pauseCommand.isEnabled = false
+        center.togglePlayPauseCommand.isEnabled = false
         center.nextTrackCommand.isEnabled = true
         center.previousTrackCommand.isEnabled = true
 
@@ -138,9 +147,6 @@ final class AudioSessionController {
             }
         }
 
-        center.playCommand.addTarget(handler: handler("play"))
-        center.pauseCommand.addTarget(handler: handler("pause"))
-        center.togglePlayPauseCommand.addTarget(handler: handler("toggle"))
         center.nextTrackCommand.addTarget(handler: handler("next"))
         center.previousTrackCommand.addTarget(handler: handler("prev"))
     }
