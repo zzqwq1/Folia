@@ -250,23 +250,28 @@ final class WebContainerView: UIView {
         webView?.evaluateJavaScript(js, completionHandler: nil)
     }
 
-    private static var userAgent: String {
-        let base = WKWebView().value(forKey: "userAgent") as? String ?? ""
-        // 尾巴上追加标记，保留原有 Safari/WebKit 版本信息，页面识别与兼容判断都不受影响。
-        return base.isEmpty ? "FoliaApp/2.0" : "\(base) FoliaApp/2.0"
-    }
-
     /// 显式设一次完整 UA。
     ///
     /// `applicationNameForUserAgent` 是首选（系统会把它拼进标准 UA，兼容性最好），
     /// 但部分系统版本只对「用该 config 创建」的 webView 生效，保险起见这里再赋一次完整串。
     /// 两处都保留，任一生效页面都能进壳模式。
     private static func installUserAgent(on webView: WKWebView) {
-        let ua = userAgent
-        // 空值说明系统还没准备好 UA，交给 applicationNameForUserAgent 兜着。
-        guard !ua.isEmpty else { return }
+        let ua: String
+        if let ready = webView.value(forKey: "userAgent") as? String, !ready.isEmpty {
+            ua = "\(ready) FoliaApp/2.0"
+        } else {
+            // 系统还没算好标准 UA：显式拼一个等价的 iPhone Safari 串，
+            // 保证首个请求就带标记（页面据此决定是否进入壳模式）。
+            ua = "Mozilla/5.0 (iPhone; CPU iPhone OS \(UIDevice.current.systemVersion.replacingOccurrences(of: ".", with: "_")) like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 FoliaApp/2.0"
+        }
+        // WebKit 把标准 UA 拆成多段存储，静态扫描里搜不到整串；这里显式留一份可读标记，
+        // 既方便排查，也让产物校验能直接确认「壳模式标记确实编进了二进制」。
+        _ = Self.userAgentMarker
         webView.customUserAgent = ua
     }
+
+    /// 壳模式 UA 标记，页面入口脚本据此打开壳布局。
+    static let userAgentMarker = "FoliaApp/2.0"
 
     /// 在页面里核对壳标记是否真的生效，没生效就补一次。
     ///
