@@ -239,6 +239,8 @@ final class WebContainerView: UIView {
             guard let self else { return }
             if let painted = result as? Int, painted == 1 {
                 DispatchQueue.main.async { self.didReachFirstPaint = true }
+                // 首屏就绪再开赞赏弹窗：在那之前 DOM 里的图片还没解码，弹出来是两张空白框。
+                self.installDonateCard()
                 return
             }
             // 还没就绪：一秒后再看，直到看门狗到点兜底。
@@ -349,6 +351,52 @@ final class WebContainerView: UIView {
               });
             };
           }
+        })();
+        """
+        webView?.evaluateJavaScript(js, completionHandler: nil)
+    }
+
+    /// 把页面自带的赞赏弹窗打开。
+    ///
+    /// 线上页的赞赏脚本开头有 `if (/iPhone|iPad|iPod/i.test(UA)) return;`，
+    /// 装在 App 里时整段直接退出，弹窗永远不会出现；而壳的 UA 一定含 "iPhone"。
+    /// 这里在首屏就绪后按同一份 DOM 自己打开，并补上脚本里因提前返回而没绑上的点击：
+    /// 关闭按钮、点空白关闭、二维码长按保存。
+    private func installDonateCard() {
+        let js = """
+        (function(){
+          if (window.__foliaDonateInstalled) { return; }
+          var mask = document.getElementById('donate-mask');
+          if (!mask) { return; }
+          window.__foliaDonateInstalled = true;
+
+          try {
+            var ver = document.getElementById('donate-version-num');
+            if (ver && typeof FOLIA_VERSION === 'string' && FOLIA_VERSION) { ver.textContent = FOLIA_VERSION; }
+            var latest = document.getElementById('donate-latest-num');
+            if (latest && typeof FOLIA_LATEST_VERSION === 'string' && FOLIA_LATEST_VERSION) { latest.textContent = FOLIA_LATEST_VERSION; }
+          } catch (e) {}
+
+          var closeBtn = document.getElementById('donate-close');
+          if (closeBtn) {
+            closeBtn.addEventListener('click', function(){ mask.classList.remove('show'); });
+          }
+          mask.addEventListener('click', function(e){ if (e.target === mask) { mask.classList.remove('show'); } });
+
+          // 每次启动都弹一次：sessionStorage 里那条是网页版防重复用的，壳里不清就会被跳过。
+          try { sessionStorage.removeItem('folia.donate.shown'); } catch (e) {}
+
+          // 横幅本身已经挡住了整屏，网页里的长按菜单（放大镜、复制链接）用不上；
+          // 但二维码要能「长按保存到相册」，所以只对二维码图片放开手势。
+          var imgs = mask.querySelectorAll('img');
+          for (var i = 0; i < imgs.length; i += 1) {
+            try {
+              imgs[i].style.webkitUserSelect = 'auto';
+              imgs[i].style.webkitTouchCallout = 'default';
+            } catch (e) {}
+          }
+
+          setTimeout(function(){ mask.classList.add('show'); }, 1200);
         })();
         """
         webView?.evaluateJavaScript(js, completionHandler: nil)
