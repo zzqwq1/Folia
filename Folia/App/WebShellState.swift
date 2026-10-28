@@ -14,17 +14,31 @@ final class WebShellState: ObservableObject {
     /// 线上页打不开时（离线、被墙、DNS 故障）要让界面说清楚，
     /// 否则用户只看到一片深色背景，会误判成「又闪退了」。
     @Published private(set) var offlineReason: String?
+    /// 现场细节（URL、UA、遮罩状态等），只有诊断需要时才有，显示在提示框下方。
+    private(set) var failureDetail: String?
 
-    func noteLoadFailure(_ code: Int) {
-        guard -1009 != code else {
+    func noteLoadFailure(_ code: Int, detail: String? = nil) {
+        failureDetail = detail
+        switch code {
+        case -1009:
             offlineReason = "当前网络不可用"
-            return
+        case -1001:
+            offlineReason = "网络太慢，页面没能加载完"
+        case -1003, -1004, -1005:
+            offlineReason = "连不上 Folia 服务器"
+        case -3:
+            // 文档到了、但页面里的脚本一直没跑完：通常是它依赖的 CDN 模块拉不下来。
+            offlineReason = "页面脚本没能启动"
+        case -1:
+            offlineReason = "页面没能加载出来"
+        default:
+            offlineReason = "页面加载失败（\(code)）"
         }
-        offlineReason = "页面加载失败（\(code)）"
     }
 
     func clearLoadFailure() {
         offlineReason = nil
+        failureDetail = nil
     }
 }
 

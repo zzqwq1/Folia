@@ -87,6 +87,7 @@ final class WebContainerView: UIView {
             .sink { [weak self] _ in self?.webView.reload() }
 
         webView.load(URLRequest(url: Self.startURL, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30))
+        scheduleProgressWatchdog()
 
         // 锁屏 / 耳机线控按钮 → 页面播放器。
         remoteObservation = NotificationCenter.default
@@ -142,6 +143,109 @@ final class WebContainerView: UIView {
         })('\(action)');
         """
         webView?.evaluateJavaScript(js, completionHandler: nil)
+    }
+
+    // MARK: - 加载看门狗
+
+    /// 页面多久还没画出东西就算卡住。线上页要拉主 bundle 与一批 CDN 依赖，正常两三秒；
+    /// 超过这个时间基本可以判为「黑屏卡死」。
+    private static let stallTimeout: TimeInterval = 15
+
+    /// 首屏是否已经就绪（React 挂上、加载遮罩淡出）。
+    private var didReachFirstPaint = false
+
+    /// 盯着首屏：到点还没就绪，就把当前 URL、标题与页面文本回传，让用户看到到底卡在哪。
+    ///
+    /// 之前「一直黑屏」只能靠猜——界面是一片 #09090b，究竟是网络、DNS、
+    /// 还是页面里的模块加载被卡住，在外面完全看不出来。这里把现场收集起来直接显示。
+    private func scheduleProgressWatchdog() {
+        didReachFirstPaint = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.stallTimeout) { [weak self] in
+            self?.reportStallIfNeeded()
+        }
+    }
+
+    private func reportStallIfNeeded() {
+        guard !didReachFirstPaint else { return }
+        let js = """
+        (function(){
+          var splash = document.getElementById('app-splash');
+          var root = document.getElementById('root');
+          return [
+            'url=' + location.href,
+            'readyState=' + document.readyState,
+            'ua=' + (navigator.userAgent || '').slice(-40),
+            'shell=' + (document.documentElement.getAttribute('data-folia-shell') || '-'),
+            'splash=' + (splash ? (splash.className || 'visible') : 'gone'),
+            'rootChildren=' + (root ? root.children.length : -1)
+          ].join('\\n');
+        })();
+        """
+        webView?.evaluateJavaScript(js) { [weak self] result, error in
+            DispatchQueue.main.async {
+                guard let self, !self.didReachFirstPaint else { return }
+                let detail = (result as? String) ?? (error?.localizedDescription ?? "页面无响应")
+                CrashLog.note("==== first paint timeout ====\n\(detail)")
+                self.state.noteLoadFailure(-3, detail: detail)
+            }
+        }
+    }
+
+    /// 拉一下同时段的远端日志，看看模块图是不是卡在 CDN 上。
+    ///
+    /// 线上页用 importmap 从 aistudiocdn 取 react / framer-motion 等模块，
+    /// 这些请求失败不会触发 document 的错误事件，既不进本地日志也不显示在界面上。
+    /// 这里主动回灌一份资源现场，真机截一张图就能判断「到底哪个文件没下来」。
+    private func collectResourceReport(_ completion: @escaping (String) -> Void) {
+        let js = """
+        (function(){
+          var out = [];
+          try {
+            var res = performance.getEntriesByType('resource') || [];
+            out.push('resources=' + res.length);
+            for (var i = 0; i < res.length; i += 1) {
+              var r = res[i];
+              // 只列外部模块与主 bundle，封面/字体这些噪音太多。
+              if (!/\\.(js|mjs|css)(\\?|$)/.test(r.name)) { continue; }
+              out.push(Math.round(r.duration) + 'ms ' + (r.transferSize || 0) + 'B ' + r.name);
+            }
+            var nav = performance.getEntriesByType('navigation')[0];
+            if (nav) { out.push('nav=' + Math.round(nav.responseEnd) + 'ms type=' + nav.type); }
+          } catch (e) {}
+          return out.slice(0, 40).join('\\n');
+        })();
+        """
+        webView?.evaluateJavaScript(js) { result, error in
+            DispatchQueue.main.async {
+                let text = (result as? String) ?? (error?.localizedDescription ?? "")
+                completion(text)
+            }
+        }
+    }
+
+    /// 文档加载完后轮询首屏是否就绪：React 挂上就会把 `#app-splash` 去掉。
+    /// 一直不去掉说明主 bundle 或它依赖的 CDN 模块卡住了，交给看门狗报现场。
+    private func scheduleFirstPaintCheck() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.checkFirstPaint()
+        }
+    }
+
+    private func checkFirstPaint() {
+        guard !didReachFirstPaint else { return }
+        webView?.evaluateJavaScript(
+            "(document.getElementById('app-splash') ? 0 : 1)"
+        ) { [weak self] result, _ in
+            guard let self else { return }
+            if let painted = result as? Int, painted == 1 {
+                DispatchQueue.main.async { self.didReachFirstPaint = true }
+                return
+            }
+            // 还没就绪：一秒后再看，直到看门狗到点兜底。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self?.checkFirstPaint()
+            }
+        }
     }
 
     /// 后台播放保活 + 播放状态上报给原生（锁屏/控制中心据此判断「正在播放」）。
@@ -274,7 +378,6 @@ final class WebContainerView: UIView {
     static let userAgentMarker = "FoliaApp/2.0"
 
     /// 在页面里核对壳标记是否真的生效，没生效就补一次。
-    ///
     /// 页面入口脚本按 UA 判定壳模式；一旦判定失败，整页会按移动浏览器渲染（86% 缩放）。
     /// 这里是最后一道保险：UA 对不上就直接把标记写进去，不依赖时序。
     /// 线上页的模块入口有自己的私有标记，两边都置上，任何一侧判定成功都能进壳模式。
@@ -331,12 +434,8 @@ final class WebContainerView: UIView {
     (function(){
       document.documentElement.setAttribute('data-folia-shell', '1');
       window.__FOLIA_SHELL__ = 'ios';
-      try {
-        Object.defineProperty(navigator, 'serviceWorker', {
-          configurable: true,
-          get: function(){ return undefined; }
-        });
-      } catch (e) {}
+      // 注意不能把 navigator.serviceWorker 改成 undefined：线上页里 registerSW.js 会直接
+      // 抛 TypeError，PWA 注册失败会让页面自己挂掉；WKWebView 里 register 本身就是空操作。
       // WKWebView 里 window.open 不开新窗口，站外链接改由原生导航策略接管外跳。
       var nativeOpen = window.open;
       window.open = function(url){
@@ -407,6 +506,9 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         pushInsetsIfNeeded()
         ensureShellFlag()
         state.clearLoadFailure()
+        // 文档加载完不等于画出来了：页面还要拉主 bundle 才能挂 React。
+        // 这里只解除「导航级」失败，首屏看门狗继续跑，直到 React 真的把遮罩去掉。
+        scheduleFirstPaintCheck()
         installAudioKeeper()
         installLoginHelpers()
         // App 启动时会被系统重新激活会话；每次页面加载完再补一次，
@@ -421,6 +523,11 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         guard code != NSURLErrorCancelled else { return }
         CrashLog.note("==== provisional navigation failed \(code) \(error.localizedDescription) ====")
         state.noteLoadFailure(code)
+        // 失败原因分得很细：DNS(-1003)、超时(-1001)、拒绝连接(-1004)、TLS(-1200~)，
+        // 只报一个数字用户看不懂，日志里也要留下域名与 URL。
+        collectResourceReport { report in
+            CrashLog.note("==== failure context ====\nurl=\(Self.startURL.absoluteString)\ncode=\(code)\n\(report)")
+        }
         let now = Date()
         contentProcessRestarts = contentProcessRestarts.filter { now.timeIntervalSince($0) < 60 }
         guard contentProcessRestarts.count < 2 else { return }
@@ -429,7 +536,6 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
             webView?.load(URLRequest(url: Self.startURL))
         }
     }
-
     /// 内容进程被系统回收（内存压力）时自动恢复，但要限流：
     /// 无脑 reload 会形成「加载界面 → 立刻再被杀 → 再 reload」的死循环，
     /// 用户在界面上看到的就是反复闪回加载界面。

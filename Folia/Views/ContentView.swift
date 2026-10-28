@@ -11,7 +11,7 @@ struct ContentView: View {
             WebShellView()
                 .ignoresSafeArea()
             if let reason = state.offlineReason {
-                OfflineNotice(reason: reason) { state.reload() }
+                OfflineNotice(reason: reason, detail: state.failureDetail) { state.reload() }
             }
         }
         .statusBarHidden(false)
@@ -25,6 +25,7 @@ struct ContentView: View {
 /// 必须给出可见的说明与重试入口，不能让用户面对一片黑。
 private struct OfflineNotice: View {
     let reason: String
+    let detail: String?
     let retry: () -> Void
 
     var body: some View {
@@ -37,6 +38,14 @@ private struct OfflineNotice: View {
                 .font(.footnote)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
+            if let detail {
+                // 现场信息：真机上一眼能看出是脚本没跑到、还是资源没下来。
+                Text(detail)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             Button("重试", action: retry)
                 .buttonStyle(.borderedProminent)
         }
