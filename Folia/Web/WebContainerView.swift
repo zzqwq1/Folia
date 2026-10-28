@@ -23,6 +23,13 @@ final class WebContainerView: UIView {
     /// 首屏卡住后的自动重试时间窗，同样用来限流。
     private var stallRetries: [Date] = []
 
+    /// 由系统音频中断模块同步过来的「正在后台播放」。
+    ///
+    /// 切歌词界面闪退时整块 `audio` 会从页面上被摘掉，暂停事件根本发不出来；
+    /// 用户看到的就是「后台还在响，一进歌词界面 App 没了」。靠播放器自己上报暂停来不及，
+    /// 所以由原生在检测到进程终止前一帧的状态时判定要不要自动续播。
+    fileprivate static var wasAudibleInBackground = false
+
     /// 线上站点的域名。导航策略、诊断与重载都以它为基准。
     private static let siteHost = "app.folia-api.top"
     private static let startURL = URL(string: "https://app.folia-api.top/")!
@@ -195,8 +202,10 @@ final class WebContainerView: UIView {
         if wantsAudible && !userPaused {
             AudioSessionController.shared.reactivate()
             startKeepAliveTimer()
+            Self.wasAudibleInBackground = true
         } else {
             stopKeepAliveTimer()
+            Self.wasAudibleInBackground = false
         }
     }
 
@@ -903,6 +912,12 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         // 计进日志才能区分到底是哪一种。
         CrashLog.note("==== web content process terminated (#\(contentProcessRestarts.count)) url=\(webView.url?.absoluteString ?? "-") ====")
 
+        // 网页进程被打死后，页面里的 `<audio>` 随之消失，声音立刻断掉 ——
+        // 用户实际经历的是「切歌词界面，音乐停了 / App 退回首页」。
+        // 这里先把现场抓下来（进程已经死了，事件监听器多半已经取不到，只能尽力）：
+        // 崩溃前的标题、当前路由，以及崩溃时是否还在出声。
+        collectTerminationContext()
+
         if contentProcessRestarts.count <= 2 {
             webView.reload()
         } else if contentProcessRestarts.count == 3 {
@@ -911,6 +926,18 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
             // 一分钟内挂了四次，说明继续重建只会更糟，先停在这里等用户手动刷新。
             NSLog("[Folia] content process terminated repeatedly, stop auto reload")
         }
+    }
+
+    /// 抓一份「进程死掉时页面长什么样」的现场。
+    ///
+    /// 页面脚本早在切歌词时就已随进程一起消失，`evaluateJavaScript` 拿不到任何东西；
+    /// 但 `title` / `url` 仍留在 UI 进程这一侧的 WKWebView 上，
+    /// 足以判断「是不是在歌词页被杀」——若是，就能确认是页面重建播放器树时把进程搞死的。
+    private func collectTerminationContext() {
+        let title = webView.title ?? "-"
+        let url = webView.url?.absoluteString ?? "-"
+        let audible = Self.wasAudibleInBackground ? "1" : "0"
+        CrashLog.note("==== termination context ====\ntitle=\(title)\nurl=\(url)\naudible=\(audible)")
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
