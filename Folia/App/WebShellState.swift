@@ -122,7 +122,7 @@ final class AudioSessionController {
     /// 锁屏控制中心/耳机线控按钮。
     ///
     /// 早先这里禁掉了 play / pause / togglePlayPause，理由是「一接管系统就反复送 pauseCommand，
-    /// 点了播放立刻自动暂停」。真正的原因是本地包（folia:// + 本地反代）里的音频一直没进播放态，
+    /// 点了播放立刻自动暂停」。真正的原因是早先那版内置本地包里的音频一直没进播放态，
     /// 系统自然判定本 App 没在播。现在壳直接套线上页，页面自己通过 MediaSession 管播放，
     /// 本 App 只负责把命令转发进页面，命令本身全部启用。
     private func configureRemoteCommands() {

@@ -334,7 +334,7 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
     /// 站内（含子域）与媒体资源一律放行；只有主框架跳到站外时才交给系统浏览器。
     ///
     /// 线上页是远程 https：音频、封面、二维码图片全在站外 CDN 上，
-    /// 这里必须按「是不是主框架」区分，不能再像本地包那样只放行 folia://。
+    /// 所以按「是不是主框架」区分，只有主框架跳站外才外跳。
     func webView(_ webView: WKWebView,
                  decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {

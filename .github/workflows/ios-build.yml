@@ -77,6 +77,9 @@ jobs:
           /usr/libexec/PlistBuddy -c "Print :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles" Payload/Folia.app/Info.plist
           /usr/libexec/PlistBuddy -c "Print :CFBundleIcons~ipad:CFBundlePrimaryIcon:CFBundleIconFiles" Payload/Folia.app/Info.plist
           ls -lh Payload/Folia.app/Assets.car
+          echo "start url:"
+          strings Payload/Folia.app/Folia | grep -F "https://app.folia-api.top/" | head -n 3
+          test -n "$(strings Payload/Folia.app/Folia | grep -F 'https://app.folia-api.top/' || true)"
 
       - name: Dump compiled icon
         run: |
