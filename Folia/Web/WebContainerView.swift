@@ -588,52 +588,10 @@ final class WebContainerView: UIView {
 
           setTimeout(function(){ mask.classList.add('show'); }, 1200);
 
-          // ---- 更新公告：与页面同一套规则，等赞赏弹窗关掉后再弹 ----
-          // 跟网页版唯一的差别是不拦「版本相同」：这条公告是用户唯二能看到网盘入口的地方，
-          // 一旦按 cur === latest 跳过，2.0 之后就再也不弹了。
-          if (!latest) { return; }
+          // 更新公告（#update-mask）在壳里不弹：版本号已经固定成 2.0，
+          // 这条「新版本已发布」对已装最新包的人只是打扰。网盘入口保留在赞赏弹窗里。
           var updateMask = document.getElementById('update-mask');
-          if (!updateMask) { return; }
-
-          // 固定文案里写死的 "1.8 新版本" 换成实际版本，站点发新版不用改 HTML。
-          try {
-            var title = updateMask.querySelector('div div');
-            if (title) { title.textContent = '🎉 Folia ' + latest + ' 新版本'; }
-            var line = updateMask.querySelectorAll('p')[0];
-            if (line) { line.innerHTML = '最新 <b style="color:#ff4d6d">' + latest + '</b> 版本已发布，请及时下载！'; }
-          } catch (e) {}
-
-          // 网页版用 localStorage 记住「看过就别再烦」，壳里这条不能留：
-          // 版本号统一成 2.0 之后，看一次就被永久跳过，网盘入口也跟着消失。
-          // 和赞赏弹窗一样改成每次冷启动弹一次，关掉只影响本次。
-          try { localStorage.removeItem('folia.update.seen.' + latest); } catch (e) {}
-
-          function hideUpdate() {
-            updateMask.style.display = 'none';
-          }
-
-          var closeUpdate = document.getElementById('update-close');
-          if (closeUpdate) { closeUpdate.addEventListener('click', hideUpdate); }
-          var openQuark = document.getElementById('update-open-quark');
-          if (openQuark) {
-            openQuark.addEventListener('click', function(){
-              try { window.open(QUARK_URL, '_blank'); } catch (err) { location.href = QUARK_URL; }
-              hideUpdate();
-            });
-          }
-          updateMask.addEventListener('click', function(e){ if (e.target === updateMask) { hideUpdate(); } });
-
-          // 赞赏弹窗先弹，关掉之后再弹更新公告；最多等 30 秒，用户不关就不再追。
-          var waited = 0;
-          var timer = setInterval(function(){
-            waited += 400;
-            if (!mask.classList.contains('show')) {
-              clearInterval(timer);
-              setTimeout(function(){ updateMask.style.display = 'flex'; }, 400);
-            } else if (waited > 30000) {
-              clearInterval(timer);
-            }
-          }, 400);
+          if (updateMask) { updateMask.style.display = 'none'; }
         })();
         """
         webView?.evaluateJavaScript(js, completionHandler: nil)
@@ -722,6 +680,24 @@ final class WebContainerView: UIView {
       // 壳的实际版本（project.yml 的 MARKETING_VERSION），赞赏弹窗的「当前版本」用它，
       // 免得线上页停在旧常量上，用户以为装错了包。
       window.__foliaAppVersion = '\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.0")';
+      // 更新公告在壳里不弹。页面脚本自带 UA 判定会提前 return，本不该弹；
+      // 这里在文档开始时先钉一条样式兜底，任何时序下都压住 #update-mask。
+      // 脚本注入点早于 <head>，所以等 DOMContentLoaded 再插入。
+      (function(){
+        function hide(){
+          try {
+            var style = document.createElement('style');
+            style.id = 'folia-hide-update';
+            style.textContent = '#update-mask{display:none !important;}';
+            (document.head || document.documentElement).appendChild(style);
+          } catch (e) {}
+        }
+        if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', hide);
+        } else {
+          hide();
+        }
+      })();
       // 注意不能把 navigator.serviceWorker 改成 undefined：线上页里 registerSW.js 会直接
       // 抛 TypeError，PWA 注册失败会让页面自己挂掉；WKWebView 里 register 本身就是空操作。
       // WKWebView 里 window.open 不开新窗口，站外链接改由原生导航策略接管外跳。
