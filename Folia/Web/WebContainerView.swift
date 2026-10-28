@@ -361,7 +361,10 @@ final class WebContainerView: UIView {
     /// 线上页的赞赏脚本开头有 `if (/iPhone|iPad|iPod/i.test(UA)) return;`，
     /// 装在 App 里时整段直接退出，弹窗永远不会出现；而壳的 UA 一定含 "iPhone"。
     /// 这里在首屏就绪后按同一份 DOM 自己打开，并补上脚本里因提前返回而没绑上的点击：
-    /// 关闭按钮、点空白关闭、二维码长按保存。
+    /// 关闭按钮、点空白关闭、「获取」跳转、二维码长按保存。
+    ///
+    /// 版本号与更新公告也一并接手：线上页的 `FOLIA_VERSION` / `FOLIA_LATEST_VERSION`
+    /// 是纯静态常量，站点一改，App 里立刻就是新值，不需要重装。
     private func installDonateCard() {
         let js = """
         (function(){
@@ -370,12 +373,29 @@ final class WebContainerView: UIView {
           if (!mask) { return; }
           window.__foliaDonateInstalled = true;
 
-          try {
-            var ver = document.getElementById('donate-version-num');
-            if (ver && typeof FOLIA_VERSION === 'string' && FOLIA_VERSION) { ver.textContent = FOLIA_VERSION; }
-            var latest = document.getElementById('donate-latest-num');
-            if (latest && typeof FOLIA_LATEST_VERSION === 'string' && FOLIA_LATEST_VERSION) { latest.textContent = FOLIA_LATEST_VERSION; }
-          } catch (e) {}
+          var QUARK_URL = 'https://pan.quark.cn/s/934c480d5b9c';
+
+          // 版本号只认页面里的两个常量：站点改了这里就有，壳自己不写死任何版本。
+          var cur = (typeof FOLIA_VERSION === 'string' && FOLIA_VERSION) || '';
+          var latest = (typeof FOLIA_LATEST_VERSION === 'string' && FOLIA_LATEST_VERSION) || '';
+
+          var verNum = document.getElementById('donate-version-num');
+          if (verNum && cur) { verNum.textContent = cur; }
+          var latestNum = document.getElementById('donate-latest-num');
+          if (latestNum && latest) { latestNum.textContent = latest; }
+
+          var getLatest = document.getElementById('donate-get-latest');
+          if (getLatest) {
+            // 已经是最新：这个链接没有意义，隐藏掉，免得点了跳去网盘。
+            if (cur && latest && cur === latest) {
+              getLatest.style.display = 'none';
+            } else {
+              getLatest.addEventListener('click', function(e){
+                e.preventDefault();
+                try { window.open(QUARK_URL, '_blank'); } catch (err) { location.href = QUARK_URL; }
+              });
+            }
+          }
 
           var closeBtn = document.getElementById('donate-close');
           if (closeBtn) {
@@ -397,6 +417,50 @@ final class WebContainerView: UIView {
           }
 
           setTimeout(function(){ mask.classList.add('show'); }, 1200);
+
+          // ---- 更新公告：与页面同一套规则，等赞赏弹窗关掉后再弹 ----
+          if (!cur || !latest || cur === latest) { return; }
+          var updateMask = document.getElementById('update-mask');
+          if (!updateMask) { return; }
+
+          // 固定文案里写死的 "1.8 新版本" 换成实际版本，站点发新版不用改 HTML。
+          try {
+            var title = updateMask.querySelector('div div');
+            if (title) { title.textContent = '🎉 Folia ' + latest + ' 新版本'; }
+            var line = updateMask.querySelectorAll('p')[0];
+            if (line) { line.innerHTML = '最新 <b style="color:#ff4d6d">' + latest + '</b> 版本已发布，请及时下载！'; }
+          } catch (e) {}
+
+          var KEY = 'folia.update.seen.' + latest;
+          try { if (localStorage.getItem(KEY)) { return; } } catch (e) {}
+
+          function hideUpdate() {
+            updateMask.style.display = 'none';
+            try { localStorage.setItem(KEY, '1'); } catch (e) {}
+          }
+
+          var closeUpdate = document.getElementById('update-close');
+          if (closeUpdate) { closeUpdate.addEventListener('click', hideUpdate); }
+          var openQuark = document.getElementById('update-open-quark');
+          if (openQuark) {
+            openQuark.addEventListener('click', function(){
+              try { window.open(QUARK_URL, '_blank'); } catch (err) { location.href = QUARK_URL; }
+              hideUpdate();
+            });
+          }
+          updateMask.addEventListener('click', function(e){ if (e.target === updateMask) { hideUpdate(); } });
+
+          // 赞赏弹窗先弹，关掉之后再弹更新公告；最多等 30 秒，用户不关就不再追。
+          var waited = 0;
+          var timer = setInterval(function(){
+            waited += 400;
+            if (!mask.classList.contains('show')) {
+              clearInterval(timer);
+              setTimeout(function(){ updateMask.style.display = 'flex'; }, 400);
+            } else if (waited > 30000) {
+              clearInterval(timer);
+            }
+          }, 400);
         })();
         """
         webView?.evaluateJavaScript(js, completionHandler: nil)
