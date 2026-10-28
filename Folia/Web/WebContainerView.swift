@@ -154,7 +154,8 @@ final class WebContainerView: UIView {
             queue: .main
         ) { [weak self] _ in
             guard let self else { return }
-            AudioSessionController.shared.configure()
+            // 回前台只重启会话，不重设 category：后者会让 WebKit 媒体当场暂停。
+            AudioSessionController.shared.reactivate()
             // 回前台不改变意图：该响的继续响，轮询照旧。
             self.refreshAudioKeepAlive()
             self.enforcePlaybackIfNeeded(reason: "foreground")
@@ -490,32 +491,33 @@ final class WebContainerView: UIView {
             }
           } catch (e) {}
 
+          // 注意：这里**不能**去改 `window.fetch` / `XMLHttpRequest` / `HTMLMediaElement.prototype`
+          // 这类全局原型。页面是 React 应用，切换歌词形式时会重建整棵播放器树，
+          // 期间会对原型链做批量探测；被改写过的原型在 WKWebView 里可能触发
+          // 「WebProcess 崩掉」—— 用户看到的就是切歌词形式直接闪退。
+          // 现在改成只在真正的媒体元素上挂监听（见下方 capture 阶段），不动任何原型。
+
           var post = function(kind){
             try {
               window.webkit.messageHandlers.foliaAudioIntent.postMessage(kind);
             } catch (e) {}
           };
 
-          // 页面调用 play() 即视为「要出声」，交给原生在后台守住；
-          // pause() 分两种：用户按的（element.pause）和系统按的（没有调用栈来源），
-          // 这里只上报真实调用，系统静默按停不会触发它，靠原生轮询发现并恢复。
-          var mediaProto = HTMLMediaElement.prototype;
-          var nativePlay = mediaProto.play;
-          var nativePause = mediaProto.pause;
-          mediaProto.play = function(){
-            var out = nativePlay.apply(this, arguments);
-            try { if (this.tagName === 'AUDIO') { post('intent-play'); } } catch (e) {}
-            return out;
-          };
-          mediaProto.pause = function(){
-            try {
-              if (this.tagName === 'AUDIO') {
-                // 播放结束后的 pause 不算用户意图，否则一轮播完就再也不续。
-                if (!this.ended) { post('intent-pause'); }
-              }
-            } catch (e) {}
-            return nativePause.apply(this, arguments);
-          };
+          // 用事件捕获而不是包 play/pause：
+          // `play` 事件在真正开始播放时触发，`pause` 在停下时触发；
+          // 两者都只在 AUDIO 元素上处理，不碰原型链。
+          document.addEventListener('play', function(e){
+            var el = e.target;
+            if (!el || el.tagName !== 'AUDIO') { return; }
+            post('intent-play');
+          }, true);
+          document.addEventListener('pause', function(e){
+            var el = e.target;
+            if (!el || el.tagName !== 'AUDIO') { return; }
+            // 播完的 pause 不算用户意图，否则一轮播完就不再续播。
+            if (el.ended) { return; }
+            post('intent-pause');
+          }, true);
 
           var lastState = '';
           var report = function(){
@@ -547,50 +549,58 @@ final class WebContainerView: UIView {
 
     /// 网易云扫码登录的兜底。
     ///
-    /// 服务端的 `/login/qr/create` 只有带 `qrimg=true` 才返回 base64 图片，
-    /// 不带该参数拿到的是空字符串，界面上就一直转圈。
-    /// 这里两头都补：请求上补参数；万一还是空，就用 `QRTool` 本地把 `qrurl` 画出来。
+    /// `/login/qr/create` 只有带 `qrimg=true` 才返回 base64 图片，不带就返回空串，
+    /// 界面上会一直转圈。这里不再改写 `window.fetch`（改全局函数会影响页面所有请求，
+    /// 且切歌词重建播放器树时容易出事），改为只在 DOM 层面兜底：
+    /// 二维码图片为空时，从页面里已有的 `qrurl` 本地画一张（见 `foliaQrFallback`）。
     private func installLoginHelpers() {
         let js = """
         (function(){
           if (window.__foliaLoginHelpers) { return; }
           window.__foliaLoginHelpers = true;
 
-          var ensureQrImg = function(url){
-            if (!url || url.indexOf('/login/qr/create') < 0) { return url; }
-            // 页面自己已经带了就不动。
-            if (/[?&]qrimg=/.test(url)) { return url.replace(/qrimg=[^&]*/, 'qrimg=true'); }
-            return url + (url.indexOf('?') >= 0 ? '&' : '?') + 'qrimg=true';
+          // 观察登录弹窗里的二维码图片：src 为空或加载失败时，把页面上的 qrurl 交给原生重画。
+          // 只处理弹窗内部，避免把封面、图标这类正常图片误判成二维码。
+          var fixImage = function(img){
+            try {
+              if (!img || img.__foliaQrFixed) { return; }
+              var box = img.closest('[id*="qr"], [class*="qr"], [class*="QR"], [class*="login"]');
+              if (!box) { return; }
+              var src = img.getAttribute('src') || '';
+              if (src && src.indexOf('data:') === 0) { return; }
+              img.__foliaQrFixed = true;
+              var target = img.getAttribute('data-qrurl') || '';
+              if (!target && box.innerText) {
+                var m = box.innerText.match(/https?:\\/\\/[^\\s"']+/i);
+                if (m) { target = m[0]; }
+              }
+              if (!target) { return; }
+              window.webkit.messageHandlers.foliaQrFallback.postMessage(target);
+            } catch (e) {}
           };
 
-          var nativeFetch = window.fetch;
-          if (nativeFetch) {
-            window.fetch = function(input, init){
-              try {
-                if (typeof input === 'string') {
-                  input = ensureQrImg(input);
-                } else if (input && input.url) {
-                  var fixed = ensureQrImg(input.url);
-                  if (fixed !== input.url) { input = new Request(fixed, input); }
-                }
-              } catch (e) {}
-              return nativeFetch.call(window, input, init).then(function(res){
-                try {
-                  var u = (res && res.url) || '';
-                  if (u.indexOf('/login/qr/create') >= 0) {
-                    res.clone().json().then(function(body){
-                      var qr = body && body.data && (body.data.qrimg || body.data.qrcode_img);
-                      if (qr) { return; }
-                      var target = body && body.data && body.data.qrurl;
-                      if (!target) { return; }
-                      window.webkit.messageHandlers.foliaQrFallback.postMessage(target);
-                    }).catch(function(){});
-                  }
-                } catch (e) {}
-                return res;
-              });
-            };
-          }
+          var scan = function(){
+            try {
+              var boxes = document.querySelectorAll('[id*="qr"], [class*="qr"], [class*="QR"]');
+              for (var i = 0; i < boxes.length; i += 1) {
+                var imgs = boxes[i].querySelectorAll('img');
+                for (var j = 0; j < imgs.length; j += 1) { fixImage(imgs[j]); }
+              }
+            } catch (e) {}
+          };
+
+          document.addEventListener('error', function(e){
+            var t = e.target;
+            if (t && t.tagName === 'IMG') {
+              t.__foliaQrFixed = false;
+              fixImage(t);
+            }
+          }, true);
+
+          // 二维码是弹窗打开后才插入的，这里低频轮询一次，避免 MutationObserver 在这类
+          // 高频重渲染的页面上放大成本。
+          setInterval(scan, 2000);
+          scan();
         })();
         """
         webView?.evaluateJavaScript(js, completionHandler: nil)

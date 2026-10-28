@@ -17,7 +17,8 @@ struct ContentView: View {
         }
         .statusBarHidden(false)
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
-            AudioSessionController.shared.configure()
+            // 回前台只重启会话，不重设 category：后者会把正在播放的音乐按停。
+            AudioSessionController.shared.reactivate()
         }
     }
 }

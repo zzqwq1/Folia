@@ -106,7 +106,13 @@ final class AudioSessionController {
         }
     }
 
-    /// 重新声明 category 并激活会话：切后台、进程重建、来电结束后都需要。
+    /// 重新声明 category 并激活会话：冷启动、进程重建、来电结束后都需要。
+    ///
+    /// 关键约束：**播放中不要调这里**。`setCategory` 会让系统重建音频通路，
+    /// WebKit 的媒体元素会被一并按停 —— 表现就是「从后台切回来音乐突然暂停」。
+    /// 播放期间只需要 `setActive(true)`（见 `reactivate()`）。
+    ///
+    /// 重新声明 category 并激活会话：冷启动、进程重建、来电结束后都需要。
     func activate() {
         let session = AVAudioSession.sharedInstance()
         do {
@@ -123,15 +129,49 @@ final class AudioSessionController {
         try? AVAudioSession.sharedInstance().setActive(true)
     }
 
+    /// 正在播放时持有的后台任务。
+    ///
+    /// `beginBackgroundTask` 在 iOS 13+ 只保证约 30 秒，真正让音频在后台续着的是
+    /// `UIBackgroundModes: audio` + 活跃的音频会话；这个任务的作用是把
+    /// WebProcess 从「被挂起」边缘拉回来，让 JS 定时器（进度、自动切歌）继续跑。
+    /// 到期后若仍在播放，就地续一个新任务。
+    private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+
+    private func beginBackgroundTask() {
+        guard backgroundTask == .invalid else { return }
+        backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "folia.playback") { [weak self] in
+            // 过期回调可能在后台线程进来，统一挪回主线程处理。
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.endBackgroundTask()
+                // 到期时还在播，就再续一次，保证进度条与歌词不冻结。
+                if self.isPlaying { self.beginBackgroundTask() }
+            }
+        }
+    }
+
+    private func endBackgroundTask() {
+        guard backgroundTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(backgroundTask)
+        backgroundTask = .invalid
+    }
+
     /// 网页播放器上报的播放状态 → 锁屏/控制中心。
     ///
     /// 不写 Now Playing 信息时，iOS 会把本 App 当成「没有在播放」，
     /// 退到后台几秒后就掐掉音频。页面自身已经通过 MediaSession 设了标题/封面，
     /// 这里只需要把 playbackRate 设为 1 表示「正在播放」。
+    ///
+    /// 另一件必须做的事：播放期间申请一个后台任务。
+    /// 网页版的时间轴推进、自动切歌全靠 JS 定时器跑在主线程上，
+    /// 没有后台任务时 WebProcess 会在退到后台几十秒后被系统挂起，
+    /// 表现就是「后台还在响，切回来进度和歌词都停在原地，然后被页面自己暂停」。
     func updatePlaybackState(_ playing: Bool) {
         isPlaying = playing
         if playing {
-            activate()
+            // 这里只能 setActive：正在播放时重设 category 会把 WebKit 媒体按停。
+            reactivate()
+            beginBackgroundTask()
             var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
             if info[MPNowPlayingInfoPropertyPlaybackRate] == nil {
                 info[MPNowPlayingInfoPropertyPlaybackRate] = 1.0
@@ -139,6 +179,7 @@ final class AudioSessionController {
             info[MPNowPlayingInfoPropertyIsLiveStream] = false
             MPNowPlayingInfoCenter.default().nowPlayingInfo = info
         } else if var info = MPNowPlayingInfoCenter.default().nowPlayingInfo {
+            endBackgroundTask()
             info[MPNowPlayingInfoPropertyPlaybackRate] = 0.0
             MPNowPlayingInfoCenter.default().nowPlayingInfo = info
         }
@@ -146,13 +187,14 @@ final class AudioSessionController {
 
     private func observeLifecycle() {
         // 进入后台的瞬间再激活一次会话：这是系统判定「能否继续放音频」的最后时机。
+        // 这里只 setActive，正响着的时候重设 category 会当场把声音按停。
         NotificationCenter.default.addObserver(
             forName: UIApplication.didEnterBackgroundNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
             guard let self, self.isPlaying else { return }
-            self.activate()
+            self.reactivate()
         }
 
         NotificationCenter.default.addObserver(
@@ -160,7 +202,7 @@ final class AudioSessionController {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.activate()
+            self?.reactivate()
         }
     }
 
