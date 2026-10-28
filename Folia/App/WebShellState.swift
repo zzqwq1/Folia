@@ -171,9 +171,6 @@ final class AudioSessionController {
     /// 不调 `setActive`。后者的语义是「占用音频设备」，音效播放、Siri、来电刚结束等
     /// 场景下反复调用会让系统重新评估本 App 的播放资格，页面那边就表现为莫名暂停。
     func updatePlaybackState(_ playing: Bool) {
-        // 接管期间播放状态由 FoliaBackgroundAudio 自己维持（它每 0.25 秒刷一次进度），
-        // 这里若照常返回，锁屏的标题/封面会被下面的三分支逻辑覆盖掉。
-        if FoliaBackgroundAudio.shared.isActive { return }
         guard playing != isPlaying else { return }
         isPlaying = playing
         if playing {

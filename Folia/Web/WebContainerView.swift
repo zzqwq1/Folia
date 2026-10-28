@@ -30,13 +30,6 @@ final class WebContainerView: UIView {
     /// 所以由原生在检测到进程终止前一帧的状态时判定要不要自动续播。
     fileprivate static var wasAudibleInBackground = false
 
-    /// 回前台重建页面 AudioContext 的序号：页面侧据此去重，避免同一次回前台重建两遍。
-    private static var rebuildGeneration = 0
-    /// 重建脚本注入失败后是否已经重试过，防止失败时空转。
-    private var rebuildRetried = false
-    /// 回前台「页面放不出声 → 原生重新接管」的时间窗，用来限流，避免来回抢。
-    private var retakeTimes: [Date] = []
-
     /// 线上站点的域名。导航策略、诊断与重载都以它为基准。
     private static let siteHost = "app.folia-api.top"
     private static let startURL = URL(string: "https://app.folia-api.top/")!
@@ -84,9 +77,9 @@ final class WebContainerView: UIView {
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
-        // 保活与进度上报必须在**页面脚本之前**装好：`play` 事件是 UI 手势那一拍同步发出的，
+        // 保活与播放意图上报必须在**页面脚本之前**装好：`play` 事件是 UI 手势那一拍同步发出的，
         // 等 `didFinish` 再注入就已经听不到了 —— 原生收不到 `intent-play`，
-        // `pagePlaying` 一直是假，进后台一律「跳过接管」，表现就是「后台一点声都没有」。
+        // 后台就不知道该把页面那条 `<audio>` 放回去，表现就是「后台一点声都没有」。
         userContent.addUserScript(WKUserScript(
             source: Self.audioKeeperScript,
             injectionTime: .atDocumentStart,
@@ -178,31 +171,13 @@ final class WebContainerView: UIView {
             queue: .main
         ) { [weak self] _ in
             guard let self else { return }
-            // 后台是原生在放（FoliaBackgroundAudio）：先把它停掉，再把进度交还给页面。
-            // 顺序不能反，否则页面一起播就是两声齐唱。
-            let handBackPosition = FoliaBackgroundAudio.shared.handBack()
             // 回前台不改变意图：该响的继续响，轮询照旧。
             self.refreshAudioKeepAlive()
-            if let handBackPosition {
-                // 交还顺序是关键：会话在后台被接管改写，页面那条 WebAudio 通路已经断了。
-                // 1. 先重设一次 category 把通路彻底重建（这一步在后台做会按停声音，
-                //    所以只能回前台做），页面原先那个 AudioContext 就此彻底作废；
-                // 2. 再让页面把 AudioContext 与播放树重建一次，然后对齐进度续播。
-                AudioSessionController.shared.activate()
-                self.rebuildPageAudioContext()
-                // 两次补放之间留 0.8 秒，是为了等播放树重挂完；但第二趟只在第一趟没接上时
-                // 才值得再跑一次 —— 每次都跑就是每次回前台多一趟跨进程脚本，白卡一下。
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-                    self?.resumePageAt(handBackPosition, retryLater: true)
-                }
-            } else {
-                // 没接管过（或后台根本没放起来）：系统可能把媒体按停，补放一次。
-                // 前台续播只此一次，不进轮询，避免影响用户在前台主动暂停。
-                // 这里必须走 `activate()`：会话在后台被降级过，只 setActive 解不开
-                // 那条被钉死的 WebAudio 通路，用户看到的就是「回来没声」。
-                self.forceResumeAudio(reason: "foreground", rebuild: true)
-            }
-            CrashLog.note("==== foreground resume done (audible=\(self.wantsAudible ? 1 : 0) paused=\(self.userPaused ? 1 : 0) handback=\(handBackPosition == nil ? 0 : 1)) ====")
+            // 系统在后台会把媒体元素按停、把会话降级，回来必须重新声明一次 category
+            // 并把页面里那条停住的 `<audio>` 放回去。页面始终是唯一的播放器，
+            // 原生不接管出声 —— 两套播放器抢同一个会话，正是之前「后台/回来没声音」的来源。
+            self.forceResumeAudio(reason: "foreground", rebuild: true)
+            CrashLog.note("==== foreground resume done (audible=\(self.wantsAudible ? 1 : 0) paused=\(self.userPaused ? 1 : 0)) ====")
             // 断网时用户往往先去开 Wi-Fi 再切回来，这里接着自己重试一次，
             // 不用等他再点「重试」。
             if self.state.offlineReason != nil {
@@ -215,27 +190,18 @@ final class WebContainerView: UIView {
             queue: .main
         ) { [weak self] _ in
             guard let self else { return }
+            // 进后台只做两件事：把会话立住，并开始轮询补放。
+            // 系统随后来按停页面里的媒体时，4 秒内的那一拍会把它放回去。
             self.refreshAudioKeepAlive()
-            // 系统一进后台就会把页面钉住，之后取不到任何进度。
-            // 先同步问一次「现在第几秒」，拿到答案再起原生；问不到就用手上最后一条汇报。
-            self.captureProgressBeforeBackground { [weak self] ok in
-                // 抓不到进度（超出预算或页面卡住）就不接管：宁可不响，也不能从错误的位置开声。
-                // 这里只认抓到的那一条，`start` 直接吃页面刚报上来的进度。
-                if ok {
-                    FoliaBackgroundAudio.shared.start(reason: "background")
-                } else {
-                    FoliaBackgroundAudio.shared.logState("background-no-progress")
-                }
-                self?.logTakeoverLater()
+            self.captureProgressBeforeBackground { _ in
+                self.enforcePlaybackIfNeeded(reason: "background")
             }
         }
     }
 
-    /// 进后台前抓一次页面进度：`audio.currentTime` 是此刻唯一准确的数。
+    /// 进后台时先给会话留一口气，再让保活开始补放。
     ///
-    /// 超时兜底必须有：`evaluateJavaScript` 在 App 刚进后台时可能迟迟不回调，
-    /// 而接管越晚越可能错过系统的最后期限。真拿不到时回调 `false`，
-    /// 由调用方决定不接管 —— 从错误的位置接管，比不接管更难让用户理解。
+    /// 超时兜底必须有：`evaluateJavaScript` 在 App 刚进后台时可能迟迟不回调。
     private func captureProgressBeforeBackground(_ done: @escaping (Bool) -> Void) {
         let js = """
         (function(){
@@ -244,13 +210,10 @@ final class WebContainerView: UIView {
             for (var i = 0; i < list.length; i += 1) {
               var el = list[i];
               if (!el.src || el.paused) { continue; }
-              var d = el.duration;
-              window.webkit.messageHandlers.foliaAudioIntent.postMessage('progress|' + JSON.stringify({
-                src: el.src,
-                position: el.currentTime || 0,
-                duration: (d && isFinite(d)) ? d : 0,
-                playing: true
-              }));
+              // 进后台前把还活着的元素直接放一次：系统随后按停它时，
+              // 保活那一拍就知道刚才是在唱的，也就知道该不该放回去。
+              var p = el.play();
+              if (p && p.catch) { p.catch(function(){}); }
               return 'ok';
             }
             return 'idle';
@@ -269,13 +232,6 @@ final class WebContainerView: UIView {
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
             finish("timeout")
-        }
-    }
-
-    /// 接管两秒后把原生播放器状态落一条日志，用来区分「没接管」和「接管了没声音」。
-    private func logTakeoverLater() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            FoliaBackgroundAudio.shared.logState("after-2s")
         }
     }
 
@@ -354,7 +310,7 @@ final class WebContainerView: UIView {
     /// 会话激活失败时 iOS 会把媒体按停；这里把「该响的」重新放回去。
     ///
     /// 只在 `wantsAudible` 为真时动手，且每轮只做一次 `play()`：
-    /// 页面自己的播放器仍然是唯一的状态源，壳只是保证它不被系统静默掐断。
+    /// 页面自己的播放器是唯一的状态源，壳只是保证它不被系统静默掐断。
     ///
     /// 两个前提缺一不可：
     /// 1. `userPaused` 为假 —— 用户亲手按的暂停绝不覆盖；
@@ -362,12 +318,6 @@ final class WebContainerView: UIView {
     ///    系统掐断媒体只发生在后台，前台不需要也不应该续播。
     private func enforcePlaybackIfNeeded(reason: String) {
         guard wantsAudible, !userPaused else { return }
-        // 原生接管期间绝不能碰页面里那条已经死掉的通路：既不 play `<audio>`，
-        // 也不 setActive。页面那条 WebAudio 通路在后台已被系统钉死，这些动作全都不出声，
-        // 却会把 WebKit 的媒体反复从 `interrupted` 里顶起来，和原生的 AVPlayer 抢
-        // 同一个音频会话 —— 结果就是「原生接管了，但一点声都没有」。
-        // 接管期间由 FoliaBackgroundAudio 自己补放（它的 tick 里带看门狗）。
-        if FoliaBackgroundAudio.shared.isActive { return }
         guard UIApplication.shared.applicationState != .active else { return }
         // 会话一旦被系统打断（通话、别的 App 抢占、锁屏静音），只调 play() 是没有声音的：
         // 音频通路本身已经不通。这里每拍先把会话要回来，再补 play。
@@ -381,20 +331,46 @@ final class WebContainerView: UIView {
     /// 用户很可能就是从后台回来发现「没声音」：会话在后台已被降级，
     /// 所以这里必须先补一次 `setActive`，否则 play() 成功了也是静音。
     ///
-    /// `rebuild` 为真时连 Category 一起重设，并让页面重建 AudioContext：
-    /// 只在回前台用。后台那条被钉死的 WebAudio 通路，靠 setActive 是解不开的。
+    /// `rebuild` 为真时连 Category 一起重设并派发一次 `visibilitychange`：
+    /// 只在回前台用。`setCategory` 之后必须让页面知道自己「又被看见了」，
+    /// 它才会把被系统挂起的 WebAudio 上下文 `resume()` 回来。
     private func forceResumeAudio(reason: String, rebuild: Bool = false) {
         guard wantsAudible, !userPaused else { return }
         if rebuild {
             AudioSessionController.shared.activate()
-            rebuildPageAudioContext()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            revivePageAudio()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
                 self?.resumeAudio(reason: reason)
             }
             return
         }
         AudioSessionController.shared.reactivate()
         resumeAudio(reason: reason)
+    }
+
+    /// 回前台时把页面被系统挂起的音频上下文唤醒。
+    ///
+    /// iOS 在后台会把页面的 `AudioContext` 挂成 `interrupted`，回前台不会自己恢复；
+    /// 页面侧没有任何 `statechange` 监听，所以要壳来叫醒它。
+    /// 这里只做两件最保守的事：扫一遍常见挂载点上的上下文逐个 `resume()`，
+    /// 再派发一次 `visibilitychange` 让页面自己走恢复逻辑 —— 不改任何全局原型。
+    private func revivePageAudio() {
+        let js = """
+        (function(){
+          try {
+            var names = ['__foliaAudioContext', 'audioContext', '__audioContext'];
+            for (var i = 0; i < names.length; i += 1) {
+              var c = window[names[i]];
+              if (c && typeof c.resume === 'function' && c.state !== 'running') {
+                try { c.resume(); } catch (e) {}
+              }
+            }
+            document.dispatchEvent(new Event('visibilitychange'));
+            return 'ok';
+          } catch (e) { return 'error'; }
+        })();
+        """
+        webView?.evaluateJavaScript(js, completionHandler: nil)
     }
 
     private func resumeAudio(reason: String) {
@@ -422,172 +398,8 @@ final class WebContainerView: UIView {
         }
     }
 
-    /// 让页面把 AudioContext 连同播放链路重建一次。
-    ///
-    /// 线上页的出声是 `AudioContext` 的节点图（`decks -> mix -> equaliser -> effects
-    /// -> volume -> fade -> analyser -> destination`），`<audio>` 只是解码源。
-    /// iOS 在后台会把这个上下文整体钉住，且**回了前台也不会自己解开**：
-    /// 此时 `state` 仍报 `running`、`<audio>` 也在正常走，可节点图一个采样都送不出去，
-    /// 页面侧没有任何可以观测到的异常 —— 这就是「回来之后一直没声音」的真身。
-    ///
-    /// 能救回来的只有「换一个上下文」：把 `window.AudioContext` 换成只返回一次新上下文
-    /// 的转发函数，页面下次建上下文（播放树重建）时就会拿到新的；再让 React 重挂一次
-    /// 播放树，页面就会调 `setupAudioAnalyzer()` 重新建图，并重新 `createMediaElementSource`。
-    ///
-    /// 两点约束：
-    /// 1. 只允许重建一次，随即还原构造函数 —— 长期改写全局原型会放大 WebProcess 崩溃；
-    /// 2. 靠 `visibilitychange` 触发页面重挂：只是通知，不碰任何原型、不改 React 状态。
-    private func rebuildPageAudioContext() {
-        Self.rebuildGeneration += 1
-        let generation = Self.rebuildGeneration
-        let js = """
-        (function(gen){
-          try {
-            if (window.__foliaAudioRebuildGen === gen) { return 'dup'; }
-            window.__foliaAudioRebuildGen = gen;
-            window.__foliaAudioUsable = true;
-            var Original = window.AudioContext || window.webkitAudioContext;
-            if (Original && !window.__foliaAudioContextPatched) {
-              window.__foliaAudioContextPatched = true;
-              var Patched = function(){
-                window.__foliaAudioContextPatched = false;
-                try { window.AudioContext = Original; window.webkitAudioContext = Original; } catch (e) {}
-                return new Original();
-              };
-              Patched.prototype = Original.prototype;
-              window.AudioContext = Patched;
-              window.webkitAudioContext = Patched;
-            }
-            // 让页面把播放树重挂一次，从而走到 setupAudioAnalyzer() 重新建图。
-            document.dispatchEvent(new Event('visibilitychange'));
-            return 'ok';
-          } catch (e) { return 'error'; }
-        })(\(generation));
-        """
-        webView?.evaluateJavaScript(js) { [weak self] result, _ in
-            let flag = result as? String ?? "error"
-            CrashLog.note("==== page audio context rebuild \(flag) ====")
-            guard let self, flag == "error" else { return }
-            // 注入失败重试一次就够：再失败说明页面正在重载，下一次回前台会重新走这条路。
-            guard !self.rebuildRetried else { return }
-            self.rebuildRetried = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                guard let self else { return }
-                self.rebuildRetried = false
-                self.rebuildPageAudioContext()
-            }
-        }
-    }
-
-    /// 原生接管结束、回到前台：把进度交给页面，让页面接着这一首继续放。
-    ///
-    /// 页面这条通路在后台被系统钉死了（`<audio>` 的 `currentTime` 可能还停在切后台那一刻），
-    /// 所以必须显式对齐进度；同时走页面自己的 mediaSession 处理器，
-    /// 这样队列、歌词、UI 都是同步的，而不是绕过状态机直接点 `<audio>`。
-    ///
-    /// 三处细节决定「会不会从头开始 / 有没有声音」：
-    /// 1. 先 `pause()` 再写 `currentTime`：播放中写进度会被正在跑的管线忽略；
-    /// 2. 只在页面确实换了一首（`src` 与交还时不同）时才接受它自己的进度，
-    ///    同一首则一律以原生那一秒为准 —— 页面记为 0 就会从头放；
-    /// 3. 对齐后再调 `play`，并回读 `currentTime` 确认真的接上了，没接上返回 `retry` 再补一次。
-    private func resumePageAt(_ position: TimeInterval, retryLater: Bool = false) {
-        let seconds = String(format: "%.2f", max(0, position))
-        let js = """
-        (function(pos){
-          try {
-            // 页面链路已经判定不可用（回前台重建 AudioContext 失败）：这里再对齐进度也是
-            // 白放，交给原生重新接管，用户至少还能听见声音。
-            if (window.__foliaAudioUsable === false) { return 'dead'; }
-            var list = document.querySelectorAll('audio');
-            var el = null;
-            for (var i = 0; i < list.length; i += 1) {
-              if (list[i].src) { el = list[i]; break; }
-            }
-            if (!el) { return 'error'; }
-            var cur = el.currentTime || 0;
-            var sameTrack = window.__foliaHandbackSrc === el.src;
-            window.__foliaHandbackSrc = el.src;
-            // 页面换了曲目：它自己的进度才是对的，别把上一首的秒数硬塞进去。
-            if (!sameTrack) { return 'switched'; }
-            if (Math.abs(cur - pos) < 1.0 && !el.paused) { return 'ok'; }
-            try { el.pause(); } catch (e) {}
-            try { el.currentTime = pos; } catch (e) {}
-            var playFn = window.__foliaMediaCommand && window.__foliaMediaCommand.play;
-            if (playFn) { playFn(); }
-            else { var p = el.play(); if (p && p.catch) { p.catch(function(){}); } }
-            var now = el.currentTime || 0;
-            if (Math.abs(now - pos) > 2.0 || el.paused) { return 'retry'; }
-            return 'resumed';
-          } catch (e) { return 'error'; }
-        })(\(seconds));
-        """
-        webView?.evaluateJavaScript(js) { [weak self] result, _ in
-            let flag = result as? String ?? "error"
-            CrashLog.note("==== page resumed at handback \(flag) ====")
-            guard let self else { return }
-            if flag == "dead" {
-                self.retakeOverAfterHandback(at: position)
-                return
-            }
-            guard flag == "retry" else { return }
-            // `retryLater` 时只补一次：回前台本来就有一次专门的重试，再多就是空跑。
-            guard !retryLater else { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-                self?.resumePageAt(position)
-            }
-        }
-    }
-
-    /// 回前台时页面侧已经放不出声音，重新交给原生接着放。
-    ///
-    /// 这条路只在「重建 AudioContext 之后页面还是没声」时走：
-    /// 回前台本来就是原生停在某一秒、用户该听到声音的时刻，
-    /// 与其让页面带着一条死掉的节点图空转（用户看到的是「回来了，歌还在走，就是没声」），
-    /// 不如让原生继续出声，至少是能听见的。
-    private func retakeOverAfterHandback(at position: TimeInterval) {
-        guard wantsAudible, !userPaused else { return }
-        guard !FoliaBackgroundAudio.shared.isActive else { return }
-        let now = Date()
-        retakeTimes = retakeTimes.filter { now.timeIntervalSince($0) < 120 }
-        guard retakeTimes.count < 6 else {
-            CrashLog.note("==== native retake skipped: too many attempts ====")
-            return
-        }
-        retakeTimes.append(now)
-        FoliaBackgroundAudio.shared.startFresh(position: position, reason: "foreground-retake")
-    }
-
     /// 远程命令要先更新意图，再转发给页面：否则线控按了暂停，保活轮询会把它又放回去。
     private func handleRemoteCommand(_ action: String) {
-        if FoliaBackgroundAudio.shared.isActive {
-            // 后台接管期间锁屏按钮不能转发给页面：页面被系统钉住，转发只会让它更乱。
-            switch action {
-            case "play":
-                FoliaBackgroundAudio.shared.resumeForUser()
-                AudioSessionController.shared.updatePlaybackState(true)
-                return
-            case "pause":
-                FoliaBackgroundAudio.shared.pauseForUser()
-                AudioSessionController.shared.updatePlaybackState(false)
-                wantsAudible = false
-                stopKeepAliveTimer()
-                return
-            case "toggle":
-                if FoliaBackgroundAudio.shared.isPlayingInBackground {
-                    FoliaBackgroundAudio.shared.pauseForUser()
-                    AudioSessionController.shared.updatePlaybackState(false)
-                    wantsAudible = false
-                    stopKeepAliveTimer()
-                } else {
-                    FoliaBackgroundAudio.shared.resumeForUser()
-                    AudioSessionController.shared.updatePlaybackState(true)
-                    wantsAudible = true
-                }
-                return
-            default:
-                break
-            }
-        }
         switch action {
         case "play", "toggle":
             if action == "play" || !wantsAudible {
@@ -870,8 +682,8 @@ final class WebContainerView: UIView {
           // `play` 事件在真正开始播放时触发，`pause` 在停下时触发；
           // 两者都只在 AUDIO 元素上处理，不碰原型链。
           //
-          // 同时把「哪首、放到哪、多长」报给原生：后台的 AudioContext 会被系统钉死，
-          // 壳要靠这几个数用原生播放器接着出声（见 FoliaBackgroundAudio）。
+          // 同时把「哪首、放到哪、多长」报给原生：壳靠它知道后台该从哪一秒接着放，
+          // 以及被打断后续播的是不是同一首。
           var currentAudio = function(){
             var list = document.querySelectorAll('audio');
             for (var i = 0; i < list.length; i += 1) {
@@ -933,8 +745,7 @@ final class WebContainerView: UIView {
             } catch (e) {}
           };
 
-          // 进度单独报：每 3 秒一条，原生靠它知道后台该从哪一秒接着放。
-          // 播放中才报，停着的时候原生本来就不接管。
+          // 进度单独报：每 5 秒一条，只在后台跑。
           var reportProgress = function(){
             try {
               var el = currentAudio();
@@ -960,7 +771,6 @@ final class WebContainerView: UIView {
           // 首屏挂载时就自动续上上一首，那一拍早于 React 跑起来，得靠这里补。
           document.addEventListener('DOMContentLoaded', reportProgress, true);
           // 进度只在后台需要：前台交给页面自己走，轮询毫无用处还白耗。
-          // 后台降回 5 秒一次（原生接管前还会再抓一次实时的），足够定位接管起点。
           var progressTimer = 0;
           var syncProgressTimer = function(){
             var backgrounded = document.visibilityState !== 'visible';
@@ -1410,23 +1220,6 @@ private final class AudioIntentRelay: NSObject, WKScriptMessageHandler {
     func userContentController(_ userContentController: WKUserContentController,
                                didReceive message: WKScriptMessage) {
         guard let body = message.body as? String else { return }
-        if body.hasPrefix("seek|") {
-            let payload = Self.parse(body)
-            if let position = payload?["position"] as? Double {
-                FoliaBackgroundAudio.shared.pageSeeked(to: position)
-            }
-            return
-        }
-        if body.hasPrefix("progress|") {
-            let payload = Self.parse(body)
-            FoliaBackgroundAudio.shared.updateReport(
-                src: payload?["src"] as? String,
-                position: payload?["position"] as? Double,
-                duration: payload?["duration"] as? Double,
-                playing: payload?["playing"] as? Bool
-            )
-            return
-        }
         DispatchQueue.main.async { [weak container] in
             if body == "intent-play" {
                 container?.markAudibleIntent()
@@ -1434,17 +1227,6 @@ private final class AudioIntentRelay: NSObject, WKScriptMessageHandler {
                 container?.markPausedIntent()
             }
         }
-    }
-
-    /// `kind|{json}` 里的那一段 JSON。页面侧拼串已经带了类型前缀，这里只解后面的部分。
-    private static func parse(_ body: String) -> [String: Any]? {
-        guard let bar = body.firstIndex(of: "|") else { return nil }
-        let json = String(body[body.index(after: bar)...])
-        guard let data = json.data(using: .utf8),
-              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
-            return nil
-        }
-        return object
     }
 }
 
