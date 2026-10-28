@@ -109,7 +109,10 @@ final class FoliaBackgroundAudio: NSObject {
     // MARK: - 接管
 
     /// 在后台起播，接着页面最后一次汇报的进度放。
-    func start(reason: String) {
+    ///
+    /// `position` 显式给出时以它为准：进后台前刚抓到的进度、或回前台交还后要接着的那一秒，
+    /// 都比定时汇报更准（汇报最长有三秒延迟）。
+    func start(reason: String, position explicitPosition: TimeInterval? = nil) {
         guard hasReport, pagePlaying, !isActive else {
             logState("skip-\(reason)")
             return
@@ -121,8 +124,12 @@ final class FoliaBackgroundAudio: NSObject {
         // 后台任务只保证约 30 秒，真正让进程活着的是「正在出声」这件事本身；
         // 但 WebProcess 一旦被挂起，页面就再也不会自己切下一首，这里先把任务续上。
         UIApplication.shared.beginBackgroundTask(withName: "folia.native-takeover")
-        // 页面刚开始这一首却还没报进度：从 0 接管，而不是拿上一首的进度乱跳。
-        if pendingFreshStart { position = 0 }
+        if let explicitPosition {
+            position = max(0, explicitPosition)
+        } else if pendingFreshStart {
+            // 页面刚开始这一首却还没报进度：从 0 接管，而不是拿上一首的进度乱跳。
+            position = 0
+        }
         pendingFreshStart = false
         isActive = true
         didPlayInActive = false
@@ -134,14 +141,33 @@ final class FoliaBackgroundAudio: NSObject {
         load(url: url, seekTo: position)
     }
 
-    /// 交还给页面：停掉原生，返回交还时的进度（秒）。没接管过、或一次都没响成，返回 nil。
+    /// 页面已经放不出声音（回前台重建 AudioContext 也没救回来）时，由原生接着这一秒放。
+    ///
+    /// 与 `start` 的区别只有两点：不看 `pagePlaying`（页面此刻是「在播但其实没声」，
+    /// 状态机上仍算在播，页面侧一旦把它置成暂停就永远轮不到这里），
+    /// 并且进度一律以调用方给的为准。
+    func startFresh(position: TimeInterval, reason: String) {
+        guard !isActive, !src.isEmpty, URL(string: src) != nil else {
+            CrashLog.note("==== native retake skipped (\(reason)) ====")
+            return
+        }
+        hasReport = true
+        pagePlaying = true
+        start(reason: reason, position: position)
+    }
+
+    /// 交还给页面：停掉原生，返回交还时的进度（秒）。
+    ///
+    /// 只要接管期间有过进度就返回，不再要求「确实响成过」：接管了却因为会话竞争没出声时，
+    /// 页面在后台同样停了好几秒，此时返回 nil 会让前台从页面自己的旧进度续上，
+    /// 用户看到的就是「回来既没声、又对不上」。
     func handBack() -> TimeInterval? {
         guard isActive else { return nil }
         let current = currentPosition()
         let played = didPlayInActive
         stopInternal()
         CrashLog.note("==== native takeover end at \(String(format: "%.1f", current))s played=\(played ? 1 : 0) ====")
-        return played ? current : nil
+        return current > 0 ? current : nil
     }
 
     /// 接管中被用户按了暂停：先淡出再停，避免「咔」一声。
@@ -199,25 +225,35 @@ final class FoliaBackgroundAudio: NSObject {
                 break
             }
         }
+        // `replaceCurrentItem` 会把上一首的 rate 清成 0：不在这里补一次 play，
+        // 回调链上任何一环没走到（readyToPlay 迟迟不来），就一直是「接管了但没声」。
         player.replaceCurrentItem(with: item)
         player.isMuted = false
-        // 先把音量压到 0：接管那一刻页面那条通路刚被系统钉住，硬切会「咔」一声。
-        player.volume = 0
+        // 音量一开始就拉满：这里压到 0 再等 seek 回调放回来，一旦回调没走到
+        // （item 换掉、接管被取消）就是彻底静音，而日志上看一切正常。
+        // 爆音由 `seek` 的零容差 + `automaticallyWaitsToMinimizeStalling = false` 规避。
+        player.volume = 1
         // 音频类 App 必须显式告诉系统「我要出声」，否则后台被当成纯计算进程静音拉走。
         player.automaticallyWaitsToMinimizeStalling = false
+        player.play()
     }
 
     private func seekNative(to position: TimeInterval, thenPlay: Bool) {
         let seek = CMTime(seconds: max(0, position), preferredTimescale: 600)
         player.seek(to: seek, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
-            guard let self, self.isActive, thenPlay else { return }
-            self.player.play()
-            self.didPlayInActive = true
-            self.player.volume = 1
-            self.refreshNowPlaying()
-            // play() 只是「请求播放」，真正是否出声要看一小会儿之后的 rate。
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-                self?.recoverIfStalled(reason: "after-play")
+            guard let self else { return }
+            // 这里不再拿 `isActive` 当门槛：seek 完成时接管可能刚被取消（回前台的竞态），
+            // 由 `stopInternal` 负责真正停下，回调只要保证「该响的时候一定起播」。
+            guard thenPlay else { return }
+            DispatchQueue.main.async {
+                guard self.isActive else { return }
+                self.player.play()
+                self.didPlayInActive = true
+                self.refreshNowPlaying()
+                // play() 只是「请求播放」，真正是否出声要看一小会儿之后的 rate。
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                    self?.recoverIfStalled(reason: "after-play")
+                }
             }
         }
     }
@@ -226,10 +262,14 @@ final class FoliaBackgroundAudio: NSObject {
     ///
     /// 这一步是「后台没声音」的直接补救：系统在切后台瞬间会把会话降级，
     /// 此时 AVPlayer 的 rate 会掉到 0，而且不会再自己恢复。
+    ///
+    /// 注意这里**不重设 category**：后台调用 `setCategory` 会让系统重新评估音频资格，
+    /// 每一次都可能在刚接通的通路上再断一次，是「接管了却没声」的放大器。
+    /// 只对会话做 `setActive`，配一次零容差 seek 把停顿的 item 顶起来。
     private func recoverIfStalled(reason: String) {
         guard isActive, !gaveUp, player.currentItem != nil else { return }
         if player.rate > 0 && Date().timeIntervalSince(lastProgressAt) < 2.0 { return }
-        guard playAttempts < 6 else {
+        guard playAttempts < 8 else {
             gaveUp = true
             CrashLog.note("==== native takeover give up (\(reason)) ====")
             return
@@ -237,14 +277,20 @@ final class FoliaBackgroundAudio: NSObject {
         playAttempts += 1
         // 卡住超过两秒才补进度：真在放的时候不要每 0.25 秒 seek 一次。
         let stalled = Date().timeIntervalSince(lastProgressAt) > 2.0
-        // 会话掉成 interrupted 时，只 setActive 是回不来的：必须重新声明 category。
-        AudioSessionController.shared.activate()
+        try? AVAudioSession.sharedInstance().setActive(true)
+        // 音量被系统静音过（通话、其他 App 抢占）时不会被自动还原。
+        if !player.isMuted { player.volume = 1 }
         player.play()
         if stalled {
             // 卡住时播放器常常停在缓冲态，不 seek 就永远不动。
             player.seek(to: CMTime(seconds: max(0, position), preferredTimescale: 600),
                         toleranceBefore: .zero,
                         toleranceAfter: .zero)
+            // seek 之后必须重新确认 play：部分机型 seek 会隐式暂停。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                guard let self, self.isActive else { return }
+                self.player.play()
+            }
         }
         CrashLog.note("==== native takeover replay (\(reason)) attempt=\(playAttempts) ====")
     }
@@ -268,6 +314,9 @@ final class FoliaBackgroundAudio: NSObject {
             position = t
             playAttempts = 0
             lastProgressAt = Date()
+            // 只要时间轴推进过就算「真的在响」：`didPlayInActive` 原来只在 seek 回调里置位，
+            // 回调没走到时 `handBack()` 会返回 nil，回前台就丢了进度、也不对齐。
+            if player.rate > 0 { didPlayInActive = true }
         }
         // 「接管了却没声音」的看门狗。AVPlayer 在音频通路不通时表现得很有欺骗性：
         // rate 可能仍是 1、时间也在走，可喇叭里什么都没有，所以只能按「有没有在出进度」兜。
