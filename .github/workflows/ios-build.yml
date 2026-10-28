@@ -74,7 +74,8 @@ jobs:
           test -f Payload/Folia.app/www/index.html
           test -f Payload/Folia.app/Assets.car
           /usr/libexec/PlistBuddy -c "Print :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconName" Payload/Folia.app/Info.plist
-          /usr/libexec/PlistBuddy -c "Print :CFBundleIconFiles" Payload/Folia.app/Info.plist
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles" Payload/Folia.app/Info.plist
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIcons~ipad:CFBundlePrimaryIcon:CFBundleIconFiles" Payload/Folia.app/Info.plist
           ls -lh Payload/Folia.app/Assets.car
 
       - name: Dump compiled icon
