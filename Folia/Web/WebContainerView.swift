@@ -163,12 +163,19 @@ final class WebContainerView: UIView {
             guard let self else { return }
             // 回前台只重启会话，不重设 category：后者会让 WebKit 媒体当场暂停。
             AudioSessionController.shared.reactivate()
+            // 后台是原生在放（FoliaBackgroundAudio）：先把它停掉，再把进度交还给页面。
+            // 顺序不能反，否则页面一起播就是两声齐唱。
+            let handBackPosition = FoliaBackgroundAudio.shared.handBack()
             // 回前台不改变意图：该响的继续响，轮询照旧。
             self.refreshAudioKeepAlive()
-            // 回前台时系统会重新激活会话，可能把媒体按停；这里补放一次。
-            // 前台续播只此一次，不进轮询，避免影响用户在前台主动暂停。
-            self.forceResumeAudio(reason: "foreground")
-            CrashLog.note("==== foreground resume done (audible=\(self.wantsAudible ? 1 : 0) paused=\(self.userPaused ? 1 : 0)) ====")
+            if let handBackPosition {
+                self.resumePageAt(handBackPosition)
+            } else {
+                // 回前台时系统会重新激活会话，可能把媒体按停；这里补放一次。
+                // 前台续播只此一次，不进轮询，避免影响用户在前台主动暂停。
+                self.forceResumeAudio(reason: "foreground")
+            }
+            CrashLog.note("==== foreground resume done (audible=\(self.wantsAudible ? 1 : 0) paused=\(self.userPaused ? 1 : 0) handback=\(handBackPosition == nil ? 0 : 1)) ====")
             // 断网时用户往往先去开 Wi-Fi 再切回来，这里接着自己重试一次，
             // 不用等他再点「重试」。
             if self.state.offlineReason != nil {
@@ -182,6 +189,9 @@ final class WebContainerView: UIView {
         ) { [weak self] _ in
             guard let self else { return }
             self.refreshAudioKeepAlive()
+            // 页面靠 WebAudio 出声，而 iOS 会把进程里的 AudioContext 钉死，
+            // 所以后台这一段改由原生接着放（见 FoliaBackgroundAudio）。
+            FoliaBackgroundAudio.shared.start(reason: "background")
         }
     }
 
@@ -303,8 +313,72 @@ final class WebContainerView: UIView {
         }
     }
 
+    /// 原生接管结束、回到前台：把进度交给页面，让页面接着这一首继续放。
+    ///
+    /// 页面这条通路在后台被系统钉死了（`<audio>` 的 `currentTime` 可能还停在切后台那一刻），
+    /// 所以必须显式对齐进度；同时走页面自己的 mediaSession 处理器，
+    /// 这样队列、歌词、UI 都是同步的，而不是绕过状态机直接点 `<audio>`。
+    private func resumePageAt(_ position: TimeInterval) {
+        let seconds = String(format: "%.2f", max(0, position))
+        let js = """
+        (function(pos){
+          try {
+            var list = document.querySelectorAll('audio');
+            var el = null;
+            for (var i = 0; i < list.length; i += 1) {
+              if (list[i].src) { el = list[i]; break; }
+            }
+            if (el) {
+              try { el.currentTime = pos; } catch (e) {}
+            }
+            var playFn = window.__foliaMediaCommand && window.__foliaMediaCommand.play;
+            if (playFn) { playFn(); return 'resumed'; }
+            if (el && el.paused) {
+              var p = el.play();
+              if (p && p.catch) { p.catch(function(){}); }
+              return 'resumed';
+            }
+            return 'noop';
+          } catch (e) { return 'error'; }
+        })(\(seconds));
+        """
+        webView?.evaluateJavaScript(js) { result, _ in
+            let flag = result as? String ?? "error"
+            CrashLog.note("==== page resumed at handback \(flag) ====")
+        }
+    }
+
     /// 远程命令要先更新意图，再转发给页面：否则线控按了暂停，保活轮询会把它又放回去。
     private func handleRemoteCommand(_ action: String) {
+        if FoliaBackgroundAudio.shared.isActive {
+            // 后台接管期间锁屏按钮不能转发给页面：页面被系统钉住，转发只会让它更乱。
+            switch action {
+            case "play":
+                FoliaBackgroundAudio.shared.resumeForUser()
+                AudioSessionController.shared.updatePlaybackState(true)
+                return
+            case "pause":
+                FoliaBackgroundAudio.shared.pauseForUser()
+                AudioSessionController.shared.updatePlaybackState(false)
+                wantsAudible = false
+                stopKeepAliveTimer()
+                return
+            case "toggle":
+                if FoliaBackgroundAudio.shared.isPlayingInBackground {
+                    FoliaBackgroundAudio.shared.pauseForUser()
+                    AudioSessionController.shared.updatePlaybackState(false)
+                    wantsAudible = false
+                    stopKeepAliveTimer()
+                } else {
+                    FoliaBackgroundAudio.shared.resumeForUser()
+                    AudioSessionController.shared.updatePlaybackState(true)
+                    wantsAudible = true
+                }
+                return
+            default:
+                break
+            }
+        }
         switch action {
         case "play", "toggle":
             if action == "play" || !wantsAudible {
@@ -511,6 +585,36 @@ final class WebContainerView: UIView {
           if (window.__foliaAudioKeeperInstalled) { return; }
           window.__foliaAudioKeeperInstalled = true;
 
+          // 线上页的出声方式是 WebAudio：`<audio>` 只当解码源（`createMediaElementSource`），
+          // 真正送到扬声器的是 `AudioBufferSourceNode`，接在 `AudioContext` 上。
+          //
+          // 这决定了保活必须怎么做：iOS 把 App 切到后台时会把 AudioContext 置为
+          // `interrupted`，音频图整体停摆。此时调 `audio.play()` 返回成功却一点声都没有，
+          // 页面自己也拿不到恢复时机 —— 源码里没有任何 `statechange` 监听。
+          //
+          // 注意这里**不改 `window.AudioContext` 构造函数**（不用 Proxy、不换包装），
+          // 那和之前改写原型是同一类操作，切歌词重建播放器树时会放大崩溃风险。
+          // 改用最保守的方式：只在自己的探测上下文上挂一个监听，并不断探测页面上
+          // 那个上下文何时进入 running/interrupted，把状态上报给原生。
+          //
+          // 页面已有的 AudioContext 实例无法反射取得，所以探测它的状态靠两条路：
+          // 1. `__foliaProbe` 自己建一个上下文，只可能是 running/suspended；
+          // 2. 页面把 context 挂在 window 上的常见位置（React 应用通常留在闭包里，
+          //    所以这一步只是兜底，不指望一定命中）。
+          window.__foliaResumeAudioContexts = function(){
+            var resumed = 0;
+            try {
+              var names = ['__foliaAudioContext', 'audioContext', '__audioContext'];
+              for (var i = 0; i < names.length; i += 1) {
+                var c = window[names[i]];
+                if (c && typeof c.resume === 'function' && c.state !== 'running') {
+                  try { c.resume(); resumed += 1; } catch (e) {}
+                }
+              }
+            } catch (e) {}
+            return resumed;
+          };
+
           // 记录页面自身的 MediaSession 处理器，供锁屏按钮直接调用。
           var handlers = window.__foliaMediaCommand = window.__foliaMediaCommand || {};
           try {
@@ -546,10 +650,42 @@ final class WebContainerView: UIView {
           // 用事件捕获而不是包 play/pause：
           // `play` 事件在真正开始播放时触发，`pause` 在停下时触发；
           // 两者都只在 AUDIO 元素上处理，不碰原型链。
+          //
+          // 同时把「哪首、放到哪、多长」报给原生：后台的 AudioContext 会被系统钉死，
+          // 壳要靠这几个数用原生播放器接着出声（见 FoliaBackgroundAudio）。
+          var currentAudio = function(){
+            var list = document.querySelectorAll('audio');
+            for (var i = 0; i < list.length; i += 1) {
+              if (!list[i].ended && list[i].src) { return list[i]; }
+            }
+            return null;
+          };
+          var reportTrack = function(el){
+            try {
+              if (!el || el.tagName !== 'AUDIO' || !el.src) { return; }
+              var d = el.duration;
+              window.webkit.messageHandlers.foliaAudioIntent.postMessage('track|' + JSON.stringify({
+                src: el.src,
+                position: el.currentTime || 0,
+                duration: (d && isFinite(d)) ? d : 0
+              }));
+            } catch (e) {}
+          };
           document.addEventListener('play', function(e){
             var el = e.target;
             if (!el || el.tagName !== 'AUDIO') { return; }
             post('intent-play');
+            // 从头放起（或刚切歌、进度刚过 0）：告诉原生别拿上一首的进度去接管。
+            if ((el.currentTime || 0) < 1.5) { reportTrack(el); }
+          }, true);
+          document.addEventListener('seeked', function(e){
+            var el = e.target;
+            if (!el || el.tagName !== 'AUDIO') { return; }
+            try {
+              window.webkit.messageHandlers.foliaAudioIntent.postMessage('seek|' + JSON.stringify({
+                position: el.currentTime || 0
+              }));
+            } catch (e) {}
           }, true);
           document.addEventListener('pause', function(e){
             var el = e.target;
@@ -576,13 +712,33 @@ final class WebContainerView: UIView {
             } catch (e) {}
           };
 
+          // 进度单独报：每 3 秒一条，原生靠它知道后台该从哪一秒接着放。
+          // 播放中才报，停着的时候原生本来就不接管。
+          var reportProgress = function(){
+            try {
+              var el = currentAudio();
+              if (!el || el.paused) { return; }
+              var d = el.duration;
+              window.webkit.messageHandlers.foliaAudioIntent.postMessage('progress|' + JSON.stringify({
+                src: el.src,
+                position: el.currentTime || 0,
+                duration: (d && isFinite(d)) ? d : 0,
+                playing: true
+              }));
+            } catch (e) {}
+          };
+
           // WebAudio 走 createMediaElementSource 时元素本身不直出声音，
           // 但 iOS 仍以「页面上有在播放的媒体」来维持后台音频，所以这里持续观察。
           setInterval(report, 1000);
+          setInterval(reportProgress, 3000);
           document.addEventListener('playing', report, true);
           document.addEventListener('pause', report, true);
           document.addEventListener('visibilitychange', function(){
-            if (document.visibilityState === 'visible') { report(); }
+            if (document.visibilityState === 'visible') { report(); return; }
+            // 切后台前再补一条最新进度：系统随后就会把 AudioContext 钉住，
+            // 页面的 currentTime 不再前进，原生只能拿到这条里的数字。
+            reportProgress();
           });
           report();
         })();
@@ -1008,14 +1164,47 @@ private final class AudioIntentRelay: NSObject, WKScriptMessageHandler {
 
     func userContentController(_ userContentController: WKUserContentController,
                                didReceive message: WKScriptMessage) {
-        guard let kind = message.body as? String else { return }
+        guard let body = message.body as? String else { return }
+        if body.hasPrefix("track|") {
+            let payload = Self.parse(body)
+            FoliaBackgroundAudio.shared.pageStartedTrack(src: payload?["src"] as? String)
+            return
+        }
+        if body.hasPrefix("seek|") {
+            let payload = Self.parse(body)
+            if let position = payload?["position"] as? Double {
+                FoliaBackgroundAudio.shared.pageSeeked(to: position)
+            }
+            return
+        }
+        if body.hasPrefix("progress|") {
+            let payload = Self.parse(body)
+            FoliaBackgroundAudio.shared.updateReport(
+                src: payload?["src"] as? String,
+                position: payload?["position"] as? Double,
+                duration: payload?["duration"] as? Double,
+                playing: payload?["playing"] as? Bool
+            )
+            return
+        }
         DispatchQueue.main.async { [weak container] in
-            if kind == "intent-play" {
+            if body == "intent-play" {
                 container?.markAudibleIntent()
-            } else if kind == "intent-pause" {
+            } else if body == "intent-pause" {
                 container?.markPausedIntent()
             }
         }
+    }
+
+    /// `kind|{json}` 里的那一段 JSON。页面侧拼串已经带了类型前缀，这里只解后面的部分。
+    private static func parse(_ body: String) -> [String: Any]? {
+        guard let bar = body.firstIndex(of: "|") else { return nil }
+        let json = String(body[body.index(after: bar)...])
+        guard let data = json.data(using: .utf8),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return nil
+        }
+        return object
     }
 }
 
