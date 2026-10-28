@@ -780,7 +780,7 @@ final class WebContainerView: UIView {
     /// 2. 后台每两秒确认一次会话有效，并把「该响但被按停」的媒体放回去。
     private func installAudioKeeper() {
         // 真正的那份在 `audioKeeperScript` 里，随文档开始一起注入；这里只兜一次「脚本被清掉」的情况。
-        webView?.evaluateJavaScript(Self.audioKeeperScript, completionHandler: nil)
+        ensureAudioKeeper()
     }
 
     /// 保活 + 播放状态上报。
@@ -957,6 +957,10 @@ final class WebContainerView: UIView {
           report();
         })();
         """
+
+    /// 功能入口：脚本在 `didFinish` 后再补注入一次，兜住「文档开始时注入被页面重置」的情况。
+    private func ensureAudioKeeper() {
+        webView?.evaluateJavaScript(Self.audioKeeperScript, completionHandler: nil)
     }
 
     /// 网易云扫码登录的兜底。
