@@ -547,11 +547,10 @@ final class WebContainerView: UIView {
 
           var QUARK_URL = 'https://pan.quark.cn/s/934c480d5b9c';
 
-          // 版本号只认页面里的两个常量：站点改了这里就有，壳自己不写死任何版本。
-          // 「当前版本」例外：线上页停在 1.8.5，而这个包是 2.0，显示 1.8.5 会让人以为装错了，
-          // 所以用壳带进来的实际版本覆盖，最新版本仍由站点决定。
+          // 两个版本号都取壳带进来的实际版本：线上页的常量停在 1.8.5，
+          // 而这个包是 2.0，沿用会显示「当前 2.0 / 最新 1.8.5」，还会误弹一次更新公告。
           var cur = (window.__foliaAppVersion || (typeof FOLIA_VERSION === 'string' && FOLIA_VERSION) || '');
-          var latest = (typeof FOLIA_LATEST_VERSION === 'string' && FOLIA_LATEST_VERSION) || '';
+          var latest = cur;
 
           var verNum = document.getElementById('donate-version-num');
           if (verNum && cur) { verNum.textContent = cur; }
