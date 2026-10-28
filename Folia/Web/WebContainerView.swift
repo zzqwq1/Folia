@@ -6,9 +6,13 @@ import Combine
 /// 承载官方网页版的 WKWebView 容器。
 ///
 /// 目标：网页版的 UI / 动画 / WebGL 可视化 100% 原样运行，原生层只补三件事——
-/// 1. 用自定义 scheme 稳定加载本地 ES module / Worker；
+/// 1. 直接远程加载线上站点（与 API 同域，前端请求天然同源，无需本地反代）；
 /// 2. 把实测安全区推给网页（页面里已预留 window.__foliaSafeInsets 接口）；
 /// 3. 会话配置与后台音频，让锁屏、切后台、来电中断都表现成系统级播放器。
+///
+/// 早先这里跑的是内置 `www/` + 自定义 scheme `folia://` 的本地包，进歌单会闪退、
+/// 音频进不了播放态；线上站点本身已内置壳适配（UA 含 FoliaApp 即进入壳模式），
+/// 因此改为套壳线上页：少一层自定义协议，也就少一类 WKURLSchemeTask 事故。
 final class WebContainerView: UIView {
     private let state: WebShellState
     private var webView: WKWebView!
@@ -17,7 +21,9 @@ final class WebContainerView: UIView {
     /// 内容进程被回收的次数与时间窗，用来防止「重载→立刻再挂→再重载」的死循环。
     private var contentProcessRestarts: [Date] = []
 
-    private static let startURL = URL(string: "\(BundleSchemeHandler.scheme)://app/index.html")!
+    /// 线上站点的域名。导航策略、诊断与重载都以它为基准。
+    private static let siteHost = "app.folia-api.top"
+    private static let startURL = URL(string: "https://app.folia-api.top/")!
 
     init(state: WebShellState) {
         self.state = state
@@ -41,11 +47,6 @@ final class WebContainerView: UIView {
         config.suppressesIncrementalRendering = false
         config.websiteDataStore = .default()
 
-        if let wwwRoot = Bundle.main.url(forResource: "www", withExtension: nil) {
-            config.setURLSchemeHandler(BundleSchemeHandler(root: wwwRoot),
-                                       forURLScheme: BundleSchemeHandler.scheme)
-        }
-
         let userContent = WKUserContentController()
         userContent.addUserScript(WKUserScript(
             source: Self.shellBridgeScript,
@@ -54,6 +55,7 @@ final class WebContainerView: UIView {
         ))
         userContent.add(AudioStateRelay(), name: "foliaAudioState")
         userContent.add(JSLogRelay(), name: "foliaJSLog")
+        userContent.add(QRFallbackRelay(), name: "foliaQrFallback")
         config.userContentController = userContent
 
         webView = WKWebView(frame: bounds, configuration: config)
@@ -82,7 +84,7 @@ final class WebContainerView: UIView {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.webView.reload() }
 
-        webView.load(URLRequest(url: Self.startURL))
+        webView.load(URLRequest(url: Self.startURL, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30))
 
         // 锁屏 / 耳机线控按钮 → 页面播放器。
         remoteObservation = NotificationCenter.default
@@ -195,6 +197,57 @@ final class WebContainerView: UIView {
         webView?.evaluateJavaScript(js, completionHandler: nil)
     }
 
+    /// 网易云扫码登录的兜底。
+    ///
+    /// 服务端的 `/login/qr/create` 只有带 `qrimg=true` 才返回 base64 图片，
+    /// 而本地包里调的是不带该参数的地址，拿到的是空字符串，界面上就一直转圈。
+    /// 这里两头都补：请求上补参数；万一还是空，就用 `QRTool` 本地把 `qrurl` 画出来。
+    private func installLoginHelpers() {
+        let js = """
+        (function(){
+          if (window.__foliaLoginHelpers) { return; }
+          window.__foliaLoginHelpers = true;
+
+          var ensureQrImg = function(url){
+            if (!url || url.indexOf('/login/qr/create') < 0) { return url; }
+            // 页面自己已经带了就不动。
+            if (/[?&]qrimg=/.test(url)) { return url.replace(/qrimg=[^&]*/, 'qrimg=true'); }
+            return url + (url.indexOf('?') >= 0 ? '&' : '?') + 'qrimg=true';
+          };
+
+          var nativeFetch = window.fetch;
+          if (nativeFetch) {
+            window.fetch = function(input, init){
+              try {
+                if (typeof input === 'string') {
+                  input = ensureQrImg(input);
+                } else if (input && input.url) {
+                  var fixed = ensureQrImg(input.url);
+                  if (fixed !== input.url) { input = new Request(fixed, input); }
+                }
+              } catch (e) {}
+              return nativeFetch.call(window, input, init).then(function(res){
+                try {
+                  var u = (res && res.url) || '';
+                  if (u.indexOf('/login/qr/create') >= 0) {
+                    res.clone().json().then(function(body){
+                      var qr = body && body.data && (body.data.qrimg || body.data.qrcode_img);
+                      if (qr) { return; }
+                      var target = body && body.data && body.data.qrurl;
+                      if (!target) { return; }
+                      window.webkit.messageHandlers.foliaQrFallback.postMessage(target);
+                    }).catch(function(){});
+                  }
+                } catch (e) {}
+                return res;
+              });
+            };
+          }
+        })();
+        """
+        webView?.evaluateJavaScript(js, completionHandler: nil)
+    }
+
     private static var userAgent: String {
         let base = WKWebView().value(forKey: "userAgent") as? String ?? ""
         // 尾巴上追加标记，保留原有 Safari/WebKit 版本信息，页面识别与兼容判断都不受影响。
@@ -278,7 +331,10 @@ final class WebContainerView: UIView {
 // MARK: - 导航
 
 extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
-    /// 站外链接不进 WebView，交系统浏览器打开。
+    /// 站内（含子域）与媒体资源一律放行；只有主框架跳到站外时才交给系统浏览器。
+    ///
+    /// 线上页是远程 https：音频、封面、二维码图片全在站外 CDN 上，
+    /// 这里必须按「是不是主框架」区分，不能再像本地包那样只放行 folia://。
     func webView(_ webView: WKWebView,
                  decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
@@ -288,12 +344,17 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         }
 
         let scheme = url.scheme?.lowercased() ?? ""
-        if scheme == BundleSchemeHandler.scheme || scheme == "about" || scheme == "blob" || scheme == "data" {
+        if scheme == "about" || scheme == "blob" || scheme == "data" || scheme.isEmpty {
             decisionHandler(.allow)
             return
         }
 
-        if navigationAction.targetFrame?.isMainFrame == true {
+        let host = url.host?.lowercased() ?? ""
+        let isMainFrame = navigationAction.targetFrame?.isMainFrame == true
+        let isSameSite = host == Self.siteHost || host.hasSuffix(".\(Self.siteHost)")
+
+        if isMainFrame && (scheme == "http" || scheme == "https") && !isSameSite {
+            // 站外链接（登录协议页、赞赏、QQ 群等）走系统浏览器。
             UIApplication.shared.open(url, options: [:], completionHandler: nil)
             decisionHandler(.cancel)
             return
@@ -306,9 +367,25 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         lastInsets = .zero
         pushInsetsIfNeeded()
         installAudioKeeper()
+        installLoginHelpers()
         // App 启动时会被系统重新激活会话；每次页面加载完再补一次，
         // 覆盖「之前被来电/其他播放器降级」的情况。
         AudioSessionController.shared.reactivate()
+    }
+
+    /// 远程页加载失败时自动重试一次，避免停在白屏上。
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        let code = (error as NSError).code
+        // -999 是「被新导航取消」，属正常流程。
+        guard code != NSURLErrorCancelled else { return }
+        CrashLog.note("==== provisional navigation failed \(code) \(error.localizedDescription) ====")
+        let now = Date()
+        contentProcessRestarts = contentProcessRestarts.filter { now.timeIntervalSince($0) < 60 }
+        guard contentProcessRestarts.count < 2 else { return }
+        contentProcessRestarts.append(now)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak webView] in
+            webView?.load(URLRequest(url: Self.startURL))
+        }
     }
 
     /// 内容进程被系统回收（内存压力）时自动恢复，但要限流：
@@ -356,6 +433,53 @@ private final class JSLogRelay: NSObject, WKScriptMessageHandler {
                                didReceive message: WKScriptMessage) {
         guard let body = message.body as? String else { return }
         CrashLog.note("JS \(body)")
+    }
+}
+
+// MARK: - 二维码兜底
+
+/// 服务端没给二维码图片时，用 `qrurl` 在本地画一张，再塞回页面的二维码弹窗。
+private final class QRFallbackRelay: NSObject, WKScriptMessageHandler {
+    func userContentController(_ userContentController: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        guard let url = message.body as? String,
+              let dataURL = QRTool.dataURL(for: url) else {
+            CrashLog.note("QR fallback: cannot render \(message.body)")
+            return
+        }
+        CrashLog.note("QR fallback: rendered locally for \(url)")
+        let js = """
+        (function(src){
+          var imgs = document.querySelectorAll('img');
+          for (var i = 0; i < imgs.length; i += 1) {
+            var img = imgs[i];
+            var box = img.getBoundingClientRect();
+            // 二维码弹窗里那张图：方形、边长 120 以上，且当前没有可用图源。
+            if (box.width < 100 || Math.abs(box.width - box.height) > 8) { continue; }
+            var blank = !img.getAttribute('src') || img.getAttribute('src').indexOf('data:') === 0 && img.naturalWidth === 0;
+            if (!blank && img.complete && img.naturalWidth > 0) { continue; }
+            img.removeAttribute('srcset');
+            img.setAttribute('src', src);
+            try { img.style.opacity = '1'; } catch (e) {}
+            return;
+          }
+          // 页面上没有现成的 img 时才兜底：替换掉“正在加载二维码”的占位文字。
+          var all = document.querySelectorAll('div,p,span');
+          for (var j = 0; j < all.length; j += 1) {
+            var el = all[j];
+            if (el.children.length > 0) { continue; }
+            if ((el.textContent || '').indexOf('二维码') < 0) { continue; }
+            var holder = el.parentElement;
+            if (!holder) { continue; }
+            var pic = document.createElement('img');
+            pic.src = src;
+            pic.style.cssText = 'width:200px;height:200px;display:block;margin:8px auto;border-radius:8px;background:#fff';
+            holder.appendChild(pic);
+            return;
+          }
+        })('\(dataURL)');
+        """
+        message.webView?.evaluateJavaScript(js, completionHandler: nil)
     }
 }
 
@@ -423,6 +547,15 @@ final class DiagnosticsOverlay: NSObject {
         audio.addTarget(self, action: #selector(showAudioProbe), for: .touchUpInside)
         container.addSubview(audio)
 
+        // 现场勘验：直接把页面此刻的真实数值铺出来。
+        // 「进度条不动」可能是没声音，也可能是状态机把时间写丢了，
+        // 只有这两组数字能区分，光看界面看不出来。
+        let live = UIButton(type: .system)
+        live.setTitle("现场", for: .normal)
+        live.frame = CGRect(x: 304, y: 12, width: 72, height: 32)
+        live.addTarget(self, action: #selector(showLiveState), for: .touchUpInside)
+        container.addSubview(live)
+
         host.addSubview(container)
         panel = container
         showAudioProbe()
@@ -454,6 +587,49 @@ final class DiagnosticsOverlay: NSObject {
                 }
                 let text = (result as? String) ?? "（没有数据）"
                 label.text = "==== 播放探针 ====\n" + (text.isEmpty ? "（还没有事件，先点一下播放）" : text)
+            }
+        }
+    }
+
+    /// 页面上此刻的真实数值：哪个 deck 在放、音频元素自己的 currentTime 与 duration。
+    /// 「进度条不动」时这两组数字一对就知道卡在哪一层。
+    @objc private func showLiveState() {
+        guard let web = webView else { return }
+        let js = """
+        (function(){
+          var out = [];
+          var list = document.querySelectorAll('audio');
+          out.push('audio 元素数: ' + list.length);
+          for (var i = 0; i < list.length; i += 1) {
+            var a = list[i];
+            out.push('[' + i + '] paused=' + a.paused + ' ended=' + a.ended +
+              ' t=' + a.currentTime.toFixed(2) + ' dur=' + (isFinite(a.duration) ? a.duration.toFixed(1) : '-') +
+              ' rs=' + a.readyState + ' ns=' + a.networkState +
+              ' err=' + (a.error ? a.error.code : '-'));
+            out.push('    src=' + ((a.currentSrc || a.getAttribute('src') || '-').slice(-70)));
+          }
+          try {
+            var bars = document.querySelectorAll('[role="slider"]');
+            for (var j = 0; j < bars.length; j += 1) {
+              out.push('slider aria-valuenow=' + bars[j].getAttribute('aria-valuenow') +
+                ' aria-valuemax=' + bars[j].getAttribute('aria-valuemax'));
+            }
+          } catch (e) {}
+          if (window.__folioAudioProbe) {
+            out.push('---- 探针 ----');
+            out.push(window.__folioAudioProbe.dump());
+          }
+          return out.join('\\n');
+        })();
+        """
+        web.evaluateJavaScript(js) { [weak self] result, error in
+            DispatchQueue.main.async {
+                guard let label = self?.panel?.subviews.compactMap({ $0 as? UILabel }).first else { return }
+                if let error {
+                    label.text = "读取失败：\(error.localizedDescription)"
+                    return
+                }
+                label.text = "==== 现场 ====\n" + ((result as? String) ?? "（没有数据）")
             }
         }
     }
