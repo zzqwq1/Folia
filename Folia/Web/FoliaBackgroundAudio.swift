@@ -14,7 +14,7 @@ import UIKit
 /// 壳用 `AVPlayer` 从同一个原始音频地址接着出声；回到前台再交还给页面。
 ///
 /// 接管期间页面的均衡器、自动化效果、歌词跳字都不生效，这是这条路的固有代价。
-final class FoliaBackgroundAudio {
+final class FoliaBackgroundAudio: NSObject {
     static let shared = FoliaBackgroundAudio()
 
     /// 页面从未汇报过状态时一律不接管：宁可不响，也不能在用户没播歌时自己出声。
@@ -28,6 +28,8 @@ final class FoliaBackgroundAudio {
     private var didPlayInActive = false
     /// 页面自己的播放器从头放起了某一首：这时不该再拿旧进度去接管。
     private var pendingFreshStart = false
+    /// 「没能出声」的补救次数已经用满：再补下去只会变成反复起播的杂音。
+    private var gaveUp = false
 
     private var src = ""
     private var position: TimeInterval = 0
@@ -36,11 +38,28 @@ final class FoliaBackgroundAudio {
     private let player = AVPlayer()
     private var itemObservation: NSKeyValueObservation?
     private var timeObserver: Any?
+    private var routeObservation: NSObjectProtocol?
+    /// 起播阶段的重试次数。`AVPlayer` 在会话刚切换、网络刚断时第一次 `play()`
+    /// 经常直接失败，不留退路就是「后台一点声都没有」。
+    private var playAttempts = 0
+    private var retryWork: DispatchWorkItem?
+    /// 上一次观察到进度推进的时刻。
+    private var lastProgressAt = Date()
 
-    private init() {
+    private override init() {
+        super.init()
         let interval = CMTime(seconds: 0.25, preferredTimescale: 600)
         timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
             self?.tick(time)
+        }
+        // 接管期间音频通路发生切换（拔耳机、蓝牙断开、来电结束）时 AVPlayer 会停住，
+        // 不回前台就再也不会自己响，这里补一次 play。
+        routeObservation = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.recoverIfStalled(reason: "route")
         }
     }
 
@@ -53,18 +72,31 @@ final class FoliaBackgroundAudio {
             hasReport = true
             pagePlaying = playing
         }
+        if let src, !src.isEmpty, src != self.src {
+            // 换了曲目：进度必须跟着新歌走，旧进度套上去就是「回前台从头开始」。
+            self.src = src
+            self.position = max(0, position ?? 0)
+            sourceDuration = duration.map { $0 > 1 ? $0 : 0 } ?? 0
+            return
+        }
         if let src, !src.isEmpty { self.src = src }
         if let position { self.position = max(0, position) }
         if let duration, duration > 1 { sourceDuration = duration }
     }
 
     /// 页面把某一首从头放起（用户在前台点了歌），时间戳是这一刻的。
+    ///
+    /// 只在「确实换了曲目」时才算从头开始：同一首反复触发 `play`
+    /// （缓冲完、切歌词重建播放器树）不能把进度清成 0，否则回前台就会从头开始。
     func pageStartedTrack(src: String?) {
-        if let src, !src.isEmpty { self.src = src }
-        position = 0
-        sourceDuration = 0
+        guard let src, !src.isEmpty else { return }
+        let isNewTrack = src != self.src
+        self.src = src
         hasReport = true
         pagePlaying = true
+        guard isNewTrack else { return }
+        position = 0
+        sourceDuration = 0
         pendingFreshStart = true
     }
 
@@ -78,17 +110,27 @@ final class FoliaBackgroundAudio {
 
     /// 在后台起播，接着页面最后一次汇报的进度放。
     func start(reason: String) {
-        guard hasReport, pagePlaying, !isActive else { return }
+        guard hasReport, pagePlaying, !isActive else {
+            logState("skip-\(reason)")
+            return
+        }
         guard let url = URL(string: src), !src.isEmpty else {
             CrashLog.note("==== native takeover skipped: no source (\(reason)) ====")
             return
         }
+        // 后台任务只保证约 30 秒，真正让进程活着的是「正在出声」这件事本身；
+        // 但 WebProcess 一旦被挂起，页面就再也不会自己切下一首，这里先把任务续上。
+        UIApplication.shared.beginBackgroundTask(withName: "folia.native-takeover")
         // 页面刚开始这一首却还没报进度：从 0 接管，而不是拿上一首的进度乱跳。
         if pendingFreshStart { position = 0 }
         pendingFreshStart = false
         isActive = true
         didPlayInActive = false
+        gaveUp = false
+        // 上一次有进度推进的时刻。用它判断「亮着 rate 但根本没出声」。
+        lastProgressAt = Date()
         CrashLog.note("==== native takeover start (\(reason)) at \(String(format: "%.1f", position))s ====")
+        logState("start")
         load(url: url, seekTo: position)
     }
 
@@ -129,18 +171,40 @@ final class FoliaBackgroundAudio {
         isActive && player.rate > 0
     }
 
+    /// 进后台接管前的自检日志：出问题时靠它判断到底是「没接管」还是「接管了没声音」。
+    func logState(_ tag: String) {
+        CrashLog.note("==== native takeover state (\(tag)) report=\(hasReport ? 1 : 0) playing=\(pagePlaying ? 1 : 0) active=\(isActive ? 1 : 0) rate=\(String(format: "%.1f", player.rate)) pos=\(String(format: "%.1f", position)) ====")
+        CrashLog.note("native source: \(src.isEmpty ? "-" : src)")
+    }
+
     // MARK: - 内部
 
     private func load(url: URL, seekTo position: TimeInterval) {
+        // 接管这一刻会话可能刚被系统降级：不先激活，AVPlayer 起来了也是静音。
+        try? AVAudioSession.sharedInstance().setActive(true)
+        playAttempts = 0
         let item = AVPlayerItem(url: url)
         item.preferredForwardBufferDuration = 10
         itemObservation = item.observe(\.status, options: [.new]) { [weak self] observed, _ in
-            guard observed.status == .readyToPlay else { return }
-            DispatchQueue.main.async { self?.seekNative(to: position, thenPlay: true) }
+            guard let self else { return }
+            switch observed.status {
+            case .readyToPlay:
+                DispatchQueue.main.async { self.seekNative(to: position, thenPlay: true) }
+            case .failed:
+                let message = observed.error?.localizedDescription ?? "-"
+                CrashLog.note("==== native takeover item failed ====")
+                CrashLog.note("item failed: \(message)")
+                DispatchQueue.main.async { self.scheduleRetry(reason: "item-failed") }
+            default:
+                break
+            }
         }
         player.replaceCurrentItem(with: item)
+        player.isMuted = false
         // 先把音量压到 0：接管那一刻页面那条通路刚被系统钉住，硬切会「咔」一声。
         player.volume = 0
+        // 音频类 App 必须显式告诉系统「我要出声」，否则后台被当成纯计算进程静音拉走。
+        player.automaticallyWaitsToMinimizeStalling = false
     }
 
     private func seekNative(to position: TimeInterval, thenPlay: Bool) {
@@ -151,7 +215,50 @@ final class FoliaBackgroundAudio {
             self.didPlayInActive = true
             self.player.volume = 1
             self.refreshNowPlaying()
+            // play() 只是「请求播放」，真正是否出声要看一小会儿之后的 rate。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                self?.recoverIfStalled(reason: "after-play")
+            }
         }
+    }
+
+    /// 接管中却发现没在响：补激活会话再 play 一次，最多几次。
+    ///
+    /// 这一步是「后台没声音」的直接补救：系统在切后台瞬间会把会话降级，
+    /// 此时 AVPlayer 的 rate 会掉到 0，而且不会再自己恢复。
+    private func recoverIfStalled(reason: String) {
+        guard isActive, !gaveUp, player.currentItem != nil else { return }
+        if player.rate > 0 && Date().timeIntervalSince(lastProgressAt) < 2.0 { return }
+        guard playAttempts < 6 else {
+            gaveUp = true
+            CrashLog.note("==== native takeover give up (\(reason)) ====")
+            return
+        }
+        playAttempts += 1
+        // 卡住超过两秒才补进度：真在放的时候不要每 0.25 秒 seek 一次。
+        let stalled = Date().timeIntervalSince(lastProgressAt) > 2.0
+        // 会话掉成 interrupted 时，只 setActive 是回不来的：必须重新声明 category。
+        AudioSessionController.shared.activate()
+        player.play()
+        if stalled {
+            // 卡住时播放器常常停在缓冲态，不 seek 就永远不动。
+            player.seek(to: CMTime(seconds: max(0, position), preferredTimescale: 600),
+                        toleranceBefore: .zero,
+                        toleranceAfter: .zero)
+        }
+        CrashLog.note("==== native takeover replay (\(reason)) attempt=\(playAttempts) ====")
+    }
+
+    private func scheduleRetry(reason: String) {
+        guard isActive else { return }
+        retryWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.isActive, !self.src.isEmpty, let url = URL(string: self.src) else { return }
+            CrashLog.note("==== native takeover retry (\(reason)) ====")
+            self.load(url: url, seekTo: self.position)
+        }
+        retryWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: work)
     }
 
     private func tick(_ time: CMTime) {
@@ -159,6 +266,16 @@ final class FoliaBackgroundAudio {
         let t = time.seconds
         if t.isFinite, t > 0 {
             position = t
+            playAttempts = 0
+            lastProgressAt = Date()
+        }
+        // 「接管了却没声音」的看门狗。AVPlayer 在音频通路不通时表现得很有欺骗性：
+        // rate 可能仍是 1、时间也在走，可喇叭里什么都没有，所以只能按「有没有在出进度」兜。
+        if let item = player.currentItem, item.status == .readyToPlay {
+            let stalled = Date().timeIntervalSince(lastProgressAt) > 2.0
+            if player.rate <= 0 || stalled {
+                recoverIfStalled(reason: "tick")
+            }
         }
         refreshNowPlayingTime()
         // 一首放完：页面那边此时正被系统钉住，不会再自己切歌。
@@ -174,6 +291,9 @@ final class FoliaBackgroundAudio {
     }
 
     private func stopInternal() {
+        retryWork?.cancel()
+        retryWork = nil
+        playAttempts = 0
         player.pause()
         player.replaceCurrentItem(with: nil)
         itemObservation = nil
