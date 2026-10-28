@@ -50,6 +50,8 @@ final class WebContainerView: UIView {
     private var userPaused = false
     /// 保活轮询：后台时每两秒确认一次「该响的还在响」。
     private var keepAliveTimer: Timer?
+    /// 前台已经探过几次。前台不需要一直轮询，探够就停，省掉反复跨进程执行脚本的开销。
+    private var foregroundProbes = 0
     private var foregroundObservation: Any?
     private var backgroundObservation: Any?
     private var networkObservation: Any?
@@ -188,12 +190,10 @@ final class WebContainerView: UIView {
                 // 2. 再让页面把 AudioContext 与播放树重建一次，然后对齐进度续播。
                 AudioSessionController.shared.activate()
                 self.rebuildPageAudioContext()
+                // 两次补放之间留 0.8 秒，是为了等播放树重挂完；但第二趟只在第一趟没接上时
+                // 才值得再跑一次 —— 每次都跑就是每次回前台多一趟跨进程脚本，白卡一下。
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-                    self?.resumePageAt(handBackPosition)
-                    // 会话放开、播放树重建之后再确认一次：这才是「回前台有声音」的关键。
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-                        self?.resumePageAt(handBackPosition)
-                    }
+                    self?.resumePageAt(handBackPosition, retryLater: true)
                 }
             } else {
                 // 没接管过（或后台根本没放起来）：系统可能把媒体按停，补放一次。
@@ -331,6 +331,13 @@ final class WebContainerView: UIView {
         let timer = Timer(timeInterval: 4.0, repeats: true) { [weak self] _ in
             guard let self, self.wantsAudible else { return }
             // 后台每一拍都重试一次 play：系统掐断媒体、缓冲结束、页面自暂停都在这一拍里被兜住。
+            // 前台只在「切后台后的头几秒」探一次：那时会话还没被系统按停，探一次就知道
+            // 该不该接管；之后一直在前台就交给页面自己，省掉每 4 秒一次跨进程 evaluateJavaScript
+            // —— 那一趟要走主线程、在 WebKit 里跑脚本，听歌时滑动列表也会被它拖顿。
+            if UIApplication.shared.applicationState == .active {
+                guard self.foregroundProbes < 2 else { return }
+                self.foregroundProbes += 1
+            }
             self.enforcePlaybackIfNeeded(reason: "keepalive")
         }
         // 挂 .common：滚动视图追踪模式下定时器也会照常触发，后台也照常。
@@ -341,6 +348,7 @@ final class WebContainerView: UIView {
     private func stopKeepAliveTimer() {
         keepAliveTimer?.invalidate()
         keepAliveTimer = nil
+        foregroundProbes = 0
     }
 
     /// 会话激活失败时 iOS 会把媒体按停；这里把「该响的」重新放回去。
@@ -482,7 +490,7 @@ final class WebContainerView: UIView {
     /// 2. 只在页面确实换了一首（`src` 与交还时不同）时才接受它自己的进度，
     ///    同一首则一律以原生那一秒为准 —— 页面记为 0 就会从头放；
     /// 3. 对齐后再调 `play`，并回读 `currentTime` 确认真的接上了，没接上返回 `retry` 再补一次。
-    private func resumePageAt(_ position: TimeInterval) {
+    private func resumePageAt(_ position: TimeInterval, retryLater: Bool = false) {
         let seconds = String(format: "%.2f", max(0, position))
         let js = """
         (function(pos){
@@ -522,6 +530,8 @@ final class WebContainerView: UIView {
                 return
             }
             guard flag == "retry" else { return }
+            // `retryLater` 时只补一次：回前台本来就有一次专门的重试，再多就是空跑。
+            guard !retryLater else { return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
                 self?.resumePageAt(position)
             }
@@ -941,13 +951,28 @@ final class WebContainerView: UIView {
 
           // WebAudio 走 createMediaElementSource 时元素本身不直出声音，
           // 但 iOS 仍以「页面上有在播放的媒体」来维持后台音频，所以这里持续观察。
-          setInterval(report, 1000);
-          setInterval(reportProgress, 3000);
+          // 播放状态改为纯事件驱动：`playing` / `pause` / `visibilitychange` 时才报。
+          // 之前是每秒轮询一次（`setInterval(report, 1000)`），在 WebKit 里要跨进程序列化参数，
+          // 播放时每秒一趟会稳定掉帧，滑动列表也发涩。
           document.addEventListener('playing', report, true);
           document.addEventListener('pause', report, true);
           // 补报一次：文档开始时装的监听只覆盖「之后的 play」，而页面可能在
           // 首屏挂载时就自动续上上一首，那一拍早于 React 跑起来，得靠这里补。
           document.addEventListener('DOMContentLoaded', reportProgress, true);
+          // 进度只在后台需要：前台交给页面自己走，轮询毫无用处还白耗。
+          // 后台降回 5 秒一次（原生接管前还会再抓一次实时的），足够定位接管起点。
+          var progressTimer = 0;
+          var syncProgressTimer = function(){
+            var backgrounded = document.visibilityState !== 'visible';
+            if (backgrounded && !progressTimer) {
+              progressTimer = setInterval(reportProgress, 5000);
+            } else if (!backgrounded && progressTimer) {
+              clearInterval(progressTimer);
+              progressTimer = 0;
+            }
+          };
+          document.addEventListener('visibilitychange', syncProgressTimer);
+          syncProgressTimer();
           document.addEventListener('visibilitychange', function(){
             if (document.visibilityState === 'visible') { report(); return; }
             // 切后台前再补一条最新进度：系统随后就会把 AudioContext 钉住，
@@ -997,6 +1022,9 @@ final class WebContainerView: UIView {
 
           var scan = function(){
             try {
+              // 登录弹窗没开着时直接退出：之前在首页也每两秒全文档查一遍
+              // `[class*="qr"]`，播放中白白占主线程，滑动会顿。
+              if (!document.querySelector('[class*="login"], [id*="login"], [class*="Login"]')) { return; }
               var boxes = document.querySelectorAll('[id*="qr"], [class*="qr"], [class*="QR"]');
               for (var i = 0; i < boxes.length; i += 1) {
                 var imgs = boxes[i].querySelectorAll('img');
@@ -1015,7 +1043,7 @@ final class WebContainerView: UIView {
 
           // 二维码是弹窗打开后才插入的，这里低频轮询一次，避免 MutationObserver 在这类
           // 高频重渲染的页面上放大成本。
-          setInterval(scan, 2000);
+          setInterval(scan, 3000);
           scan();
         })();
         """

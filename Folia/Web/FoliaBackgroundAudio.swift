@@ -48,7 +48,9 @@ final class FoliaBackgroundAudio: NSObject {
 
     private override init() {
         super.init()
-        let interval = CMTime(seconds: 0.25, preferredTimescale: 600)
+        let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
+        // 主队列每隔半秒跑一次（原来是 0.25 秒）：接管只在后台发生，半秒的相位差听不出来，
+        // 但主线程的回调量减半，回前台后不会因为还在刷新 Now Playing 而卡一下。
         timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
             self?.tick(time)
         }
