@@ -548,9 +548,9 @@ final class WebContainerView: UIView {
           var QUARK_URL = 'https://pan.quark.cn/s/934c480d5b9c';
 
           // 两个版本号都取壳带进来的实际版本：线上页的常量停在 1.8.5，
-          // 而这个包是 2.0，沿用会显示「当前 2.0 / 最新 1.8.5」，还会误弹一次更新公告。
+          // 而这个包是 2.0，沿用会显示「当前 2.0 / 最新 1.8.5」。
           var cur = (window.__foliaAppVersion || (typeof FOLIA_VERSION === 'string' && FOLIA_VERSION) || '');
-          var latest = cur;
+          var latest = cur || (typeof FOLIA_LATEST_VERSION === 'string' && FOLIA_LATEST_VERSION) || '';
 
           var verNum = document.getElementById('donate-version-num');
           if (verNum && cur) { verNum.textContent = cur; }
@@ -559,15 +559,12 @@ final class WebContainerView: UIView {
 
           var getLatest = document.getElementById('donate-get-latest');
           if (getLatest) {
-            // 已经是最新：这个链接没有意义，隐藏掉，免得点了跳去网盘。
-            if (cur && latest && cur === latest) {
-              getLatest.style.display = 'none';
-            } else {
-              getLatest.addEventListener('click', function(e){
-                e.preventDefault();
-                try { window.open(QUARK_URL, '_blank'); } catch (err) { location.href = QUARK_URL; }
-              });
-            }
+            // 公告照弹、获取入口保留：这里是「去网盘拿最新包」的唯一入口，
+            // 版本号相同也照样可点，不能因为 2.0 就把它藏掉。
+            getLatest.addEventListener('click', function(e){
+              e.preventDefault();
+              try { window.open(QUARK_URL, '_blank'); } catch (err) { location.href = QUARK_URL; }
+            });
           }
 
           var closeBtn = document.getElementById('donate-close');
@@ -592,7 +589,9 @@ final class WebContainerView: UIView {
           setTimeout(function(){ mask.classList.add('show'); }, 1200);
 
           // ---- 更新公告：与页面同一套规则，等赞赏弹窗关掉后再弹 ----
-          if (!cur || !latest || cur === latest) { return; }
+          // 跟网页版唯一的差别是不拦「版本相同」：这条公告是用户唯二能看到网盘入口的地方，
+          // 一旦按 cur === latest 跳过，2.0 之后就再也不弹了。
+          if (!latest) { return; }
           var updateMask = document.getElementById('update-mask');
           if (!updateMask) { return; }
 
@@ -604,12 +603,13 @@ final class WebContainerView: UIView {
             if (line) { line.innerHTML = '最新 <b style="color:#ff4d6d">' + latest + '</b> 版本已发布，请及时下载！'; }
           } catch (e) {}
 
-          var KEY = 'folia.update.seen.' + latest;
-          try { if (localStorage.getItem(KEY)) { return; } } catch (e) {}
+          // 网页版用 localStorage 记住「看过就别再烦」，壳里这条不能留：
+          // 版本号统一成 2.0 之后，看一次就被永久跳过，网盘入口也跟着消失。
+          // 和赞赏弹窗一样改成每次冷启动弹一次，关掉只影响本次。
+          try { localStorage.removeItem('folia.update.seen.' + latest); } catch (e) {}
 
           function hideUpdate() {
             updateMask.style.display = 'none';
-            try { localStorage.setItem(KEY, '1'); } catch (e) {}
           }
 
           var closeUpdate = document.getElementById('update-close');
