@@ -166,16 +166,17 @@ final class AudioSessionController {
     /// 网页版的时间轴推进、自动切歌全靠 JS 定时器跑在主线程上，
     /// 没有后台任务时 WebProcess 会在退到后台几十秒后被系统挂起，
     /// 表现就是「后台还在响，切回来进度和歌词都停在原地，然后被页面自己暂停」。
+    ///
+    /// 这里刻意**不动 `isPlaying` 之外的任何音频状态**：播放中只续后台任务与播放速率，
+    /// 不调 `setActive`。后者的语义是「占用音频设备」，音效播放、Siri、来电刚结束等
+    /// 场景下反复调用会让系统重新评估本 App 的播放资格，页面那边就表现为莫名暂停。
     func updatePlaybackState(_ playing: Bool) {
+        guard playing != isPlaying else { return }
         isPlaying = playing
         if playing {
-            // 这里只能 setActive：正在播放时重设 category 会把 WebKit 媒体按停。
-            reactivate()
             beginBackgroundTask()
             var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
-            if info[MPNowPlayingInfoPropertyPlaybackRate] == nil {
-                info[MPNowPlayingInfoPropertyPlaybackRate] = 1.0
-            }
+            info[MPNowPlayingInfoPropertyPlaybackRate] = 1.0
             info[MPNowPlayingInfoPropertyIsLiveStream] = false
             MPNowPlayingInfoCenter.default().nowPlayingInfo = info
         } else if var info = MPNowPlayingInfoCenter.default().nowPlayingInfo {

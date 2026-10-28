@@ -165,7 +165,9 @@ final class WebContainerView: UIView {
             AudioSessionController.shared.reactivate()
             // 回前台不改变意图：该响的继续响，轮询照旧。
             self.refreshAudioKeepAlive()
-            self.enforcePlaybackIfNeeded(reason: "foreground")
+            // 回前台时系统会重新激活会话，可能把媒体按停；这里补放一次。
+            // 前台续播只此一次，不进轮询，避免影响用户在前台主动暂停。
+            self.forceResumeAudio(reason: "foreground")
             // 断网时用户往往先去开 Wi-Fi 再切回来，这里接着自己重试一次，
             // 不用等他再点「重试」。
             if self.state.offlineReason != nil {
@@ -220,16 +222,20 @@ final class WebContainerView: UIView {
     }
 
     /// 页面自己暂停了（用户按暂停、或播完）：不再续播。
+    ///
+    /// `wantsAudible` 必须保留。它代表的是「用户想听这首歌」这个意图，
+    /// 而暂停只是暂停；一旦这里把它清掉，页面任何一次自我暂停
+    /// （切歌瞬间、缓冲卡顿、切歌词重建播放器）都会让保活彻底停摆，
+    /// 之后系统把媒体掐断就再也没人放回去 —— 这正是「还是会自动暂停」的来源。
+    /// 真正的用户暂停由 `handleRemoteCommand` 的 pause 分支单独处理。
     fileprivate func markPausedIntent() {
-        wantsAudible = false
         stopKeepAliveTimer()
     }
 
     private func startKeepAliveTimer() {
         guard keepAliveTimer == nil else { return }
-        let timer = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 4.0, repeats: true) { [weak self] _ in
             guard let self, self.wantsAudible else { return }
-            AudioSessionController.shared.reactivate()
             self.enforcePlaybackIfNeeded(reason: "keepalive")
         }
         // 挂 .common：滚动视图追踪模式下定时器也会照常触发，后台也照常。
@@ -246,8 +252,24 @@ final class WebContainerView: UIView {
     ///
     /// 只在 `wantsAudible` 为真时动手，且每轮只做一次 `play()`：
     /// 页面自己的播放器仍然是唯一的状态源，壳只是保证它不被系统静默掐断。
+    ///
+    /// 两个前提缺一不可：
+    /// 1. `userPaused` 为假 —— 用户亲手按的暂停绝不覆盖；
+    /// 2. 页面处于后台 —— 前台时用户可能只是想暂停，此时接管会把暂停又弹回播放。
+    ///    系统掐断媒体只发生在后台，前台不需要也不应该续播。
     private func enforcePlaybackIfNeeded(reason: String) {
         guard wantsAudible, !userPaused else { return }
+        guard UIApplication.shared.applicationState != .active else { return }
+        resumeAudio(reason: reason)
+    }
+
+    /// 回前台时的补放：不看前后台状态，其余条件与轮询一致。
+    private func forceResumeAudio(reason: String) {
+        guard wantsAudible, !userPaused else { return }
+        resumeAudio(reason: reason)
+    }
+
+    private func resumeAudio(reason: String) {
         let js = """
         (function(){
           try {
@@ -914,12 +936,21 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
 
         // 网页进程被打死后，页面里的 `<audio>` 随之消失，声音立刻断掉 ——
         // 用户实际经历的是「切歌词界面，音乐停了 / App 退回首页」。
-        // 这里先把现场抓下来（进程已经死了，事件监听器多半已经取不到，只能尽力）：
-        // 崩溃前的标题、当前路由，以及崩溃时是否还在出声。
+        // 这里先把现场抓下来：崩溃前的标题、当前路由，以及崩溃时是否还在出声。
         collectTerminationContext()
 
         if contentProcessRestarts.count <= 2 {
+            // 崩溃前正在出声，且用户没按过暂停：重载后把播放续上。
+            // 用户感知到的就不是「闪退了」，而是「歌断了一下又响了」。
+            let shouldResume = Self.wasAudibleInBackground && !userPaused
             webView.reload()
+            if shouldResume {
+                wantsAudible = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                    guard let self else { return }
+                    self.forceResumeAudio(reason: "process-restart")
+                }
+            }
         } else if contentProcessRestarts.count == 3 {
             webView.load(URLRequest(url: Self.startURL))
         } else {
