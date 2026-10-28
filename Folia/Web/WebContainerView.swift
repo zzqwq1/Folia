@@ -72,9 +72,9 @@ final class WebContainerView: UIView {
         webView.uiDelegate = self
 
         // 让 UA 带 FoliaApp：网页版据此进入「壳模式」，关掉整页 86% 缩放，安全区改用实测值。
-        // 必须走 applicationNameForUserAgent：直接给 customUserAgent 会被系统整串改写，
-        // 首次请求就可能不带标记，页面于是按普通浏览器渲染（整页缩放、安全区错误）。
+        // applicationNameForUserAgent 与完整串两处都设，避免某些系统版本上其中一路不生效。
         config.applicationNameForUserAgent = "FoliaApp/2.0"
+        Self.installUserAgent(on: webView)
 
         addSubview(webView)
 
@@ -254,6 +254,18 @@ final class WebContainerView: UIView {
         let base = WKWebView().value(forKey: "userAgent") as? String ?? ""
         // 尾巴上追加标记，保留原有 Safari/WebKit 版本信息，页面识别与兼容判断都不受影响。
         return base.isEmpty ? "FoliaApp/2.0" : "\(base) FoliaApp/2.0"
+    }
+
+    /// 显式设一次完整 UA。
+    ///
+    /// `applicationNameForUserAgent` 是首选（系统会把它拼进标准 UA，兼容性最好），
+    /// 但部分系统版本只对「用该 config 创建」的 webView 生效，保险起见这里再赋一次完整串。
+    /// 两处都保留，任一生效页面都能进壳模式。
+    private static func installUserAgent(on webView: WKWebView) {
+        let ua = userAgent
+        // 空值说明系统还没准备好 UA，交给 applicationNameForUserAgent 兜着。
+        guard !ua.isEmpty else { return }
+        webView.customUserAgent = ua
     }
 
     /// 在页面里核对壳标记是否真的生效，没生效就补一次。
