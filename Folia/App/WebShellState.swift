@@ -240,7 +240,59 @@ final class AudioSessionController {
         ) { [weak self] _ in
             self?.reactivate()
         }
+
+        // 状态栏划出控制中心：系统把音频通路静音、状态却仍是「播放中」，
+        // 本 App 收不到中断事件，会话里只剩 `.silenceHint`。控制中心收起时收尾。
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.willResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.markSilencedBySystemPanel()
+        }
+
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.healIfSilenced()
+        }
     }
+
+    /// 状态栏/控制中心盖住本 App 时记一笔，仅在「该响」时。
+    ///
+    /// `didBecomeActive` 同时覆盖来电、切 App 回来等情况，那些都不需要重建通路；
+    /// 只有「刚才被系统面板盖过」才值得动用 `setCategory`。
+    private func markSilencedBySystemPanel() {
+        silencedBySystemPanel = isPlaying
+    }
+
+    /// 收尾时若通路被静音，就重建一次 category 再把会话激活。
+    ///
+    /// 与 `activate()` 的区别只在触发条件：播放中不动 category 是为了避免误暂停，
+    /// 而这里**已经没声了**，重建不会有额外损失；不重建则一直是「显示在播但没声音」。
+    private func healIfSilenced() {
+        guard silencedBySystemPanel else { return }
+        silencedBySystemPanel = false
+        guard isPlaying else { return }
+        let session = AVAudioSession.sharedInstance()
+        // 只在确实是静音泄漏态时动手；正常回前台交给 `reactivate()` 就够。
+        guard session.secondaryAudioShouldBeSilencedHint else { return }
+        do {
+            try session.setCategory(.playback, mode: .default, options: [])
+            try session.setActive(true)
+            NSLog("[Folia] audio path rebuilt after system panel")
+        } catch {
+            NSLog("[Folia] audio path rebuild failed: \(error.localizedDescription)")
+        }
+        // 页面那边此时仍是「在播」状态：重建通路后 AudioContext 可能停在 interrupted，
+        // 需要页面自己再唤醒一次。转发一条 play 命令，与线控走同一条路径。
+        NotificationCenter.default.post(name: .foliaRemoteCommand, object: "play")
+    }
+
+    /// 上一次 `willResignActive` 是否由状态栏/控制中心引起。
+    private var silencedBySystemPanel = false
 
     /// 系统级中断（来电、闹钟、别的 App 抢占）是否还没结束。
     ///

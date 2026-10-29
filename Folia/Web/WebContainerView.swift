@@ -235,6 +235,10 @@ final class WebContainerView: UIView {
             // 并把页面里那条停住的 `<audio>` 放回去。页面始终是唯一的播放器，
             // 原生不接管出声 —— 两套播放器抢同一个会话，正是之前「后台/回来没声音」的来源。
             self.forceResumeAudio(reason: "foreground", rebuild: true)
+            // 状态栏划出控制中心再收起时，媒体元素往往仍显示「在播」，只是 AudioContext
+            // 被系统挂成 interrupted —— 与回前台是同一个病，`resumeAudio` 那一步的
+            // 「没暂停就跳过」正好放不掉它，所以这里无条件再唤醒一次页面音频。
+            self.revivePageAudio()
             CrashLog.note("==== foreground resume done (audible=\(self.wantsAudible ? 1 : 0) paused=\(self.userPaused ? 1 : 0)) ====")
             // 真正加载失败（没有页面可用）时用户往往先去开 Wi-Fi 再切回来，
             // 这里自己重试一次，不用等他再点「重试」。
