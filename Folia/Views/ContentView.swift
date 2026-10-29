@@ -11,8 +11,12 @@ struct ContentView: View {
                 .ignoresSafeArea()
             WebShellView(state: state)
                 .ignoresSafeArea()
-            if let reason = state.offlineReason {
+            if state.showsBlockingNotice, let reason = state.offlineReason {
                 OfflineNotice(reason: reason, detail: state.failureDetail) { state.reload() }
+            } else if state.isOfflineCopy {
+                // 已经回退到包内副本、页面本身可用：只留一条不挡操作的提示条。
+                OfflineBanner { state.reload() }
+                    .frame(maxHeight: .infinity, alignment: .top)
             }
         }
         .statusBarHidden(false)
@@ -90,5 +94,43 @@ private struct OfflineNotice: View {
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
             .padding(24)
         }
+    }
+}
+
+/// 已经跑在包内离线副本上时的轻提示。
+///
+/// 页面本身是可用的，所以不能像 `OfflineNotice` 那样铺满整屏把播放器挡住——
+/// 用户会以为 App 坏了。这里只在顶部留一条细窄的说明 + 「重新连接」，
+/// 点完由容器重新走一次线上加载，成功就自己消失。
+private struct OfflineBanner: View {
+    let reconnect: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "wifi.slash")
+                .font(.system(size: 13, weight: .medium))
+            Text("离线版本 · 功能可能不全")
+                .font(.caption)
+            Spacer(minLength: 8)
+            Button(action: reconnect) {
+                Text("重新连接")
+                    .font(.caption.weight(.semibold))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .background(Color.white.opacity(0.14), in: Capsule())
+            .contentShape(Rectangle())
+        }
+        .foregroundStyle(.white.opacity(0.9))
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(Color.black.opacity(0.55), in: Capsule())
+        .overlay(Capsule().stroke(Color.white.opacity(0.12), lineWidth: 0.5))
+        .padding(.top, 8)
+        .padding(.horizontal, 16)
+        // 只占顶部这一条，不参与下方的布局拉伸；页面其余部分照常可点。
+        .fixedSize(horizontal: false, vertical: true)
     }
 }

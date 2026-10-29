@@ -34,6 +34,30 @@ final class WebContainerView: UIView {
     private static let siteHost = "app.folia-api.top"
     private static let startURL = URL(string: "https://app.folia-api.top/")!
 
+    /// 包内离线副本的入口。
+    ///
+    /// `project.yml` 把 `Folia/www` 以 folder reference 打进 bundle，路径是 `Folia.app/www/`。
+    /// 线上站连续失败时回退到这里，至少让用户能进到一个完整的播放器界面。
+    private static var offlineIndexURL: URL? {
+        Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "www")
+    }
+
+    /// 当前是否正在用包内离线副本。决定「重试」是回线上还是重新读本地文件。
+    private var isShowingOfflineCopy = false
+
+    /// 线上加载失败后自动回退到包内副本前，允许重试的次数。
+    ///
+    /// 太少会把「刚好一两秒的信号抖动」也当成彻底连不上；太多则让用户白等。
+    /// 失败重试本身已有 60 秒 / 2 次的限流，这里只统计「连续失败」。
+    private var consecutiveLoadFailures = 0
+
+    /// 连续失败几次判定为「线上真的不可用」，转而回退包内离线副本。
+    ///
+    /// 取 3：一次可能是瞬时抖动（切网络的瞬间、TLS 握手超时），两次仍可能是弱网下的
+    /// 自带重试，三次连续失败基本可以确认是 DNS / 链路 / 劫持层面的持续故障，
+    /// 继续重试只会让用户对着同一个失败页干等。
+    private static let offlineFallbackThreshold = 3
+
     /// 页面调过 `audio.play()` 而还没被用户按暂停：这是「该有声」的唯一依据。
     ///
     /// 用户只按过一次播放，之后无论是切后台、锁屏、Siri 抢占还是 WebKit 自己把
@@ -72,10 +96,12 @@ final class WebContainerView: UIView {
         config.websiteDataStore = .default()
 
         let userContent = WKUserContentController()
+        // 注入到所有 frame：离线副本里的 worker 也要把 `/api/...` 补成线上地址，
+        // 否则元数据 / 歌词解析在 file:// 下会静默失败。脚本内部按协议判断，线上页不受影响。
         userContent.addUserScript(WKUserScript(
             source: Self.shellBridgeScript,
             injectionTime: .atDocumentStart,
-            forMainFrameOnly: true
+            forMainFrameOnly: false
         ))
         // 保活与播放意图上报必须在**页面脚本之前**装好：`play` 事件是 UI 手势那一拍同步发出的，
         // 等 `didFinish` 再注入就已经听不到了 —— 原生收不到 `intent-play`，
@@ -145,9 +171,41 @@ final class WebContainerView: UIView {
         CrashLog.note("==== manual reload ====")
         didReachFirstPaint = false
         state.clearLoadFailure()
+        // 离线副本上点「重试」的语义是「回线上再试一次」，而不是把本地文件重读一遍。
+        // 所以这里先把离线标记清掉、失败计数归零，再走正常的线上加载。
+        isShowingOfflineCopy = false
+        state.leaveOfflineCopy()
+        consecutiveLoadFailures = 0
+        // 卡住重试的配额也要一起清掉：否则用户从离线副本点回线上后，
+        // 上一轮攒下的 3 次 stall 记录会让首屏看门狗直接放弃重试。
+        stallRetries.removeAll()
         webView.load(URLRequest(url: Self.startURL,
                                 cachePolicy: .reloadIgnoringLocalCacheData,
                                 timeoutInterval: 30))
+        scheduleProgressWatchdog()
+    }
+
+    /// 回退到 App 包内的那份 `www/`。
+    ///
+    /// 线上站连不上时（DNS 故障、运营商劫持、跨境链路不通），继续重试只是在同一个坑里打转。
+    /// 包里本来就带着一份完整的构建产物，用它至少能让用户进到界面、看到自己的本地曲库。
+    ///
+    /// 用 `loadFileURL(... allowingReadAccessTo: www 目录)` 而不是自定义 scheme：
+    /// ES module 与相对路径的资源在 `file://` 下按同目录解析，不需要再写一套 WKURLSchemeHandler。
+    private func loadOfflineCopy() {
+        guard let indexURL = Self.offlineIndexURL else {
+            // 包里没带离线副本（构建配置被改过）：只能停在提示层等用户手动重试。
+            CrashLog.note("==== offline copy unavailable (no www/index.html in bundle) ====")
+            return
+        }
+        CrashLog.note("==== fallback to bundled offline copy ====")
+        isShowingOfflineCopy = true
+        didReachFirstPaint = false
+        consecutiveLoadFailures = 0
+        // 包内副本不再看首屏看门狗的那份配额，清干净，切回线上时从头算。
+        stallRetries.removeAll()
+        state.enterOfflineCopy()
+        webView.loadFileURL(indexURL, allowingReadAccessTo: indexURL.deletingLastPathComponent())
         scheduleProgressWatchdog()
     }
 
@@ -178,9 +236,13 @@ final class WebContainerView: UIView {
             // 原生不接管出声 —— 两套播放器抢同一个会话，正是之前「后台/回来没声音」的来源。
             self.forceResumeAudio(reason: "foreground", rebuild: true)
             CrashLog.note("==== foreground resume done (audible=\(self.wantsAudible ? 1 : 0) paused=\(self.userPaused ? 1 : 0)) ====")
-            // 断网时用户往往先去开 Wi-Fi 再切回来，这里接着自己重试一次，
-            // 不用等他再点「重试」。
-            if self.state.offlineReason != nil {
+            // 真正加载失败（没有页面可用）时用户往往先去开 Wi-Fi 再切回来，
+            // 这里自己重试一次，不用等他再点「重试」。
+            //
+            // 离线副本不回切：那是「已经能用了」的兜底状态，
+            // 每次回前台都踢回线上重来一遍，等于把用户正在听的播放器反复打断。
+            // 要回线上由顶部提示条的「重新连接」显式触发。
+            if self.state.showsBlockingNotice {
                 self.hardReload()
             }
         }
@@ -549,6 +611,9 @@ final class WebContainerView: UIView {
         webView?.evaluateJavaScript(js) { [weak self] result, error in
             DispatchQueue.main.async {
                 guard let self, !self.didReachFirstPaint else { return }
+                // 离线副本本身就是完整构建产物，卡住说明是包内资源的问题，
+                // 再回退一次没有意义，只保留「重新读一遍」的重试。
+                guard !self.isShowingOfflineCopy else { return }
                 let detail = (result as? String) ?? (error?.localizedDescription ?? "页面无响应")
                 CrashLog.note("==== first paint timeout ====\n\(detail)")
                 self.state.noteStalled(detail: detail)
@@ -559,6 +624,15 @@ final class WebContainerView: UIView {
 
     /// 卡住时是否还能自动重试：一分钟内最多三次，避免「卡住 → 重载 → 又卡住」的抖动。
     private func retryLoadForStall() {
+        // 卡住和「连不上」是同一件事的两面：换了 bundle 之后页面结构对了、但资源仍拉不下来，
+        // 导航是成功的，`didFailProvisionalNavigation` 不会触发，只能在这里累计。
+        // 计数与限流分开算：计数决定「要不要回退」，限流只决定「还自动重载几次」。
+        consecutiveLoadFailures += 1
+        if consecutiveLoadFailures >= Self.offlineFallbackThreshold {
+            CrashLog.note("==== consecutive failures reached \(consecutiveLoadFailures) at stall, falling back ====")
+            loadOfflineCopy()
+            return
+        }
         let now = Date()
         stallRetries = stallRetries.filter { now.timeIntervalSince($0) < 60 }
         guard stallRetries.count < 3 else {
@@ -960,7 +1034,7 @@ final class WebContainerView: UIView {
           var QUARK_URL = 'https://pan.quark.cn/s/934c480d5b9c';
 
           // 两个版本号都取壳带进来的实际版本（Info.plist 的 MARKETING_VERSION）：
-          // 线上页的常量停在 1.8.5，沿用会显示「当前 2.0.5 / 最新 1.8.5」。
+          // 线上页的常量停在 1.8.5，沿用会让「当前版本」永远显示旧值。
           // 壳内「最新版本」=「当前版本」，因为包就是从网盘拿的最新那一份。
           var cur = window.__foliaAppVersion || '';
           var latest = cur;
@@ -1037,7 +1111,7 @@ final class WebContainerView: UIView {
     /// UA 只用来判定「是不是壳」（正则匹配 `FoliaApp`），带版本号不影响壳模式识别，
     /// 但能让线上日志一眼看出是哪个版本的壳在跑。
     static let appVersion: String =
-        (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "2.0.5"
+        (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0"
 
     /// 在页面里核对壳标记是否真的生效，没生效就补一次。
     /// 页面入口脚本按 UA 判定壳模式；一旦判定失败，整页会按移动浏览器渲染（86% 缩放）。
@@ -1119,6 +1193,26 @@ final class WebContainerView: UIView {
       })();
       // 注意不能把 navigator.serviceWorker 改成 undefined：线上页里 registerSW.js 会直接
       // 抛 TypeError，PWA 注册失败会让页面自己挂掉；WKWebView 里 register 本身就是空操作。
+      //
+      // 离线副本（file://）里页面代码对接口用的是相对路径（`/api/...`），
+      // 在 file:// 下会被解析成 `file:///api/...`，登录、歌单、同步全部直接失败。
+      // 这里在文档最开始就包一层 fetch，把相对路径补成线上绝对地址；
+      // 只在 file:// 下生效，线上页完全不受影响。
+      (function(){
+        if (location.protocol !== 'file:' || typeof window.fetch !== 'function') { return; }
+        var base = '\(Self.startURL.absoluteString)';
+        var originalFetch = window.fetch;
+        window.fetch = function(input, init){
+          try {
+            if (typeof input === 'string' && input.charAt(0) === '/' && input.charAt(1) !== '/') {
+              input = base.replace(/\/$/, '') + input;
+            } else if (input && input.url && input.url.indexOf('file:') === 0) {
+              input = base.replace(/\/$/, '') + '/' + input.url.replace(/^file:\/\/.*?\//, '');
+            }
+          } catch (e) {}
+          return originalFetch.call(window, input, init);
+        };
+      })();
       // WKWebView 里 window.open 不开新窗口，站外链接改由原生导航策略接管外跳。
       var nativeOpen = window.open;
       window.open = function(url){
@@ -1156,6 +1250,10 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
     ///
     /// 线上页是远程 https：音频、封面、二维码图片全在站外 CDN 上，
     /// 所以按「是不是主框架」区分，只有主框架跳站外才外跳。
+    ///
+    /// 包内离线副本的文档是 `file://`，`fetch` / XHR 走不到这里，
+    /// 但页面里对 API 的**相对路径**请求在 file:// 下会变成非法地址。
+    /// 这里把 `file://` 发起、目标是线上域名的请求直接放行到网络，读不到本地文件时不至于整体失败。
     func webView(_ webView: WKWebView,
                  decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
@@ -1175,10 +1273,17 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         let isSameSite = host == Self.siteHost || host.hasSuffix(".\(Self.siteHost)")
 
         if isMainFrame && (scheme == "http" || scheme == "https") && !isSameSite {
-            // 站外链接（登录协议页、赞赏、QQ 群等）走系统浏览器。
+            // 离线副本（file://）里出现的绝对地址外链也要外跳：本地页没有站内路由可走。
             UIApplication.shared.open(url, options: [:], completionHandler: nil)
             decisionHandler(.cancel)
             return
+        }
+
+        // 离线副本里站内链接如果是绝对地址（https://app.folia-api.top/...），
+        // 主框架会直接跳到线上：此时壳还以为自己在本地页上，"重试"会不断往 file:// 打。
+        // 主框架真的走出去时，就地切回线上加载态。
+        if isMainFrame && isSameSite && scheme != "file" {
+            isShowingOfflineCopy = false
         }
 
         decisionHandler(.allow)
@@ -1189,6 +1294,16 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         pushInsetsIfNeeded()
         ensureShellFlag()
         state.clearLoadFailure()
+        // 线上页真的加载成功了：之前挂过的离线副本提示要收起来，
+        // 否则用户已经回到线上，提示层还盖在页面上说「当前用的是离线版本」。
+        if !isShowingOfflineCopy {
+            state.leaveOfflineCopy()
+        }
+        // 这一轮导航成功了，连续失败计数要归零；否则几次零星失败会一直累加，
+        // 之后某一次无关的抖动就能直接触发回退。
+        consecutiveLoadFailures = 0
+        // 卡住重试的配额同属「这一轮」的概念，成功一次就该重新计数。
+        stallRetries.removeAll()
         // 文档加载完不等于画出来了：页面还要拉主 bundle 才能挂 React。
         // 这里只解除「导航级」失败，首屏看门狗继续跑，直到 React 真的把遮罩去掉。
         scheduleFirstPaintCheck()
@@ -1213,6 +1328,18 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         }
         let now = Date()
         contentProcessRestarts = contentProcessRestarts.filter { now.timeIntervalSince($0) < 60 }
+        // 离线副本是本地文件，导航失败说明包有问题，重试本地文件没有意义，
+        // 直接交给提示层（`OfflineNotice`）。
+        guard !isShowingOfflineCopy else { return }
+        // 回退判断必须排在下面的限流之前：`contentProcessRestarts` 是「进程级重启」的配额，
+        // 而这里统计的是「这一轮连续几次加载失败」。若放在限流之后，第一次失败就占掉配额、
+        // 第二次直接 return，后面的计数永远到不了阈值 —— 回退逻辑形同虚设。
+        consecutiveLoadFailures += 1
+        if consecutiveLoadFailures >= Self.offlineFallbackThreshold {
+            CrashLog.note("==== consecutive failures reached \(consecutiveLoadFailures), falling back ====")
+            loadOfflineCopy()
+            return
+        }
         guard contentProcessRestarts.count < 2 else { return }
         contentProcessRestarts.append(now)
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak webView] in

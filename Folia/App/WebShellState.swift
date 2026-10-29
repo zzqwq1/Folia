@@ -18,6 +18,36 @@ final class WebShellState: ObservableObject {
     /// 现场细节（URL、UA、遮罩状态等），只有诊断需要时才有，显示在提示框下方。
     private(set) var failureDetail: String?
 
+    /// 当前是否跑在包内离线页上。
+    ///
+    /// 线上站连续重试都失败后，壳会回退到 App 包里的那份 `www/`，
+    /// 让用户至少能进到一个可用的界面，而不是对着一个「重试」按钮干等。
+    /// 这时候提示层的语义不同：不是「加载失败」，而是「正在用离线副本，点一下回线上」。
+    @Published private(set) var isOfflineCopy = false
+
+    /// 提示层是否要显示。
+    ///
+    /// 离线副本是「有兜底、能继续用」的状态：页面已经画出来了，只是功能不全。
+    /// 这时候不该再盖一层全屏遮罩挡着播放器，只留顶部一条轻提示，点一下就能回线上。
+    /// 真正的加载失败（没有页面可用）才铺满整屏。
+    var showsBlockingNotice: Bool {
+        offlineReason != nil && !isOfflineCopy
+    }
+
+    func enterOfflineCopy() {
+        isOfflineCopy = true
+        failureDetail = nil
+        offlineReason = "当前用的是离线版本，部分功能可能不可用"
+    }
+
+    /// 从离线副本切回线上：把提示换成「正在重新连接」，并清掉离线标记，
+    /// 由容器重新走一次线上加载。
+    func leaveOfflineCopy() {
+        isOfflineCopy = false
+        offlineReason = nil
+        failureDetail = nil
+    }
+
     func noteLoadFailure(_ code: Int, detail: String? = nil) {
         failureDetail = detail
         switch code {
