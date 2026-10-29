@@ -2,6 +2,7 @@ import UIKit
 import SwiftUI
 import WebKit
 import Combine
+import AVFoundation
 
 /// 承载官方网页版的 WKWebView 容器。
 ///
