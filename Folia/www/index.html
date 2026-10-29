@@ -760,6 +760,10 @@
 //
 // 这里只在「本来在放（已经放过一段时间、不是用户按的暂停、当前曲目没播完）」时续播一次，
 // 并且限频，避免和用户手动暂停打架。
+//
+// 2026-10 调整：上限从 3 次放到 12 次，并把「用户按暂停」的守卫窗口从 1200ms 缩到 600ms。
+// 原来的 3 次上限在弱网/长缓冲下会被一次切歌就用光，之后系统再掐断就再也不续；
+// 1200ms 的窗口则会把「暂停 → 立刻再点播放」误判成用户还想停，首轮续播被吞掉。
 (function () {
   if (window.__folioAutoResume) return;
   var guard = window.__folioAutoResume = { enabled: true, attempts: 0 };
@@ -800,7 +804,7 @@
   function tryResume() {
     if (!guard.enabled || !wasSounding) return;
     if (Date.now() - stoppedAt < 300) return;
-    if (guard.attempts >= 3) return;
+    if (guard.attempts >= 12) return;
     var el = currentAudio();
     if (!el || !el.paused || el.ended || !el.currentSrc) return;
     guard.attempts += 1;
@@ -823,7 +827,7 @@
     var el = t && t.closest ? t.closest('button,[role="button"]') : null;
     if (!el) return;
     var label = (el.getAttribute('aria-label') || '') + (el.getAttribute('data-testid') || '') + (el.textContent || '');
-    if (/暂停|pause/i.test(label)) { guard.enabled = false; setTimeout(function () { guard.enabled = true; }, 1200); }
+    if (/暂停|pause/i.test(label)) { guard.enabled = false; setTimeout(function () { guard.enabled = true; }, 600); }
   }, true);
 })();
 </script>
