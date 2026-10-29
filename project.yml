@@ -24,8 +24,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.folia.web
         PRODUCT_NAME: Folia
-        MARKETING_VERSION: "2.0.6"
-        CURRENT_PROJECT_VERSION: "206"
+        MARKETING_VERSION: "2.0.7"
+        CURRENT_PROJECT_VERSION: "207"
         SWIFT_VERSION: "5.0"
         TARGETED_DEVICE_FAMILY: "1,2"
         INFOPLIST_FILE: Folia/Info.plist

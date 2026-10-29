@@ -159,6 +159,13 @@ final class WebContainerView: UIView {
 
         observeLifecycle()
         observeNetwork()
+
+        // 控制中心/状态栏收起：原生侧已经重建过会话，这里只负责把页面侧
+        // 的 AudioContext 与媒体元素按串行通道恢复一次，避免和回前台那条路撞车。
+        audioPathObservation = NotificationCenter.default
+            .addObserver(forName: .foliaAudioPathRebuilt, object: nil, queue: .main) { [weak self] _ in
+                self?.recoverAudioPath(reason: "panel-closed")
+            }
     }
 
     /// 用户点「重试」时走这条路。
@@ -210,11 +217,12 @@ final class WebContainerView: UIView {
     }
 
     private var remoteObservation: Any?
+    private var audioPathObservation: Any?
 
     deinit {
         stopKeepAliveTimer()
         // block 型观察者不会随 self 释放自动注销，留着会在下一次通知时回调到已释放对象上。
-        let tokens: [Any?] = [remoteObservation, foregroundObservation, backgroundObservation, networkObservation]
+        let tokens: [Any?] = [remoteObservation, foregroundObservation, backgroundObservation, networkObservation, audioPathObservation]
         for token in tokens.compactMap({ $0 }) {
             NotificationCenter.default.removeObserver(token)
         }
@@ -234,11 +242,10 @@ final class WebContainerView: UIView {
             // 系统在后台会把媒体元素按停、把会话降级，回来必须重新声明一次 category
             // 并把页面里那条停住的 `<audio>` 放回去。页面始终是唯一的播放器，
             // 原生不接管出声 —— 两套播放器抢同一个会话，正是之前「后台/回来没声音」的来源。
-            self.forceResumeAudio(reason: "foreground", rebuild: true)
-            // 状态栏划出控制中心再收起时，媒体元素往往仍显示「在播」，只是 AudioContext
-            // 被系统挂成 interrupted —— 与回前台是同一个病，`resumeAudio` 那一步的
-            // 「没暂停就跳过」正好放不掉它，所以这里无条件再唤醒一次页面音频。
-            self.revivePageAudio()
+            // 恢复动作统一走 `recoverAudioPath`：它会做去重与串行，
+            // 避免「控制中心划出收起」和「回前台」两路同时重建通路互相打断，
+            // 那是之前回前台有一小段无声、并伴随卡顿爆音的来源。
+            self.recoverAudioPath(reason: "foreground")
             CrashLog.note("==== foreground resume done (audible=\(self.wantsAudible ? 1 : 0) paused=\(self.userPaused ? 1 : 0)) ====")
             // 真正加载失败（没有页面可用）时用户往往先去开 Wi-Fi 再切回来，
             // 这里自己重试一次，不用等他再点「重试」。
@@ -390,29 +397,20 @@ final class WebContainerView: UIView {
     private func enforcePlaybackIfNeeded(reason: String) {
         guard wantsAudible, !userPaused else { return }
         guard UIApplication.shared.applicationState != .active else { return }
-        // 会话一旦被系统打断（通话、别的 App 抢占、锁屏静音），只调 play() 是没有声音的：
-        // 音频通路本身已经不通。这里每拍先把会话要回来，再补 play。
-        // 只 setActive 不 setCategory，所以不会像早期那样把播放器按停。
-        AudioSessionController.shared.reactivate()
-        // 页面出声走 WebAudio，AudioContext 在后台被钉成 interrupted 后，
-        // 光 play() 是「返回成功但没声音」。所以每拍都要连上下文一起叫醒，
-        // 再按「上下文是否 running」决定要不要重设 category 与重新激活会话。
-        resumeAudioContexts { [weak self] active in
-            guard let self else { return }
-            if active {
-                self.resumeAudio(reason: reason)
-            } else {
-                self.forceResumeAudio(reason: reason, rebuild: true)
-            }
-        }
+        // 后台保活的每一拍也走统一入口：它自带去重，同一时刻只会有一遍恢复在跑，
+        // 不会和回前台/控制中心那两路撞车。通路已经好的时候，这一拍只补一次 play。
+        recoverAudioPath(reason: reason)
     }
 
     /// 页面上真实在用的 AudioContext 是否处于 running。
     ///
     /// 线上页的 context 留在 React 闭包里，反射拿不到，所以保活脚本从
     /// `createMediaElementSource` 那一处把实例记了下来（见 `audioKeeperScript`）。
-    /// 页面还没建过上下文时返回「没被掐住」：那种情况下播放走 `<audio>` 直出，
-    /// 不必重设 category。
+    ///
+    /// 关键：拿不到实例时**不能**当成「没被掐住」。页面可能还没走到
+    /// `createMediaElementSource`，或实例挂在别的全局名下，此时上下文照样可能
+    /// 是 suspended —— 那种情况下 `play()` 返回成功却没声音，正是「有概率进 App 无声」。
+    /// 所以这里额外扫一遍所有记到的 context：只要有一个不是 running，就报 blocked。
     private func resumeAudioContexts(_ completion: @escaping (Bool) -> Void) {
         let js = """
         (function(){
@@ -420,9 +418,23 @@ final class WebContainerView: UIView {
             if (typeof window.__foliaResumeAudioContexts === 'function') {
               window.__foliaResumeAudioContexts();
             }
-            var c = window.__foliaActiveAudioContext;
-            if (!c) { return 'none'; }
-            return c.state === 'running' ? 'running' : 'blocked';
+            var list = window.__foliaAudioContexts || [];
+            var known = 0, blocked = 0;
+            for (var i = 0; i < list.length; i += 1) {
+              var c = list[i];
+              if (!c || typeof c.state !== 'string') { continue; }
+              if (c.state === 'closed') { continue; }
+              known += 1;
+              if (c.state !== 'running') { blocked += 1; }
+            }
+            var act = window.__foliaActiveAudioContext;
+            if (act && typeof act.state === 'string' && act.state !== 'closed') {
+              if (known === 0) { known = 1; }
+              if (act.state !== 'running') { blocked += 1; }
+            }
+            if (blocked > 0) { return 'blocked'; }
+            if (known > 0) { return 'running'; }
+            return 'none';
           } catch (e) { return 'none'; }
         })();
         """
@@ -430,6 +442,73 @@ final class WebContainerView: UIView {
             completion((result as? String) != "blocked")
         }
     }
+
+    /// 恢复音频通路的统一入口：会话、AudioContext、媒体元素三件事按顺序做一遍。
+    ///
+    /// 为什么要串行且去重：回前台、控制中心收起、保活轮询都会想恢复一次，
+    /// 早先它们各自并发地重建 category 并补 `play`，同一个恢复动作被触发两三遍，
+    /// `<audio>` 被反复 play / resume，交叉淡化的两个 deck 互相抢，就是「卡顿爆音」；
+    /// 而中途又有人把 context 重新挂起，于是「有一段没声音」。
+    ///
+    /// 这里的约定：
+    /// - 只做一遍，且上一遍没走完时，新请求只记一次「再做一遍」，不叠着跑；
+    /// - 先重建会话与上下文，**等上下文真的 running 了**再补 play，
+    ///   而不是固定 sleep 一段时间——那段时间正是「没声音」的窗口；
+    /// - 上下文始终起不来就有限次重试，不无限循环。
+    func recoverAudioPath(reason: String) {
+        guard wantsAudible, !userPaused else { return }
+
+        // 正在恢复中：只记一个待办，等当前这遍结束后补做一次。
+        if audioRecoveryInFlight {
+            audioRecoveryPending = true
+            return
+        }
+        audioRecoveryInFlight = true
+        audioRecoveryPending = false
+        recoverAudioPathPass(reason: reason, attempt: 0)
+    }
+
+    /// 一趟恢复。attempt 用于上下文迟迟不就绪时的有限重试。
+    private func recoverAudioPathPass(reason: String, attempt: Int) {
+        guard wantsAudible, !userPaused else {
+            finishAudioRecovery()
+            return
+        }
+
+        // 第一趟才重设 category：`setCategory` 会重建整个通路，
+        // 重试时只再叫醒上下文，避免反复重建把刚起来的播放又按停。
+        if attempt == 0 {
+            AudioSessionController.shared.activate()
+            revivePageAudio()
+        }
+
+        // 等一帧再问上下文状态：`resume()` 是异步的，紧接着问必然是旧的。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self else { return }
+            self.resumeAudioContexts { [weak self] ok in
+                guard let self else { return }
+                if ok || attempt >= 3 {
+                    self.resumeAudio(reason: reason)
+                    self.finishAudioRecovery()
+                } else {
+                    // 上下文还没 running：只再叫醒一次，不重建 category。
+                    self.revivePageAudio()
+                    self.recoverAudioPathPass(reason: reason, attempt: attempt + 1)
+                }
+            }
+        }
+    }
+
+    private func finishAudioRecovery() {
+        audioRecoveryInFlight = false
+        guard audioRecoveryPending else { return }
+        audioRecoveryPending = false
+        // 期间又有请求进来（例如控制中心收起紧跟着回前台），补做一遍。
+        recoverAudioPath(reason: "pending")
+    }
+
+    private var audioRecoveryInFlight = false
+    private var audioRecoveryPending = false
 
     /// 回前台时的补放：不看前后台状态，其余条件与轮询一致。
     ///
@@ -440,17 +519,9 @@ final class WebContainerView: UIView {
     /// 只在回前台用。`setCategory` 之后必须让页面知道自己「又被看见了」，
     /// 它才会把被系统挂起的 WebAudio 上下文 `resume()` 回来。
     private func forceResumeAudio(reason: String, rebuild: Bool = false) {
-        guard wantsAudible, !userPaused else { return }
-        if rebuild {
-            AudioSessionController.shared.activate()
-            revivePageAudio()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-                self?.resumeAudio(reason: reason)
-            }
-            return
-        }
-        AudioSessionController.shared.reactivate()
-        resumeAudio(reason: reason)
+        // 保活轮询也会走到这里：与前台恢复共用同一条串行通道，
+        // 否则两路同时补 `play` 就是卡顿爆音的来源。
+        recoverAudioPath(reason: reason)
     }
 
     /// 回前台时把页面被系统挂起的音频上下文唤醒。

@@ -287,8 +287,13 @@ final class AudioSessionController {
             NSLog("[Folia] audio path rebuild failed: \(error.localizedDescription)")
         }
         // 页面那边此时仍是「在播」状态：重建通路后 AudioContext 可能停在 interrupted，
-        // 需要页面自己再唤醒一次。转发一条 play 命令，与线控走同一条路径。
-        NotificationCenter.default.post(name: .foliaRemoteCommand, object: "play")
+        // 需要页面自己再唤醒一次。
+        //
+        // 注意：这里**不能**再发 `play` 遥控命令。控制中心收起时
+        // `didBecomeActive` 也会触发 WebContainerView 的恢复流程，
+        // 两路同时补 `play` 会让两套 deck 互相抢，表现为卡顿和爆音。
+        // 页面侧的恢复统一由 WebContainerView 串行执行。
+        NotificationCenter.default.post(name: .foliaAudioPathRebuilt, object: nil)
     }
 
     /// 上一次 `willResignActive` 是否由状态栏/控制中心引起。
@@ -364,4 +369,6 @@ extension Notification.Name {
     static let foliaRemoteCommand = Notification.Name("app.folia.remote-command")
     /// 网络从不可用恢复到可用。壳据此自动重载停在失败提示上的页面。
     static let foliaNetworkRestored = Notification.Name("app.folia.network-restored")
+    /// 控制中心/状态栏收起后音频会话已重建，页面侧需要走一次统一的通路恢复。
+    static let foliaAudioPathRebuilt = Notification.Name("app.folia.audio-path-rebuilt")
 }
