@@ -73,6 +73,14 @@ final class WebContainerView: UIView {
     private var foregroundObservation: Any?
     private var backgroundObservation: Any?
     private var networkObservation: Any?
+    /// 本次启动是否已经因为进程被回收而重建过 WebView。
+    ///
+    /// 只给「重建后立刻又挂」留一次保护位：第一次挂就换干净存储重建，
+    /// 新页面画出来（首屏就绪）后把这一位复位，允许下一轮再自愈；
+    /// 若它还没复位就又挂了，说明换存储也救不了，直接退回离线副本，
+    /// 而不是陷入「重建 → 再挂 → 再重建」的黑屏循环。
+    private var rebuiltSinceLaunch = false
+
     /// 本次启动是否在使用「崩溃后」的干净存储。成功加载一次后置为 false。
     private var recoveringFromCrash = CacheSweeper.isStoreDirty
 
@@ -222,6 +230,11 @@ final class WebContainerView: UIView {
         CacheSweeper.markDirty("rebuild-after-crash")
         recoveringFromCrash = true
         contentProcessRestarts.removeAll()
+        // 保活轮询手里的 `self` 是这一轮的，重建后照旧可用；
+        // 但旧页面那份播放意图已经随进程消失，若还在响就重新记一次。
+        if resumeAudio {
+            Self.wasAudibleInBackground = true
+        }
 
         let config = makeConfiguration(forceCleanStore: true)
         webView = WKWebView(frame: bounds, configuration: config)
@@ -278,6 +291,8 @@ final class WebContainerView: UIView {
     private func hardReload() {
         CrashLog.note("==== manual reload ====")
         didReachFirstPaint = false
+        // 用户主动要一次重试：保护位复位，允许这一轮再走一次进程自愈。
+        rebuiltSinceLaunch = false
         state.clearLoadFailure()
         // 离线副本上点「重试」的语义是「回线上再试一次」，而不是把本地文件重读一遍。
         // 所以这里先把离线标记清掉、失败计数归零，再走正常的线上加载。
@@ -1039,6 +1054,10 @@ final class WebContainerView: UIView {
             guard let self else { return }
             if let painted = result as? Int, painted == 1 {
                 DispatchQueue.main.async { self.didReachFirstPaint = true }
+                // 页面已经画出来了：解除「刚重建过」的保护位，允许下一次进程被回收
+                // 再走一遍自愈（否则这一次成功后，之后真正的 OOM 会被判成
+                // 「重建也没用」而直接退到离线副本）。
+                self.rebuiltSinceLaunch = false
                 // 首屏就绪再开赞赏弹窗：在那之前 DOM 里的图片还没解码，弹出来是两张空白框。
                 self.installDonateCard()
                 // 版本行要等设置面板挂出来才有 DOM，首屏后每隔一秒补一次，两分钟内有效即停。
@@ -1820,24 +1839,25 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         //
         // 换 `nonPersistent` 存储 + 新进程池是唯一能立刻脱身的路：这一轮读不到任何
         // 旧数据，页面能稳定起来；登录态由下一次正常启动（脏标记被清掉）恢复。
-        if contentProcessRestarts.count >= 2 {
-            // 连挂两次：不再原地 reload，直接重建 WebView（换存储、换进程池）。
+        //
+        // 从**第一次**就重建，不再「先原地 reload 一次试试」。
+        // 真机反馈：进歌单时原地 reload 起来的新进程，一进歌单又被打死，
+        // 用户看到的就是「闪两下才勉强回来」。原地 reload 复用同一份脏存储，
+        // 拿到的成功概率太低，而代价是多闪一次。
+        //
+        // 但重建要有一次性的保护：重建后新页面**立刻**又挂，说明问题不在存储，
+        // 再重建一万次也只是黑屏循环。这种情况下退回包内离线副本，
+        // 至少让用户进得去、听得见。
+        if rebuiltSinceLaunch {
             stopKeepAliveTimer()
-            CrashLog.note("==== web content died \(contentProcessRestarts.count)x, rebuilding web view with clean store ====")
-            rebuildWebView(resumeAudio: shouldResume)
+            CrashLog.note("==== web content died again after rebuild, falling back to offline copy ====")
+            loadOfflineCopy()
             return
         }
-
-        // 只挂一次：先在原地重载 —— 这一般只是内存压力下的一次回收，
-        // 原地重载能保住滚动位置与播放队列，代价小得多。
-        webView.reload()
-        if shouldResume {
-            wantsAudible = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
-                guard let self else { return }
-                self.forceResumeAudio(reason: "process-restart")
-            }
-        }
+        stopKeepAliveTimer()
+        rebuiltSinceLaunch = true
+        CrashLog.note("==== web content died \(contentProcessRestarts.count)x, rebuilding web view with clean store ====")
+        rebuildWebView(resumeAudio: shouldResume)
     }
 
     /// 抓一份「进程死掉时页面长什么样」的现场。
