@@ -261,9 +261,16 @@ final class AudioSessionController {
             queue: .main
         ) { [weak self] _ in
             guard let self else { return }
-            // 先无条件把会话立起来：即便本 App 认为「没在播」，
-            // 网页侧也可能刚从后台恢复播放，会话不通就一点声都没有。
-            self.reactivate()
+            // **不再在这里 `reactivate()`**。
+            //
+            // 早先这里写的是「进后台无条件 setActive」，理由是「这是系统判定能否继续出声的
+            // 最后时机」。实际相反：`setActive(true)` 会让系统重新评估音频资格，
+            // WebKit 的媒体元素被当场按停一次，页面侧收到 pause 就再也不会自己起来；
+            // 会话本来就活着的时候调它，等于亲手把歌掐断 —— 用户看到的就是
+            // 「切到桌面 / 锁屏，歌立刻停」。
+            //
+            // 真正需要重建通路的场景只有「被系统收走过」：来电结束、控制中心静音泄漏，
+            // 那两条分别由 `interruptionNotification` 与 `healIfSilenced()` 处理。
             if self.isPlaying {
                 self.beginBackgroundTask()
             }

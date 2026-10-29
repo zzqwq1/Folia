@@ -89,28 +89,21 @@ final class WebContainerView: UIView {
 
     // MARK: - WebView
 
-    private func setUp() {
-        backgroundColor = UIColor(red: 0x09 / 255, green: 0x09 / 255, blue: 0x0b / 255, alpha: 1)
-
+    /// 构造一份 WebView 配置。`setUp()` 与 `rebuildWebView()` 共用。
+    ///
+    /// `forceCleanStore` 为真时强制走 `.nonPersistent()`：崩溃自愈的唯一目的就是
+    /// 「这一轮不碰任何磁盘上的旧网站数据」。没有它，重建出来的新实例依旧读同一份
+    /// Service Worker 与 IndexedDB，等于原地打转。
+    private func makeConfiguration(forceCleanStore: Bool) -> WKWebViewConfiguration {
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = []
         config.suppressesIncrementalRendering = false
-        config.websiteDataStore = .default()
+        config.websiteDataStore = forceCleanStore ? .nonPersistent() : .default()
 
-        // 上次是崩着退出的：这次换一个用完即弃的存储。
-        //
-        // 只清缓存挡不住「大退重进还闪退」—— 页面启动最早期读的是磁盘上的
-        // Service Worker 与 IndexedDB，而 WebContent 进程在读到它们的那一刻就被压死了，
-        // 清缓存的回调甚至还没跑完。换 nonPersistent 目录后这一轮读不到任何旧状态，
-        // 能稳定地进到页面；用户本次的登录态会重新走一遍，
-        // 但「进不去」比「要重新登一次」严重得多。
-        //
-        // 一旦进过一次正常页面就调 `CacheSweeper.clearDirty()`，下次恢复默认存储。
-        let recovering = CacheSweeper.isStoreDirty
-        if recovering {
-            config.websiteDataStore = .nonPersistent()
-        }
+        // 让 UA 带 FoliaApp：网页版据此进入「壳模式」，关掉整页 86% 缩放，安全区改用实测值。
+        // applicationNameForUserAgent 与完整串两处都设，避免某些系统版本上其中一路不生效。
+        config.applicationNameForUserAgent = "FoliaApp/\(Self.appVersion)"
 
         let userContent = WKUserContentController()
         // 注入到所有 frame：离线副本里的 worker 也要把 `/api/...` 补成线上地址，
@@ -130,16 +123,40 @@ final class WebContainerView: UIView {
         ))
         userContent.add(AudioStateRelay(), name: "foliaAudioState")
         userContent.add(JSLogRelay(), name: "foliaJSLog")
-        let qrRelay = QRFallbackRelay()
-        userContent.add(qrRelay, name: "foliaQrFallback")
+        let qr = QRFallbackRelay()
+        qrRelay = qr
+        userContent.add(qr, name: "foliaQrFallback")
         let intentRelay = AudioIntentRelay()
         intentRelay.container = self
         userContent.add(intentRelay, name: "foliaAudioIntent")
         config.userContentController = userContent
+        return config
+    }
+
+    /// 二维码回传通道（重建 WebView 时要重新指向新实例）。
+    private var qrRelay: QRFallbackRelay?
+
+    private func setUp() {
+        backgroundColor = UIColor(red: 0x09 / 255, green: 0x09 / 255, blue: 0x0b / 255, alpha: 1)
+
+        // 上次是崩着退出的：这次换一个用完即弃的存储。
+        //
+        // 只清缓存挡不住「大退重进还闪退」—— 页面启动最早期读的是磁盘上的
+        // Service Worker 与 IndexedDB，而 WebContent 进程在读到它们的那一刻就被压死了，
+        // 清缓存的回调甚至还没跑完。换 nonPersistent 目录后这一轮读不到任何旧状态，
+        // 能稳定地进到页面；用户本次的登录态会重新走一遍，
+        // 但「进不去」比「要重新登一次」严重得多。
+        //
+        // 一旦进过一次正常页面就调 `CacheSweeper.clearDirty()`，下次恢复默认存储。
+        let recovering = CacheSweeper.isStoreDirty
+        if recovering {
+            CrashLog.note("==== starting with clean (non-persistent) store ====")
+        }
+        let config = makeConfiguration(forceCleanStore: recovering)
 
         webView = WKWebView(frame: bounds, configuration: config)
         // 两个回传通道都要拿到 webView：一个往页面塞本地画的二维码，一个做播放意图。
-        qrRelay.webView = webView
+        qrRelay?.webView = webView
         webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         webView.isOpaque = false
         webView.backgroundColor = backgroundColor
@@ -151,10 +168,6 @@ final class WebContainerView: UIView {
         webView.allowsBackForwardNavigationGestures = false
         webView.navigationDelegate = self
         webView.uiDelegate = self
-
-        // 让 UA 带 FoliaApp：网页版据此进入「壳模式」，关掉整页 86% 缩放，安全区改用实测值。
-        // applicationNameForUserAgent 与完整串两处都设，避免某些系统版本上其中一路不生效。
-        config.applicationNameForUserAgent = "FoliaApp/\(Self.appVersion)"
         Self.installUserAgent(on: webView)
 
         addSubview(webView)
@@ -185,8 +198,79 @@ final class WebContainerView: UIView {
             }
     }
 
-    /// 用户点「重试」时走这条路。
+    /// 把当前 WebView 整个换掉：新配置、新存储、新进程池。
     ///
+    /// 这是「进歌单闪退、退回加载界面、大退重进还闪退」的正面解法。
+    /// `webView.reload()` 只能重启文档，进程池与网站数据仍沿用旧的：
+    /// 一旦页面把 WebContent 压死过，那份状态就是脏的，重载只会按同样的方式再死一次。
+    /// 这里连 `WKWebView` 实例一起重建，新实例挂到 `.nonPersistent()` 存储上，
+    /// 读不到任何磁盘上的旧 Service Worker / IndexedDB / 缓存。
+    ///
+    /// `resumeAudio` 为真时，等页面起来后把播放续上（用户感知是「歌断了一下又响」）。
+    private func rebuildWebView(resumeAudio: Bool) {
+        // 旧实例的事件全部解绑，避免它继续往原生回传状态。
+        reloadObservation = nil
+        webView?.stopLoading()
+        webView?.navigationDelegate = nil
+        webView?.uiDelegate = nil
+        webView?.configuration.userContentController.removeAllScriptMessageHandlers()
+        webView?.removeFromSuperview()
+
+        let previousWantsAudible = resumeAudio
+        // 换存储这件事必须落盘：如果这次重建后进程立刻又挂，下一个进程启动时
+        // 也要知道「该用干净存储」，否则大退重进还是回到同一个坑里。
+        CacheSweeper.markDirty("rebuild-after-crash")
+        recoveringFromCrash = true
+        contentProcessRestarts.removeAll()
+
+        let config = makeConfiguration(forceCleanStore: true)
+        webView = WKWebView(frame: bounds, configuration: config)
+        webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        webView.isOpaque = false
+        webView.backgroundColor = backgroundColor
+        webView.scrollView.backgroundColor = backgroundColor
+        webView.scrollView.bounces = false
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
+        webView.scrollView.showsVerticalScrollIndicator = false
+        webView.scrollView.showsHorizontalScrollIndicator = false
+        webView.allowsBackForwardNavigationGestures = false
+        webView.navigationDelegate = self
+        webView.uiDelegate = self
+        Self.installUserAgent(on: webView)
+        addSubview(webView)
+
+        // 新实例的 message handler 需要重新挂上（`makeConfiguration` 里已经建了新的
+        // `WKUserContentController`，但二维码回传那条要拿到新的 webView 引用）。
+        if let qr = qrRelay {
+            qr.webView = webView
+        }
+
+        if previousWantsAudible {
+            wantsAudible = true
+            userPaused = false
+        }
+
+        didReachFirstPaint = false
+        consecutiveLoadFailures = 0
+        stallRetries.removeAll()
+        isShowingOfflineCopy = false
+        state.clearLoadFailure()
+        state.leaveOfflineCopy()
+
+        webView.load(URLRequest(url: Self.startURL,
+                                cachePolicy: .reloadIgnoringLocalCacheData,
+                                timeoutInterval: 30))
+        scheduleProgressWatchdog()
+
+        if previousWantsAudible {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+                guard let self else { return }
+                self.forceResumeAudio(reason: "rebuild-after-crash")
+            }
+        }
+    }
+
+    /// 用户点「重试」时走这条路。
     /// 原先直接 `webView.reload()` 有两个坑：一是失败现场里 `webView.url` 常常是 `about:blank`，
     /// `reload()` 只是把空白页又读一遍，用户看到的就是「点了没反应」；
     /// 二是它沿用缓存策略，之前那次坏掉的重定向/或者 Service Worker 吐出的空响应会被原样再用一次。
@@ -255,13 +339,6 @@ final class WebContainerView: UIView {
         ) { [weak self] _ in
             guard let self else { return }
             // 回前台不改变意图：该响的继续响，轮询照旧。
-            self.refreshAudioKeepAlive()
-            // 系统在后台会把媒体元素按停、把会话降级，回来必须重新声明一次 category
-            // 并把页面里那条停住的 `<audio>` 放回去。页面始终是唯一的播放器，
-            // 原生不接管出声 —— 两套播放器抢同一个会话，正是之前「后台/回来没声音」的来源。
-            // 恢复动作统一走 `recoverAudioPath`：它会做去重与串行，
-            // 避免「控制中心划出收起」和「回前台」两路同时重建通路互相打断，
-            // 那是之前回前台有一小段无声、并伴随卡顿爆音的来源。
             self.recoverAudioPath(reason: "foreground")
             CrashLog.note("==== foreground resume done (audible=\(self.wantsAudible ? 1 : 0) paused=\(self.userPaused ? 1 : 0)) ====")
             // 真正加载失败（没有页面可用）时用户往往先去开 Wi-Fi 再切回来，
@@ -280,13 +357,12 @@ final class WebContainerView: UIView {
             queue: .main
         ) { [weak self] _ in
             guard let self else { return }
-            // 进后台只做三件事：把会话立住、开始轮询、记下播放进度。
+            // 进后台只做两件事：开始轮询、记下播放进度。
             //
-            // 会话激活必须在这一拍完成：这是系统判定「本 App 能否继续出声」的最后时机，
-            // 一旦错过，页面里正在放的歌会被当场按停。
-            if self.wantsAudible && !self.userPaused {
-                AudioSessionController.shared.reactivate()
-            }
+            // 这里**不再调用 `reactivate()`**。`setActive(true)` 会让系统重新评估
+            // 本 App 的音频资格，WebKit 的媒体元素会被当场按停一次 ——
+            // 那正是「切出去歌就停」的直接来源。播放中会话本来就是活的，
+            // 该响就继续响；真被掐断（来电、控制中心）由前台探测式恢复处理。
             self.refreshAudioKeepAlive()
             self.captureProgressBeforeBackground { _ in
                 self.enforcePlaybackIfNeeded(reason: "background")
@@ -372,6 +448,7 @@ final class WebContainerView: UIView {
     fileprivate func markAudibleIntent() {
         wantsAudible = true
         userPaused = false
+        pendingPauseCheck = false
         AudioSessionController.shared.updatePlaybackState(true)
         CrashLog.note("==== intent audible (state=\(UIApplication.shared.applicationState.rawValue)) ====")
         startKeepAliveTimer()
@@ -392,14 +469,65 @@ final class WebContainerView: UIView {
     /// 轮询就停了，回到 App 里发现歌没了 —— 所以这里补一条 `visibilityState` 判断。
     fileprivate func markPausedIntent() {
         guard UIApplication.shared.applicationState == .active else { return }
-        let visible = (try? webView?.evaluateJavaScript("document.visibilityState") as? String) ?? "visible"
-        guard visible == "visible" else { return }
-        stopKeepAliveTimer()
+        // 先记账，等页面把「我到底是不是真的停了」报回来再决定，见 `confirmPausedIntent()`。
+        pendingPauseCheck = true
+        confirmPausedIntent()
     }
+
+    /// 页面暂停后二次确认：真的停了才停轮询。
+    ///
+    /// 原先这里只看「App 是否 active + 页面是否 visible」。但切桌面的这一拍
+    /// App 可能还停在 active，页面也已经 `visibilityState === "visible"`（WKWebView
+    /// 的可见性比 App 状态晚一拍），于是系统掐出来的那一次 pause 被当成用户收手，
+    /// 轮询一停就再也没人把歌放回去 —— 用户看到的就是「切出去歌就停了」。
+    ///
+    /// 现在改成问页面要事实：页面上还有没有没暂停的 `<audio>`。
+    /// 用户真正点了暂停，所有音频元素都是 paused，确认成立；
+    /// 系统掐断时页面往往已经自己回放，或音频元素根本没进 paused，确认不成立，
+    /// 轮询继续，下一拍把它放回去。
+    private func confirmPausedIntent() {
+        guard pendingPauseCheck else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let self, self.pendingPauseCheck else { return }
+            // 这一拍 App 已经不在前台了：那就是被系统掐的，不能停轮询。
+            guard UIApplication.shared.applicationState == .active else {
+                self.pendingPauseCheck = false
+                return
+            }
+            self.webView?.evaluateJavaScript("window.__foliaAudioKeeper && window.__foliaAudioKeeper.current ? JSON.stringify(window.__foliaAudioKeeper.current()) : null") { result, _ in
+                guard let self, self.pendingPauseCheck else { return }
+                self.pendingPauseCheck = false
+                let raw = result as? String
+                if let raw, let data = raw.data(using: .utf8),
+                   let info = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let paused = info["paused"] as? Bool, paused == false {
+                    // 有音频还在放：刚才那次 pause 是系统或页面重建引起的，不是用户收手。
+                    CrashLog.note("==== pause ignored (audio still alive) ====")
+                    return
+                }
+                // 拿不到结论时保守处理：继续保活，宁可多探一次也不要把歌停掉。
+                guard raw != nil else { return }
+                self.pendingPauseCheck = false
+                self.userPaused = true
+                self.stopKeepAliveTimer()
+                self.wantsAudible = false
+                CrashLog.note("==== paused by user (confirmed) ====")
+            }
+        }
+    }
+
+    /// 有待确认的暂停意图。
+    private var pendingPauseCheck = false
 
     private func startKeepAliveTimer() {
         guard keepAliveTimer == nil else { return }
-        let timer = Timer(timeInterval: 4.0, repeats: true) { [weak self] _ in
+        // 2 秒一拍，而不是 4 秒。
+        //
+        // 4 秒意味着「歌被掐掉」到「被放回去」最长有 4 秒空窗，用户听到的就是
+        // 「切出去音乐断了一下」。这个 timer 绝大多数拍只做一次只读探测
+        // （`resumeAudioContexts` 全是读内存里的 context 状态，通路健好时一格不动），
+        // 对电量与主线程的影响可以忽略。
+        let timer = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in
             guard let self, self.wantsAudible, !self.userPaused else { return }
             // 只在前台干活。
             //
@@ -411,7 +539,7 @@ final class WebContainerView: UIView {
             // 原生不碰；只有回到前台时才做一次**探测式**恢复，
             // 通路没问题就一格都不动 —— 这就是「切桌面 / 锁屏来回切，歌不停」的保证。
             guard UIApplication.shared.applicationState == .active else { return }
-            guard self.foregroundProbes < 2 else { return }
+            guard self.foregroundProbes < 6 else { return }
             self.foregroundProbes += 1
             self.enforcePlaybackIfNeeded(reason: "keepalive")
         }
@@ -467,21 +595,31 @@ final class WebContainerView: UIView {
               window.__foliaResumeAudioContexts();
             }
             var list = window.__foliaAudioContexts || [];
-            var known = 0, blocked = 0;
+            // 只统计页面真实在用、而且确实接在一条正在出声的 <audio> 上的上下文。
+            //
+            // 早先这里是「只要有一个 context 不是 running 就报 blocked」，那是错的方向：
+            // 换页 / 切歌词后旧上下文被 close 或根本没在用，它停在 suspended 是正常的，
+            // 却会让我们误判整条通路断了，于是每次回前台都走一遍重建 ——
+            // 表现就是「切回来那一拍歌被打断」。
+            var live = 0, bad = 0;
             for (var i = 0; i < list.length; i += 1) {
               var c = list[i];
-              if (!c || typeof c.state !== 'string') { continue; }
-              if (c.state === 'closed') { continue; }
-              known += 1;
-              if (c.state !== 'running') { blocked += 1; }
+              if (!c || c.state === 'closed') { continue; }
+              // 只有「正在被用」的上下文才有意义：它最近一次接了媒体源，且页面在放。
+              if (c !== window.__foliaActiveAudioContext) { continue; }
+              live += 1;
+              if (c.state !== 'running') { bad += 1; }
             }
             var act = window.__foliaActiveAudioContext;
-            if (act && typeof act.state === 'string' && act.state !== 'closed') {
-              if (known === 0) { known = 1; }
-              if (act.state !== 'running') { blocked += 1; }
+            if (act && act.state !== 'closed' && live === 0) {
+              live = 1;
+              if (act.state !== 'running') { bad += 1; }
             }
-            if (blocked > 0) { return 'blocked'; }
-            if (known > 0) { return 'running'; }
+            if (bad > 0) { return 'blocked'; }
+            if (live > 0) { return 'running'; }
+            // 一个上下文都没记到（页面还没建播放器，或播放器不走 WebAudio）：
+            // 这时候不能当成健康，但也不能盲目重建音频会话 —— 交给调用方用
+            // 「页面上有没有还在播的 <audio>」来兜底判断。
             return 'none';
           } catch (e) { return 'none'; }
         })();
@@ -489,10 +627,8 @@ final class WebContainerView: UIView {
         webView?.evaluateJavaScript(js) { result, _ in
             // 只有明确拿到 `running` 才算通路健康。
             //
-            // `none`（页面上一个 context 都没记到）不能当成健康：切歌词/换页后
-            // 页面会重建播放器树，此时 `__foliaAudioContexts` 是空的，
-            // AudioContext 很可能正处在 `interrupted`，`play()` 返回成功却一点声都没有 ——
-            // 那正是「回前台有概率没声音」。
+            // `none` 仍然是「不确定」，但调用方会再问一次页面里有没有在播的媒体元素：
+            // 有的话不重建会话也能正常工作（页面自己的播放器是唯一的状态源）。
             completion((result as? String) == "running")
         }
     }
@@ -547,8 +683,46 @@ final class WebContainerView: UIView {
                 return
             }
 
-            CrashLog.note("==== audio path broken (contextOK=\(contextOK ? 1 : 0) silencedHint=\(silencedHint ? 1 : 0) reason=\(reason)) ====")
-            self.recoverAudioPathPass(reason: reason, attempt: 0)
+            // 上下文状态「不确定」时，问页面第二个事实：媒体元素还在不在正常放。
+            //
+            // 这是「切桌面 / 锁屏回来，歌不停」的关键一条。原先 `none` 一律当成断了，
+            // 于是每次回前台都会走一遍 `setCategory` + `setActive` ——
+            // 那条路本身就会把 WebKit 的媒体元素按停，等于自己把歌打断一次。
+            // 实际上 `none` 只表示「我们没记到页面用的 AudioContext」（播放器把实例
+            // 留在闭包里、或者根本不走 WebAudio），页面自己的播放器好得很。
+            self.isMediaHealthy { healthy in
+                if healthy && !silencedHint {
+                    CrashLog.note("==== audio path healthy via media probe, skip rebuild (\(reason)) ====")
+                    self.finishAudioRecovery()
+                    return
+                }
+                CrashLog.note("==== audio path broken (contextOK=\(contextOK ? 1 : 0) silencedHint=\(silencedHint ? 1 : 0) reason=\(reason)) ====")
+                self.recoverAudioPathPass(reason: reason, attempt: 0)
+            }
+        }
+    }
+
+    /// 页面上的媒体元素是不是「正在正常出声」（没暂停、没结束、有源、时间在走）。
+    ///
+    /// 只读 DOM，不动任何状态。回前台第一拍 `currentTime` 可能还没推进，
+    /// 所以判据只看「有源 + 没暂停 + 没结束」，再加上「音频上下文没被挂起」这一条兜底。
+    private func isMediaHealthy(_ completion: @escaping (Bool) -> Void) {
+        let js = """
+        (function(){
+          try {
+            var list = document.querySelectorAll('audio,video');
+            for (var i = 0; i < list.length; i += 1) {
+              var el = list[i];
+              if (!el.src || el.ended) { continue; }
+              // 有一条在播，就说明播放器自己没停。
+              if (!el.paused) { return 'playing'; }
+            }
+            return 'idle';
+          } catch (e) { return 'error'; }
+        })();
+        """
+        webView?.evaluateJavaScript(js) { result, _ in
+            completion((result as? String) == "playing")
         }
     }
 
@@ -1629,41 +1803,41 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         // 真正可能被旧数据污染的 MyISAM 式场景（IndexedDB）由页面自己重建。
         CacheSweeper.markDirty("webcontent-terminated")
 
-        // 一分钟内挂了三次以上：继续 reload 只会「加载界面 → 又挂 → 再加载」，
-        // 用户看到的就是无限闪回加载界面。这时必须换一条更安全的路。
-        if contentProcessRestarts.count >= 3 {
-            // 1) 停掉能触发页面重建的一切：保活轮询每 4 秒会跑一次 DOM 扫描与 play()。
-            stopKeepAliveTimer()
-            // 2) 换到包内离线副本：本地文件没有 SW、没有 IndexedDB 老数据，
-            //    页面代码与线上是同一份构建产物，至少能让用户看到界面。
-            //    `loadOfflineCopy()` 会清失败计数并重建首屏看门狗。
-            CrashLog.note("==== web content died \(contentProcessRestarts.count)x, fallback to offline copy ====")
-            loadOfflineCopy()
-            return
-        }
-
         // 网页进程被打死后，页面里的 `<audio>` 随之消失，声音立刻断掉 ——
         // 用户实际经历的是「切歌词界面，音乐停了 / App 退回首页」。
         // 这里先把现场抓下来：崩溃前的标题、当前路由，以及崩溃时是否还在出声。
         collectTerminationContext()
 
-        if contentProcessRestarts.count <= 2 {
-            // 崩溃前正在出声，且用户没按过暂停：重载后把播放续上。
-            // 用户感知到的就不是「闪退了」，而是「歌断了一下又响了」。
-            let shouldResume = Self.wasAudibleInBackground && !userPaused
-            webView.reload()
-            if shouldResume {
-                wantsAudible = true
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
-                    guard let self else { return }
-                    self.forceResumeAudio(reason: "process-restart")
-                }
+        // 崩溃前正在出声，且用户没按过暂停：重载后把播放续上。
+        let shouldResume = Self.wasAudibleInBackground && !userPaused
+
+        // 第一次就换干净存储，而不是在同一个 WKProcessPool 上 `reload()`。
+        //
+        // 「进歌单有概率闪退、退回加载界面」的现场就是：内容进程被回收后，
+        // 壳只做 `reload()`，新的 WebContent 进程仍然挂到同一个进程池、读同一份
+        // Service Worker / IndexedDB / 图标缓存上，页面上那个歌单列表又要一次性
+        // 渲染几百张封面 —— 当场再被压死一次。用户看到的就是「闪一下 → 加载界面」，
+        // 来回卡几次之后进程池已经处于脏状态，连大退重进都会复发。
+        //
+        // 换 `nonPersistent` 存储 + 新进程池是唯一能立刻脱身的路：这一轮读不到任何
+        // 旧数据，页面能稳定起来；登录态由下一次正常启动（脏标记被清掉）恢复。
+        if contentProcessRestarts.count >= 2 {
+            // 连挂两次：不再原地 reload，直接重建 WebView（换存储、换进程池）。
+            stopKeepAliveTimer()
+            CrashLog.note("==== web content died \(contentProcessRestarts.count)x, rebuilding web view with clean store ====")
+            rebuildWebView(resumeAudio: shouldResume)
+            return
+        }
+
+        // 只挂一次：先在原地重载 —— 这一般只是内存压力下的一次回收，
+        // 原地重载能保住滚动位置与播放队列，代价小得多。
+        webView.reload()
+        if shouldResume {
+            wantsAudible = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                guard let self else { return }
+                self.forceResumeAudio(reason: "process-restart")
             }
-        } else if contentProcessRestarts.count == 3 {
-            webView.load(URLRequest(url: Self.startURL))
-        } else {
-            // 一分钟内挂了四次，说明继续重建只会更糟，先停在这里等用户手动刷新。
-            NSLog("[Folia] content process terminated repeatedly, stop auto reload")
         }
     }
 
