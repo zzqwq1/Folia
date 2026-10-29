@@ -495,7 +495,7 @@ final class WebContainerView: UIView {
                 return
             }
             self.webView?.evaluateJavaScript("window.__foliaAudioKeeper && window.__foliaAudioKeeper.current ? JSON.stringify(window.__foliaAudioKeeper.current()) : null") { result, _ in
-                guard let self, self.pendingPauseCheck else { return }
+                guard self.pendingPauseCheck else { return }
                 self.pendingPauseCheck = false
                 let raw = result as? String
                 if let raw, let data = raw.data(using: .utf8),
@@ -507,7 +507,6 @@ final class WebContainerView: UIView {
                 }
                 // 拿不到结论时保守处理：继续保活，宁可多探一次也不要把歌停掉。
                 guard raw != nil else { return }
-                self.pendingPauseCheck = false
                 self.userPaused = true
                 self.stopKeepAliveTimer()
                 self.wantsAudible = false
