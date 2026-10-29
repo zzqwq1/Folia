@@ -701,6 +701,8 @@ final class WebContainerView: UIView {
                 DispatchQueue.main.async { self.didReachFirstPaint = true }
                 // 首屏就绪再开赞赏弹窗：在那之前 DOM 里的图片还没解码，弹出来是两张空白框。
                 self.installDonateCard()
+                // 版本行要等设置面板挂出来才有 DOM，首屏后每隔一秒补一次，两分钟内有效即停。
+                self.scheduleHelpVersionPatch()
                 return
             }
             // 还没就绪：一秒后再看，直到看门狗到点兜底。
@@ -1113,6 +1115,39 @@ final class WebContainerView: UIView {
     static let appVersion: String =
         (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0"
 
+    /// 首屏之后轮询补版本行：设置面板是懒挂载的，用户点到「帮助」时 DOM 才出现，
+    /// 单次注入永远赶不上。命中一次就停，两分钟没命中自然放弃。
+    private func scheduleHelpVersionPatch() {
+        var remaining = 120
+        func tick() {
+            guard remaining > 0 else { return }
+            remaining -= 1
+            let js = """
+            (function () {
+              var want = '\(Self.appVersion)';
+              if (!want || want === '0') { return false; }
+              var spans = document.querySelectorAll('span.font-mono.text-xs');
+              for (var i = 0; i < spans.length; i += 1) {
+                var el = spans[i];
+                var text = el.textContent || '';
+                if (text.indexOf('Realeco') !== 0) { continue; }
+                var next = text.replace(/Realeco v[^ ]+/, 'Realeco v' + want);
+                if (next === text) { return true; }
+                el.textContent = next;
+                return true;
+              }
+              return false;
+            })();
+            """
+            webView?.evaluateJavaScript(js) { [weak self] result, _ in
+                guard let self else { return }
+                if let done = result as? Bool, done { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { tick() }
+            }
+        }
+        tick()
+    }
+
     /// 在页面里核对壳标记是否真的生效，没生效就补一次。
     /// 页面入口脚本按 UA 判定壳模式；一旦判定失败，整页会按移动浏览器渲染（86% 缩放）。
     /// 这里是最后一道保险：UA 对不上就直接把标记写进去，不依赖时序。
@@ -1309,6 +1344,7 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         scheduleFirstPaintCheck()
         installAudioKeeper()
         installLoginHelpers()
+        scheduleHelpVersionPatch()
         // App 启动时会被系统重新激活会话；每次页面加载完再补一次，
         // 覆盖「之前被来电/其他播放器降级」的情况。
         AudioSessionController.shared.reactivate()
