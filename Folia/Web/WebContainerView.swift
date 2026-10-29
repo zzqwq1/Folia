@@ -111,7 +111,7 @@ final class WebContainerView: UIView {
 
         // 让 UA 带 FoliaApp：网页版据此进入「壳模式」，关掉整页 86% 缩放，安全区改用实测值。
         // applicationNameForUserAgent 与完整串两处都设，避免某些系统版本上其中一路不生效。
-        config.applicationNameForUserAgent = "FoliaApp/2.0"
+        config.applicationNameForUserAgent = "FoliaApp/\(Self.appVersion)"
         Self.installUserAgent(on: webView)
 
         addSubview(webView)
@@ -275,17 +275,22 @@ final class WebContainerView: UIView {
 
     /// 页面自己暂停了。
     ///
-    /// 只有「页面在前台可见」时的 pause 才会走到这里，所以可以当成用户主动收手：
-    /// 停掉保活轮询，否则 4 秒后又被放回去，表现就是「点了暂停又自己唱」。
-    /// 后台的 pause 由 JS 侧直接过滤掉了，那是系统掐断，必须让保活管。
+    /// 只有 App 处于前台时的 pause 才算用户主动收手：停掉保活轮询，
+    /// 否则 4 秒后又被放回去，表现就是「点了暂停又自己唱」。
+    /// 后台出现的 pause 一定是被系统掐断的（会话降级、锁屏、切后台），
+    /// 必须继续让保活管，所以那种情况直接忽略。
+    ///
+    /// 这里只停轮询、**不改 `wantsAudible`**：用户再点播放时页面会立刻发新的
+    /// `intent-play`，`markAudibleIntent()` 会把意图重新立起来并重启轮询。
     fileprivate func markPausedIntent() {
+        guard UIApplication.shared.applicationState == .active else { return }
         stopKeepAliveTimer()
     }
 
     private func startKeepAliveTimer() {
         guard keepAliveTimer == nil else { return }
         let timer = Timer(timeInterval: 4.0, repeats: true) { [weak self] _ in
-            guard let self, self.wantsAudible else { return }
+            guard let self, self.wantsAudible, !self.userPaused else { return }
             // 后台每一拍都重试一次 play：系统掐断媒体、缓冲结束、页面自暂停都在这一拍里被兜住。
             // 前台只在「切后台后的头几秒」探一次：那时会话还没被系统按停，探一次就知道
             // 该不该接管；之后一直在前台就交给页面自己，省掉每 4 秒一次跨进程 evaluateJavaScript
@@ -323,7 +328,41 @@ final class WebContainerView: UIView {
         // 音频通路本身已经不通。这里每拍先把会话要回来，再补 play。
         // 只 setActive 不 setCategory，所以不会像早期那样把播放器按停。
         AudioSessionController.shared.reactivate()
-        resumeAudio(reason: reason)
+        // 页面出声走 WebAudio，AudioContext 在后台被钉成 interrupted 后，
+        // 光 play() 是「返回成功但没声音」。所以每拍都要连上下文一起叫醒，
+        // 再按「上下文是否 running」决定要不要重设 category 与重新激活会话。
+        resumeAudioContexts { [weak self] active in
+            guard let self else { return }
+            if active {
+                self.resumeAudio(reason: reason)
+            } else {
+                self.forceResumeAudio(reason: reason, rebuild: true)
+            }
+        }
+    }
+
+    /// 页面上真实在用的 AudioContext 是否处于 running。
+    ///
+    /// 线上页的 context 留在 React 闭包里，反射拿不到，所以保活脚本从
+    /// `createMediaElementSource` 那一处把实例记了下来（见 `audioKeeperScript`）。
+    /// 页面还没建过上下文时返回「没被掐住」：那种情况下播放走 `<audio>` 直出，
+    /// 不必重设 category。
+    private func resumeAudioContexts(_ completion: @escaping (Bool) -> Void) {
+        let js = """
+        (function(){
+          try {
+            if (typeof window.__foliaResumeAudioContexts === 'function') {
+              window.__foliaResumeAudioContexts();
+            }
+            var c = window.__foliaActiveAudioContext;
+            if (!c) { return 'none'; }
+            return c.state === 'running' ? 'running' : 'blocked';
+          } catch (e) { return 'none'; }
+        })();
+        """
+        webView?.evaluateJavaScript(js) { result, _ in
+            completion((result as? String) != "blocked")
+        }
     }
 
     /// 回前台时的补放：不看前后台状态，其余条件与轮询一致。
@@ -352,12 +391,15 @@ final class WebContainerView: UIView {
     ///
     /// iOS 在后台会把页面的 `AudioContext` 挂成 `interrupted`，回前台不会自己恢复；
     /// 页面侧没有任何 `statechange` 监听，所以要壳来叫醒它。
-    /// 这里只做两件最保守的事：扫一遍常见挂载点上的上下文逐个 `resume()`，
+    /// 这里只做两件最保守的事：把所有已知上下文 `resume()` 一遍，
     /// 再派发一次 `visibilitychange` 让页面自己走恢复逻辑 —— 不改任何全局原型。
     private func revivePageAudio() {
         let js = """
         (function(){
           try {
+            if (typeof window.__foliaResumeAudioContexts === 'function') {
+              window.__foliaResumeAudioContexts();
+            }
             var names = ['__foliaAudioContext', 'audioContext', '__audioContext'];
             for (var i = 0; i < names.length; i += 1) {
               var c = window[names[i]];
@@ -634,6 +676,7 @@ final class WebContainerView: UIView {
           //    所以这一步只是兜底，不指望一定命中）。
           window.__foliaResumeAudioContexts = function(){
             var resumed = 0;
+            var extra = window.__foliaAudioContexts || [];
             try {
               var names = ['__foliaAudioContext', 'audioContext', '__audioContext'];
               for (var i = 0; i < names.length; i += 1) {
@@ -642,9 +685,45 @@ final class WebContainerView: UIView {
                   try { c.resume(); resumed += 1; } catch (e) {}
                 }
               }
+              // 页面真实的上下文（从 createMediaElementSource 那里记下来的）。
+              for (var j = 0; j < extra.length; j += 1) {
+                var d = extra[j];
+                if (d && typeof d.resume === 'function' && d.state !== 'running') {
+                  try { d.resume(); resumed += 1; } catch (e) {}
+                }
+              }
             } catch (e) {}
             return resumed;
           };
+
+          // 页面真正的 AudioContext 实例。
+          //
+          // 播放器的 context 留在 React 闭包里，反射拿不到，于是这里只在
+          // `createMediaElementSource` 上绕一层：那是页面把 `<audio>` 接进 WebAudio 的
+          // 唯一入口，任何播放器（含切歌词重建后的新实例）都必须经过它。
+          // 只包装这一个方法、且只做「记下 this 再原样返回」，不动原型上的其它行为，
+          // 与之前那版批量改写原型（会触发切歌词闪退）不是一回事。
+          window.__foliaAudioContexts = window.__foliaAudioContexts || [];
+          window.__foliaActiveAudioContext = null;
+          try {
+            var proto = window.AudioContext && window.AudioContext.prototype;
+            var raw = proto && proto.createMediaElementSource;
+            if (raw && !raw.__foliaWrapped) {
+              var wrappedSource = function(){
+                try {
+                  var list = window.__foliaAudioContexts;
+                  for (var i = 0; i < list.length; i += 1) {
+                    if (list[i] === this) { return raw.apply(this, arguments); }
+                  }
+                  list.push(this);
+                  window.__foliaActiveAudioContext = this;
+                } catch (e) {}
+                return raw.apply(this, arguments);
+              };
+              wrappedSource.__foliaWrapped = true;
+              proto.createMediaElementSource = wrappedSource;
+            }
+          } catch (e) {}
 
           // 记录页面自身的 MediaSession 处理器，供锁屏按钮直接调用。
           var handlers = window.__foliaMediaCommand = window.__foliaMediaCommand || {};
@@ -725,10 +804,11 @@ final class WebContainerView: UIView {
             if (!el || el.tagName !== 'AUDIO') { return; }
             // 播完的 pause 不算用户意图，否则一轮播完就不再续播。
             if (el.ended) { return; }
-            // 只有页面在前台可见时的 pause 才可能是用户主动按的。
-            // 后台里出现的 pause 一定是被系统掐断的（会话降级、锁屏、切后台），
-            // 必须交给保活放回去，否则就是「后台没声音、回来也没有」。
-            if (document.visibilityState === 'visible') { post('intent-pause'); }
+            // 前后台都照报：前台的是用户收手，后台的是系统掐断。
+            // 两者的区别交给原生判断（`markPausedIntent()` 只在 App 处于 active 时才停轮询），
+            // 页面这边不做取舍 —— `visibilityState` 在 WKWebView 切后台的瞬间并不总是
+            // 先变 hidden 再发 pause，靠它过滤会把真正的用户暂停也一起吞掉。
+            post('intent-pause');
           }, true);
 
           var lastState = '';
@@ -867,8 +947,8 @@ final class WebContainerView: UIView {
     /// 这里在首屏就绪后按同一份 DOM 自己打开，并补上脚本里因提前返回而没绑上的点击：
     /// 关闭按钮、点空白关闭、「获取」跳转、二维码长按保存。
     ///
-    /// 版本号与更新公告也一并接手：线上页的 `FOLIA_VERSION` / `FOLIA_LATEST_VERSION`
-    /// 是纯静态常量，站点一改，App 里立刻就是新值，不需要重装。
+    /// 版本号与更新公告也一并接手：壳把 Info.plist 的实际版本写进 `window.__foliaAppVersion`，
+    /// 「当前版本」与「最新版本」都取它，改版本只需要改 project.yml 一处。
     private func installDonateCard() {
         let js = """
         (function(){
@@ -879,10 +959,11 @@ final class WebContainerView: UIView {
 
           var QUARK_URL = 'https://pan.quark.cn/s/934c480d5b9c';
 
-          // 两个版本号都取壳带进来的实际版本：线上页的常量停在 1.8.5，
-          // 而这个包是 2.0，沿用会显示「当前 2.0 / 最新 1.8.5」。
-          var cur = (window.__foliaAppVersion || (typeof FOLIA_VERSION === 'string' && FOLIA_VERSION) || '');
-          var latest = cur || (typeof FOLIA_LATEST_VERSION === 'string' && FOLIA_LATEST_VERSION) || '';
+          // 两个版本号都取壳带进来的实际版本（Info.plist 的 MARKETING_VERSION）：
+          // 线上页的常量停在 1.8.5，沿用会显示「当前 2.0.5 / 最新 1.8.5」。
+          // 壳内「最新版本」=「当前版本」，因为包就是从网盘拿的最新那一份。
+          var cur = window.__foliaAppVersion || '';
+          var latest = cur;
 
           var verNum = document.getElementById('donate-version-num');
           if (verNum && cur) { verNum.textContent = cur; }
@@ -937,11 +1018,11 @@ final class WebContainerView: UIView {
     private static func installUserAgent(on webView: WKWebView) {
         let ua: String
         if let ready = webView.value(forKey: "userAgent") as? String, !ready.isEmpty {
-            ua = "\(ready) FoliaApp/2.0"
+            ua = "\(ready) FoliaApp/\(Self.appVersion)"
         } else {
             // 系统还没算好标准 UA：显式拼一个等价的 iPhone Safari 串，
             // 保证首个请求就带标记（页面据此决定是否进入壳模式）。
-            ua = "Mozilla/5.0 (iPhone; CPU iPhone OS \(UIDevice.current.systemVersion.replacingOccurrences(of: ".", with: "_")) like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 FoliaApp/2.0"
+            ua = "Mozilla/5.0 (iPhone; CPU iPhone OS \(UIDevice.current.systemVersion.replacingOccurrences(of: ".", with: "_")) like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 FoliaApp/\(Self.appVersion)"
         }
         // WebKit 把标准 UA 拆成多段存储，静态扫描里搜不到整串；这里显式留一份可读标记，
         // 既方便排查，也让产物校验能直接确认「壳模式标记确实编进了二进制」。
@@ -950,7 +1031,13 @@ final class WebContainerView: UIView {
     }
 
     /// 壳模式 UA 标记，页面入口脚本据此打开壳布局。
-    static let userAgentMarker = "FoliaApp/2.0"
+    static let userAgentMarker = "FoliaApp/\(appVersion)"
+
+    /// 壳版本号：唯一取自 Info.plist，改版本只改 project.yml 一处。
+    /// UA 只用来判定「是不是壳」（正则匹配 `FoliaApp`），带版本号不影响壳模式识别，
+    /// 但能让线上日志一眼看出是哪个版本的壳在跑。
+    static let appVersion: String =
+        (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "2.0.5"
 
     /// 在页面里核对壳标记是否真的生效，没生效就补一次。
     /// 页面入口脚本按 UA 判定壳模式；一旦判定失败，整页会按移动浏览器渲染（86% 缩放）。
@@ -1011,7 +1098,7 @@ final class WebContainerView: UIView {
       window.__FOLIA_SHELL__ = 'ios';
       // 壳的实际版本（project.yml 的 MARKETING_VERSION），赞赏弹窗的「当前版本」用它，
       // 免得线上页停在旧常量上，用户以为装错了包。
-      window.__foliaAppVersion = '\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.0")';
+      window.__foliaAppVersion = '\(appVersion)';
       // 更新公告在壳里不弹。页面脚本自带 UA 判定会提前 return，本不该弹；
       // 这里在文档开始时先钉一条样式兜底，任何时序下都压住 #update-mask。
       // 脚本注入点早于 <head>，所以等 DOMContentLoaded 再插入。
