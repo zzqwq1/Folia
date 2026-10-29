@@ -1205,9 +1205,9 @@ final class WebContainerView: UIView {
         window.fetch = function(input, init){
           try {
             if (typeof input === 'string' && input.charAt(0) === '/' && input.charAt(1) !== '/') {
-              input = base.replace(/\/$/, '') + input;
+              input = base.replace(/\\/$/, '') + input;
             } else if (input && input.url && input.url.indexOf('file:') === 0) {
-              input = base.replace(/\/$/, '') + '/' + input.url.replace(/^file:\/\/.*?\//, '');
+              input = base.replace(/\\/$/, '') + '/' + input.url.replace(/^file:\\/\\/.*?\\//, '');
             }
           } catch (e) {}
           return originalFetch.call(window, input, init);
