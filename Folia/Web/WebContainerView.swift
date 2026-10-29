@@ -1200,7 +1200,7 @@ final class WebContainerView: UIView {
       // 只在 file:// 下生效，线上页完全不受影响。
       (function(){
         if (location.protocol !== 'file:' || typeof window.fetch !== 'function') { return; }
-        var base = '\(Self.startURL.absoluteString)';
+        var base = '\(WebContainerView.startURL.absoluteString)';
         var originalFetch = window.fetch;
         window.fetch = function(input, init){
           try {
