@@ -32,6 +32,14 @@ jobs:
           test -f Folia/www/index.html
           echo "www files: $(find Folia/www -type f | wc -l)"
           du -sh Folia/www
+          # 离线副本要能被 file:// 直接打开：任何根绝对路径（="/..." / "/assets/..."）
+          # 在 file:// 下都会解析到磁盘根，主 bundle 直接 404，回退出来就是一片白。
+          bad_html=$(grep -cE '(href|src)="/' Folia/www/index.html || true)
+          echo "index.html root-absolute refs: $bad_html"
+          test "$bad_html" -eq 0
+          bad_js=$(grep -rlE '"/assets/' Folia/www/assets --include='*.js' --include='*.css' | wc -l)
+          echo "assets files with root-absolute refs: $bad_js"
+          test "$bad_js" -eq 0
 
       - name: Generate Xcode project
         run: |
