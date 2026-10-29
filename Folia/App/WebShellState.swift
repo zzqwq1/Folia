@@ -97,9 +97,45 @@ enum CacheSweeper {
     /// 一个进程只清一次：热启动时清会把正在用的资源也打掉。
     private static var swept = false
 
+    /// 上次运行是不是崩着退出的。
+    ///
+    /// 崩过之后下一次启动改用一次性的干净存储目录（见 `WebContainerView.setUp()`），
+    /// 成功加载出一轮后自动清掉。正常退出时不动它，否则每次启动都要重新下载全站。
+    private static let dirtyKey = "folia.webstore.dirty"
+
+    /// 标记「这次运行不干净」。
+    ///
+    /// 在内容进程死掉时立刻写下，并且**不等**进程正常退出 ——
+    /// 用户描述的现象是「大退重进还是闪退」，说明上一次崩溃没有任何收尾机会，
+    /// 只能在运行期实时落盘。
+    static func markDirty(_ reason: String) {
+        UserDefaults.standard.set(reason, forKey: dirtyKey)
+        UserDefaults.standard.synchronize()
+    }
+
+    static var isStoreDirty: Bool {
+        UserDefaults.standard.string(forKey: dirtyKey) != nil
+    }
+
+    static func clearDirty() {
+        UserDefaults.standard.removeObject(forKey: dirtyKey)
+        UserDefaults.standard.synchronize()
+    }
+
     static func sweepOnColdLaunch() {
         guard !swept else { return }
         swept = true
+
+        // 清理范围刻意只到「HTTP 缓存」，**不动 Service Worker 与离线缓存**。
+        //
+        // 早先这里是「崩过就清 SW」，想的是「旧 SW 把进程拖死了」。实际相反：
+        // 线上站用 SW 做缓存优先，第二次启动几乎所有脚本都从本地拿，WebContent 进程
+        // 起得又快又稳；把 SW 清掉之后，下一个进程必须重新拉整站脚本与可视化引擎，
+        // 在内存最紧张的那一刻反而更容易被压死 —— 用户看到的就是
+        // 「大退重进还是闪退」，甚至比第一次更严重。
+        //
+        // 所以这里统一只清两层临时缓存；万一真的被脏数据卡住，
+        // 由 `WebContainerView` 在「一分钟内连挂三次」时改用 `nonPersistent` 存储兜底。
         let types: Set<String> = [
             WKWebsiteDataTypeMemoryCache,
             WKWebsiteDataTypeDiskCache,
@@ -238,7 +274,18 @@ final class AudioSessionController {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.reactivate()
+            guard let self else { return }
+            // **正在播放时不要碰会话。**
+            //
+            // `setActive(true)` 会让系统重新评估音频资格并把 WebKit 的媒体元素按停一次，
+            // 表现就是「切到桌面再切回来，歌停了一下」。播放中会话本来就好好的，
+            // 什么都不做才是正确做法；真被掐断了（来电、控制中心）由
+            // `WebContainerView.recoverAudioPath` 按需恢复，只在检测到无声时才动手。
+            //
+            // 只有在「没在播」时无脑激活才不会误伤任何声音。
+            if !self.isPlaying {
+                self.reactivate()
+            }
         }
 
         // 状态栏划出控制中心：系统把音频通路静音、状态却仍是「播放中」，

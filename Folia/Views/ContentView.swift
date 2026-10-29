@@ -20,10 +20,12 @@ struct ContentView: View {
             }
         }
         .statusBarHidden(false)
-        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
-            // 回前台只重启会话，不重设 category：后者会把正在播放的音乐按停。
-            AudioSessionController.shared.reactivate()
-        }
+        // 回前台时**不要**在这里再调 `reactivate()`。
+        //
+        // `setActive(true)` 的副作用是让系统重新评估本 App 的音频资格，
+        // WebKit 的媒体元素会因此被按停一次 —— 用户看到的就是「切回桌面再回来，歌停了一下」。
+        // 回前台的会话恢复统一由 WebContainerView 的 `recoverAudioPath` 负责：
+        // 它先判断页面是不是真的被静音了，没被掐断就完全不动音频。
     }
 }
 

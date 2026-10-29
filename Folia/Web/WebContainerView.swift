@@ -72,6 +72,8 @@ final class WebContainerView: UIView {
     private var foregroundObservation: Any?
     private var backgroundObservation: Any?
     private var networkObservation: Any?
+    /// 本次启动是否在使用「崩溃后」的干净存储。成功加载一次后置为 false。
+    private var recoveringFromCrash = CacheSweeper.isStoreDirty
 
     init(state: WebShellState) {
         self.state = state
@@ -94,6 +96,20 @@ final class WebContainerView: UIView {
         config.mediaTypesRequiringUserActionForPlayback = []
         config.suppressesIncrementalRendering = false
         config.websiteDataStore = .default()
+
+        // 上次是崩着退出的：这次换一个用完即弃的存储。
+        //
+        // 只清缓存挡不住「大退重进还闪退」—— 页面启动最早期读的是磁盘上的
+        // Service Worker 与 IndexedDB，而 WebContent 进程在读到它们的那一刻就被压死了，
+        // 清缓存的回调甚至还没跑完。换 nonPersistent 目录后这一轮读不到任何旧状态，
+        // 能稳定地进到页面；用户本次的登录态会重新走一遍，
+        // 但「进不去」比「要重新登一次」严重得多。
+        //
+        // 一旦进过一次正常页面就调 `CacheSweeper.clearDirty()`，下次恢复默认存储。
+        let recovering = CacheSweeper.isStoreDirty
+        if recovering {
+            config.websiteDataStore = .nonPersistent()
+        }
 
         let userContent = WKUserContentController()
         // 注入到所有 frame：离线副本里的 worker 也要把 `/api/...` 补成线上地址，
@@ -263,8 +279,13 @@ final class WebContainerView: UIView {
             queue: .main
         ) { [weak self] _ in
             guard let self else { return }
-            // 进后台只做两件事：把会话立住，并开始轮询补放。
-            // 系统随后来按停页面里的媒体时，4 秒内的那一拍会把它放回去。
+            // 进后台只做三件事：把会话立住、开始轮询、记下播放进度。
+            //
+            // 会话激活必须在这一拍完成：这是系统判定「本 App 能否继续出声」的最后时机，
+            // 一旦错过，页面里正在放的歌会被当场按停。
+            if self.wantsAudible && !self.userPaused {
+                AudioSessionController.shared.reactivate()
+            }
             self.refreshAudioKeepAlive()
             self.captureProgressBeforeBackground { _ in
                 self.enforcePlaybackIfNeeded(reason: "background")
@@ -326,7 +347,16 @@ final class WebContainerView: UIView {
     /// 让轮询与当前意图对齐：该响就起，不该响就停。
     private func refreshAudioKeepAlive() {
         if wantsAudible && !userPaused {
-            AudioSessionController.shared.reactivate()
+            // 这里**不再无脑 `reactivate()`**。
+            //
+            // 回前台时这个方法会被调用一次，而 `setActive(true)` 会让系统重新评估
+            // 音频资格、把 WebKit 的媒体元素按停 —— 正是「切桌面再回来歌停一下」的来源。
+            // 会话在播放中本来就是好的；真断了由 `recoverAudioPath` 探测后按需处理。
+            //
+            // 探针配额要在这里归零：配额的存在意义是「这一轮前台只探一两次」，
+            // 若不重置，那么第一次进后台再回到前台之后配额就用完了，
+            // 之后再怎么切都不会恢复 —— 表现就是「第二次切回来就没声音」。
+            foregroundProbes = 0
             startKeepAliveTimer()
             Self.wasAudibleInBackground = true
         } else {
@@ -355,8 +385,14 @@ final class WebContainerView: UIView {
     ///
     /// 这里只停轮询、**不改 `wantsAudible`**：用户再点播放时页面会立刻发新的
     /// `intent-play`，`markAudibleIntent()` 会把意图重新立起来并重启轮询。
+    ///
+    /// 例外：切到别的 App / 回桌面时，页面会先收到一次 `pause` 再失去可见性。
+    /// 那一拍 `applicationState` 仍是 `.active`，若按「用户收手」处理，
+    /// 轮询就停了，回到 App 里发现歌没了 —— 所以这里补一条 `visibilityState` 判断。
     fileprivate func markPausedIntent() {
         guard UIApplication.shared.applicationState == .active else { return }
+        let visible = (try? webView?.evaluateJavaScript("document.visibilityState") as? String) ?? "visible"
+        guard visible == "visible" else { return }
         stopKeepAliveTimer()
     }
 
@@ -364,14 +400,18 @@ final class WebContainerView: UIView {
         guard keepAliveTimer == nil else { return }
         let timer = Timer(timeInterval: 4.0, repeats: true) { [weak self] _ in
             guard let self, self.wantsAudible, !self.userPaused else { return }
-            // 后台每一拍都重试一次 play：系统掐断媒体、缓冲结束、页面自暂停都在这一拍里被兜住。
-            // 前台只在「切后台后的头几秒」探一次：那时会话还没被系统按停，探一次就知道
-            // 该不该接管；之后一直在前台就交给页面自己，省掉每 4 秒一次跨进程 evaluateJavaScript
-            // —— 那一趟要走主线程、在 WebKit 里跑脚本，听歌时滑动列表也会被它拖顿。
-            if UIApplication.shared.applicationState == .active {
-                guard self.foregroundProbes < 2 else { return }
-                self.foregroundProbes += 1
-            }
+            // 只在前台干活。
+            //
+            // 早先这里是「后台每一拍都 recoverAudioPath()」，那是错的，而且正是
+            // 「退出 App 歌被打断」的根因：一旦真的进了后台，每一拍都会调
+            // `AudioSessionController.activate()` → `setCategory` + `setActive`，
+            // 系统当场重建音频通路，WebKit 的媒体元素被按停，页面侧表现为「后台放着放着停了」。
+            // 现在后台音频完全交给系统（已声明 `UIBackgroundModes: audio` + `.playback` 会话），
+            // 原生不碰；只有回到前台时才做一次**探测式**恢复，
+            // 通路没问题就一格都不动 —— 这就是「切桌面 / 锁屏来回切，歌不停」的保证。
+            guard UIApplication.shared.applicationState == .active else { return }
+            guard self.foregroundProbes < 2 else { return }
+            self.foregroundProbes += 1
             self.enforcePlaybackIfNeeded(reason: "keepalive")
         }
         // 挂 .common：滚动视图追踪模式下定时器也会照常触发，后台也照常。
@@ -390,15 +430,22 @@ final class WebContainerView: UIView {
     /// 只在 `wantsAudible` 为真时动手，且每轮只做一次 `play()`：
     /// 页面自己的播放器是唯一的状态源，壳只是保证它不被系统静默掐断。
     ///
-    /// 两个前提缺一不可：
-    /// 1. `userPaused` 为假 —— 用户亲手按的暂停绝不覆盖；
-    /// 2. 页面处于后台 —— 前台时用户可能只是想暂停，此时接管会把暂停又弹回播放。
-    ///    系统掐断媒体只发生在后台，前台不需要也不应该续播。
+    /// 前提：`userPaused` 为假 —— 用户亲手按的暂停绝不覆盖。
+    /// 前后台走两条不同的路径，见方法体注释。
     private func enforcePlaybackIfNeeded(reason: String) {
         guard wantsAudible, !userPaused else { return }
-        guard UIApplication.shared.applicationState != .active else { return }
-        // 后台保活的每一拍也走统一入口：它自带去重，同一时刻只会有一遍恢复在跑，
-        // 不会和回前台/控制中心那两路撞车。通路已经好的时候，这一拍只补一次 play。
+
+        // 后台：只做零副作用的补放，绝不重建会话。
+        //
+        // `setCategory` / `setActive` 都会让系统重新评估音频资格，在后台调它们
+        // 等于亲手把正在放的歌按停一次 —— 这是「退出 App 歌被打断」的直接来源。
+        // 后台唯一安全的动作是「页面上有条被按停的 `<audio>`，就再 play 一次」。
+        if UIApplication.shared.applicationState != .active {
+            resumeAudio(reason: reason)
+            return
+        }
+
+        // 前台：走统一的探测式恢复，通路没问题时一格都不动。
         recoverAudioPath(reason: reason)
     }
 
@@ -439,7 +486,13 @@ final class WebContainerView: UIView {
         })();
         """
         webView?.evaluateJavaScript(js) { result, _ in
-            completion((result as? String) != "blocked")
+            // 只有明确拿到 `running` 才算通路健康。
+            //
+            // `none`（页面上一个 context 都没记到）不能当成健康：切歌词/换页后
+            // 页面会重建播放器树，此时 `__foliaAudioContexts` 是空的，
+            // AudioContext 很可能正处在 `interrupted`，`play()` 返回成功却一点声都没有 ——
+            // 那正是「回前台有概率没声音」。
+            completion((result as? String) == "running")
         }
     }
 
@@ -451,8 +504,12 @@ final class WebContainerView: UIView {
     /// 而中途又有人把 context 重新挂起，于是「有一段没声音」。
     ///
     /// 这里的约定：
+    /// - **先探测，再动手**：通路本来就好的话什么都不做。
+    ///   这是「切桌面/锁屏再回来，歌不被暂停」的前提 ——
+    ///   `setCategory` / `setActive` 本身就会让 WebKit 把媒体元素按停一次，
+    ///   对一条完好的通路做这种操作，纯属自己把歌打断。
     /// - 只做一遍，且上一遍没走完时，新请求只记一次「再做一遍」，不叠着跑；
-    /// - 先重建会话与上下文，**等上下文真的 running 了**再补 play，
+    /// - 确认被掐断后才重建会话与上下文，**等上下文真的 running 了**再补 play，
     ///   而不是固定 sleep 一段时间——那段时间正是「没声音」的窗口；
     /// - 上下文始终起不来就有限次重试，不无限循环。
     func recoverAudioPath(reason: String) {
@@ -465,7 +522,33 @@ final class WebContainerView: UIView {
         }
         audioRecoveryInFlight = true
         audioRecoveryPending = false
-        recoverAudioPathPass(reason: reason, attempt: 0)
+        probeThenRecover(reason: reason)
+    }
+
+    /// 探测当前通路是否真的断了，只在断了的时候才走重建。
+    ///
+    /// 判据取两样，任一为真才算断：
+    /// 1. 页面上还有没暂停的 `<audio>`（说明「该响」），但 AudioContext 不是 running；
+    /// 2. 会话已经失去播放资格（`secondaryAudioShouldBeSilencedHint`，控制中心/通话后的典型态）。
+    ///
+    /// 两样都为假说明声音好端端地在放，直接返回 —— 这一条就是「进出不打断」的保证。
+    private func probeThenRecover(reason: String) {
+        let session = AVAudioSession.sharedInstance()
+        let silencedHint = session.secondaryAudioShouldBeSilencedHint
+
+        resumeAudioContexts { [weak self] contextOK in
+            guard let self else { return }
+
+            if contextOK && !silencedHint {
+                // 通路完好：一格音频状态都不要碰，只把「想做待办」结掉。
+                CrashLog.note("==== audio path healthy, skip rebuild (\(reason)) ====")
+                self.finishAudioRecovery()
+                return
+            }
+
+            CrashLog.note("==== audio path broken (contextOK=\(contextOK ? 1 : 0) silencedHint=\(silencedHint ? 1 : 0) reason=\(reason)) ====")
+            self.recoverAudioPathPass(reason: reason, attempt: 0)
+        }
     }
 
     /// 一趟恢复。attempt 用于上下文迟迟不就绪时的有限重试。
@@ -528,9 +611,15 @@ final class WebContainerView: UIView {
     ///
     /// iOS 在后台会把页面的 `AudioContext` 挂成 `interrupted`，回前台不会自己恢复；
     /// 页面侧没有任何 `statechange` 监听，所以要壳来叫醒它。
-    /// 这里只做两件最保守的事：把所有已知上下文 `resume()` 一遍，
-    /// 再派发一次 `visibilitychange` 让页面自己走恢复逻辑 —— 不改任何全局原型。
+    /// 这里只做最保守的事：把所有已知上下文 `resume()` 一遍 —— 不改任何全局原型。
     private func revivePageAudio() {
+        // 这里刻意**不再派发合成的 `visibilitychange`**。
+        //
+        // 页面把 `visibilitychange` 当成「真的被切走又切回来」，会在那一拍重建播放器与
+        // 可视化树；而原生这边发它时，页面其实一直可见。结果是每次回前台
+        // 都白跑一次重建 —— 表现就是「刚回来那一下卡顿、画面闪、偶尔进程还不够内存」。
+        // 现在只做两件没有副作用的事：`resume()` 已知的 AudioContext，
+        // 以及让页面自己上报一次当前状态（`__foliaAudioKeeper.report()` 只是读 DOM）。
         let js = """
         (function(){
           try {
@@ -544,7 +633,9 @@ final class WebContainerView: UIView {
                 try { c.resume(); } catch (e) {}
               }
             }
-            document.dispatchEvent(new Event('visibilitychange'));
+            if (window.__foliaAudioKeeper && typeof window.__foliaAudioKeeper.report === 'function') {
+              window.__foliaAudioKeeper.report();
+            }
             return 'ok';
           } catch (e) { return 'error'; }
         })();
@@ -1020,6 +1111,23 @@ final class WebContainerView: UIView {
             // 页面的 currentTime 不再前进，原生只能拿到这条里的数字。
             reportProgress();
           });
+          // 暴露一个只读的状态查询口：原生回前台时用它确认「页面自己认为在不在播」，
+          // 不再靠派发合成事件去逼页面重建。只读 DOM，没有任何副作用。
+          window.__foliaAudioKeeper = {
+            report: report,
+            progress: reportProgress,
+            current: function(){
+              var el = currentAudio();
+              if (!el) { return null; }
+              var d = el.duration;
+              return {
+                src: el.src,
+                paused: el.paused,
+                position: el.currentTime || 0,
+                duration: (d && isFinite(d)) ? d : 0
+              };
+            }
+          };
           report();
         })();
         """
@@ -1420,9 +1528,35 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         installAudioKeeper()
         installLoginHelpers()
         scheduleHelpVersionPatch()
-        // App 启动时会被系统重新激活会话；每次页面加载完再补一次，
-        // 覆盖「之前被来电/其他播放器降级」的情况。
-        AudioSessionController.shared.reactivate()
+        // 页面加载完补一次会话激活，覆盖「之前被来电/其他播放器降级」的情况。
+        //
+        // 播放中不碰：正在出声时 `setActive(true)` 会把 WebKit 的媒体元素按停一次，
+        // 表现就是「后台切回来/页面重载后歌停了一下」。没在播时激活没有副作用。
+        if !wantsAudible || userPaused {
+            AudioSessionController.shared.reactivate()
+        }
+
+        // 干净存储上成功加载出了页面：把「崩溃标记」清掉，下次启动回到默认存储。
+        //
+        // 放在 didFinish 而不是首屏看门狗里，是因为要等它真正跑完一轮才敢下结论；
+        // 但也不能等太久 —— 若在清掉之前又崩了，下一个进程还得靠这个标记自救，
+        // 所以用延迟清除，期间一旦再崩会被 markDirty 重新写回。
+        if recoveringFromCrash {
+            recoveringFromCrash = false
+            let restartsAtFinish = contentProcessRestarts.count
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) { [weak self] in
+                guard let self else { return }
+                // 只要求「这 8 秒内没有再挂」。
+                //
+                // 早先这里写的是 `contentProcessRestarts.isEmpty`，那是错的条件：
+                // 走到这里本身就说明上一轮挂过一次，数组永远非空，标记一辈子清不掉，
+                // 于是每次启动都用 `nonPersistent` 存储 —— 登录态每次都要重来一遍。
+                // 用「快照比对」才是真正要表达的意思：这段时间稳定，就算恢复成功。
+                guard self.contentProcessRestarts.count == restartsAtFinish else { return }
+                CacheSweeper.clearDirty()
+                CrashLog.note("==== store recovered, dirty flag cleared ====")
+            }
+        }
     }
 
     /// 远程页加载失败时自动重试一次，避免停在白屏上。
@@ -1482,6 +1616,31 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         // 计进日志才能区分到底是哪一种。
         CrashLog.note("==== web content process terminated (#\(contentProcessRestarts.count)) url=\(webView.url?.absoluteString ?? "-") ====")
 
+        // 立刻把「这次运行不干净」落盘。
+        //
+        // 进程被系统杀掉时 App 本身还活着，用户随后手动大退也不会有任何收尾回调，
+        // 所以只能在这一刻写 UserDefaults。下一个进程读到它就会改用干净存储，
+        // 这一步是「大退重进仍然闪退」能自愈的前提。
+        //
+        // 注意范围：这一条只用来**自愈**，不在这里清 Service Worker。
+        // 线上站自己注册了 SW，缓存优先的策略让二次启动几乎不打死 WebContent 进程；
+        // 一旦清了 SW，下一个进程必须重新下载整站脚本，反而更容易被压死。
+        // 真正可能被旧数据污染的 MyISAM 式场景（IndexedDB）由页面自己重建。
+        CacheSweeper.markDirty("webcontent-terminated")
+
+        // 一分钟内挂了三次以上：继续 reload 只会「加载界面 → 又挂 → 再加载」，
+        // 用户看到的就是无限闪回加载界面。这时必须换一条更安全的路。
+        if contentProcessRestarts.count >= 3 {
+            // 1) 停掉能触发页面重建的一切：保活轮询每 4 秒会跑一次 DOM 扫描与 play()。
+            stopKeepAliveTimer()
+            // 2) 换到包内离线副本：本地文件没有 SW、没有 IndexedDB 老数据，
+            //    页面代码与线上是同一份构建产物，至少能让用户看到界面。
+            //    `loadOfflineCopy()` 会清失败计数并重建首屏看门狗。
+            CrashLog.note("==== web content died \(contentProcessRestarts.count)x, fallback to offline copy ====")
+            loadOfflineCopy()
+            return
+        }
+
         // 网页进程被打死后，页面里的 `<audio>` 随之消失，声音立刻断掉 ——
         // 用户实际经历的是「切歌词界面，音乐停了 / App 退回首页」。
         // 这里先把现场抓下来：崩溃前的标题、当前路由，以及崩溃时是否还在出声。
@@ -1520,7 +1679,10 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-        AudioSessionController.shared.reactivate()
+        // 播放中不动会话：新导航开始时 `setActive(true)` 会打断正在出声的媒体元素。
+        if !wantsAudible || userPaused {
+            AudioSessionController.shared.reactivate()
+        }
     }
 }
 
