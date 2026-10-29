@@ -212,6 +212,12 @@ final class AudioSessionController {
         }
     }
 
+    /// 系统级中断（来电、闹钟、别的 App 抢占）是否还没结束。
+    ///
+    /// `.began` 与 `.ended` 必须成对看：`.began` 一到，音频通路就被系统收走了；
+    /// 只有确实被收走过，`.ended` 时重设 category 才有意义。
+    private var interrupted = false
+
     private func observeInterruptions() {
         NotificationCenter.default.addObserver(
             forName: AVAudioSession.interruptionNotification,
@@ -226,12 +232,19 @@ final class AudioSessionController {
             switch type {
             case .began:
                 // .began 时必须把会话让出去，否则系统会直接掐断音频。
+                self?.interrupted = true
                 NSLog("[Folia] audio interrupted")
             default:
+                guard let self, self.interrupted else { return }
                 // 通话 / 其他 App 抢占结束后重新声明 category 再激活。
                 // 只 setActive 在部分机型上会失败，而页面那边此时已经判为暂停，
                 // 不把通路要回来就是「前后台都没声音」。
-                self?.activate()
+                //
+                // 只在「确实被中断过」时才重设：`setCategory` 会重建音频通路，
+                // 播放中无谓地调它反而会把页面媒体按停 ——
+                // 这正是早先「切后台/切回来音乐莫名暂停」的来源之一。
+                self.interrupted = false
+                self.activate()
             }
         }
     }
