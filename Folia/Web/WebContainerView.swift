@@ -111,6 +111,19 @@ final class WebContainerView: UIView {
     /// 只有 `rebuildWebView` 换到临时存储后才置真，用于在页面稳定后收尾。
     private var recoveringFromCrash = false
 
+    /// 最近这段时间里「重建之后又挂掉」的次数，用来识别停不下来的歌单页。
+    ///
+    /// `rebuildQuotaUsed` 那个保护位是靠 `checkFirstPaint()` 复位的：
+    /// 页面只要画出来一次就允许再重建一次。这在「偶发一次回收」上是对的，
+    /// 但歌单页是**一进去就把进程顶死**——每次重建都能画出首屏、用户再点歌单、
+    /// 再被顶死，配额被无限续上，用户感受到的就是「一进歌单就闪退，永远好不了」。
+    /// 所以再加一条与「画没画出来」无关的判据：按时间窗口数死亡次数。
+    private var rebuildDeaths: [Date] = []
+
+    /// 一分钟内因「重建后又挂」死亡达到这个次数，就不再多试，交给界面提示。
+    private static let rebuildDeathWindow: TimeInterval = 60
+    private static let rebuildDeathLimit = 3
+
     /// 正在展示的文件选择面板。必须强引用：只被 `present` 持有的话，
     /// 回调那头可能已经释放，选中文件就永远传不回页面。
     private var filePicker: FilePickerPresenter?
@@ -339,8 +352,16 @@ final class WebContainerView: UIView {
         state.clearLoadFailure()
         state.leaveOfflineCopy()
 
+        // 重建时**允许命中缓存**，不要 `.reloadIgnoringLocalCacheData`。
+        //
+        // 重建的触发条件就是「进程刚被内存压力顶死」。此时再强制绕开缓存，
+        // 新进程必须把所有脚本、封面、可视化引擎重新下载并重新解码一遍，
+        // 内存曲线在刚起来的那几秒直接冲顶 —— 结果就是刚重建好、用户一进歌单
+        // 又被压死，形成「一进歌单就闪退」的死循环。
+        // 用 `.useProtocolCachePolicy` 复用磁盘上已经有的资源，
+        // 又因为新进程池本身是干净的，不会把旧进程的坏状态带过来。
         webView.load(URLRequest(url: Self.startURL,
-                                cachePolicy: .reloadIgnoringLocalCacheData,
+                                cachePolicy: .useProtocolCachePolicy,
                                 timeoutInterval: 30))
         scheduleProgressWatchdog()
 
@@ -363,6 +384,9 @@ final class WebContainerView: UIView {
         // 用户主动要一次重试：保护位复位，允许这一轮再走一次进程自愈。
         rebuiltSinceLaunch = false
         rebuildQuotaUsed = false
+        // 时间窗里攒下的死亡记录也一起清：用户手动点了重试，说明他愿意再试一轮，
+        // 不该因为刚才那几次而当场被判成「重建也没用」。
+        rebuildDeaths.removeAll()
         wakeReloadTried = false
         state.clearLoadFailure()
         // 离线副本上点「重试」的语义是「回线上再试一次」，而不是把本地文件重读一遍。
@@ -2507,6 +2531,24 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
             CrashLog.note("==== web content reclaimed by system after \(Int(backgroundAge))s in background, reloading in place ====")
             CacheSweeper.clearDirty()
             stopKeepAliveTimer()
+            // `reloadFromOrigin()` 只是让旧实例重新读一遍文档，**不会复位任何状态位**，
+            // 也不会重新启动首屏看门狗。
+            //
+            // 之前这里就漏了这两步：`didReachFirstPaint` 还停在旧页面为真的值上，
+            // 重载出来的新文档跑 `checkFirstPaint()` 时第一句 `guard !didReachFirstPaint`
+            // 直接返回 —— 首屏判定从此再也不会执行；看门狗也早已到点跑完，
+            // 不会再有任何兜底。用户看到的就是「大退重进、进歌单之后界面停在加载页/黑屏，
+            // 而且一直不会自己好」。复用同一个实例重载等同于一次新的文档加载，
+            // 这些状态必须与 `rebuildWebView()` / `hardReload()` 保持一致地重建。
+            stallRetries.removeAll()
+            consecutiveLoadFailures = 0
+            // 页面被收回是系统行为，不是页面把进程搞死，所以不占用「重建配额」。
+            // 但 `rebuiltSinceLaunch` 要一起清：否则用户在歌单页反复几次之后，
+            // 这个进程内保护位会把下一次真正的重建判成「重建也没用」直接退离线副本。
+            rebuiltSinceLaunch = false
+            rebuildQuotaUsed = false
+            // `scheduleProgressWatchdog()` 内部已经把首屏相关的三个状态位清零。
+            scheduleProgressWatchdog()
             // 不自动续播：用户此刻多半是刚从别处回来，页面重新起来后由他自己按播放。
             webView.reloadFromOrigin()
             return
@@ -2552,6 +2594,27 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
             //
             // 正确做法是：给重建留一次配额，配额用完再退。退的时候也保持在线
             // 身份（离线副本只影响这一轮显示，不动存储）。
+            // 时间窗计数：与 `checkFirstPaint()` 的复位无关，专门挡住
+            // 「每次都能画出首屏、一进歌单又被顶死」的无尽循环。
+            rebuildDeaths = rebuildDeaths.filter { now.timeIntervalSince($0) < Self.rebuildDeathWindow }
+            rebuildDeaths.append(now)
+            if rebuildDeaths.count > Self.rebuildDeathLimit {
+                // 已经连续把新进程也顶死了。**不退离线副本**：
+                // 离线副本读的是包内那份旧构建，用户进去只看到「功能不全」，
+                // 还会以为自己的歌单丢了 —— 比停在当前页更糟。
+                // 改用原地重载：复用同一个实例（省掉一次完整重建的内存峰值），
+                // 保留默认存储，等用户下一次操作时页面还在。
+                CrashLog.note("==== web content died \(contentProcessRestarts.count)x, rebuilds=\(rebuildDeaths.count) in 60s, reload in place ====")
+                stopKeepAliveTimer()
+                stallRetries.removeAll()
+                consecutiveLoadFailures = 0
+                rebuiltSinceLaunch = false
+                rebuildQuotaUsed = false
+                // 让页面自己重新走一遍首屏判定，否则它永远停在「已就绪」上。
+                scheduleProgressWatchdog()
+                webView.reloadFromOrigin()
+                return
+            }
             if rebuildQuotaUsed {
                 stopKeepAliveTimer()
                 CrashLog.note("==== web content died \(contentProcessRestarts.count)x after rebuild quota exhausted, offline fallback ====")
