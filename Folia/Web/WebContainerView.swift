@@ -1619,7 +1619,7 @@ final class WebContainerView: UIView {
             })();
             """
             webView?.evaluateJavaScript(js) { [weak self] result, _ in
-                guard let self else { return }
+                guard self != nil else { return }
                 if let done = result as? Bool, done { return }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { tick() }
             }
@@ -2092,14 +2092,34 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
     ///
     /// 不实现这一条，WKWebView 会把选文件静默吞掉（Safari 有默认实现，WKWebView 没有）。
     /// 背景视频的「选择本地视频」正好落在这条链上，所以它是「上传了没反应」的正面解法。
+    ///
+    /// 同名方法有两个版本：这里带 `WKOpenPanelParameters`（iOS 18.4 起才可用），
+    /// 下面的用 `AnyObject`，两条都转给 `presentFilePicker`，部署目标不用抬高。
+    @available(iOS 18.4, *)
     func webView(_ webView: WKWebView,
                  runOpenPanelWith parameters: WKOpenPanelParameters,
                  initiatedByFrame frame: WKFrameInfo,
                  completionHandler: @escaping ([URL]?) -> Void) {
+        presentFilePicker(completionHandler)
+    }
+
+    /// 旧系统（iOS 18.4 之前）的选文件回调。
+    ///
+    /// 这条在老系统上就是全量的文件选择入口，页面点任何 `<input type="file">` 都走这里。
+    /// 必须实现：缺了它 `input.click()` 在 WKWebView 里什么都不会发生，
+    /// 背景视频的「选择本地视频」永远选不上，图层也就永远不会出现。
+    func webView(_ webView: WKWebView,
+                 runOpenPanelWithParameters parameters: AnyObject,
+                 initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping ([URL]?) -> Void) {
+        presentFilePicker(completionHandler)
+    }
+
+    /// 两条入口共用的实现：弹一个只放行视频的原生选择面板。
+    private func presentFilePicker(_ completionHandler: @escaping ([URL]?) -> Void) {
         let presenter = FilePickerPresenter()
         filePicker = presenter
-        let kinds = parameters.allowedFileExtensions?.joined(separator: ",") ?? ""
-        CrashLog.note("==== open panel requested \(kinds) ====")
+        CrashLog.note("==== open panel requested ====")
         presenter.present(from: topPresenter) { [weak self] urls in
             CrashLog.note("==== open panel picked \(urls?.count ?? 0) ====")
             completionHandler(urls)
