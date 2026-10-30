@@ -134,10 +134,18 @@ final class WebContainerView: UIView {
         config.allowsInlineMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = []
         config.suppressesIncrementalRendering = false
-        // 视频背景走的是「用户选本地视频 → 页面用 blob:/file: 播放」这条链，
-        // WKWebView 默认禁止 file 页读外部资源，表现为选了视频却仍显示原背景。
-        config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
-        config.preferences.setValue(true, forKey: "allowUniversalAccessFromFileURLs")
+        // **不要**再往 `config.preferences` 上 setValue 那些私有偏好名。
+        //
+        // 早先这里有两行：
+        //     setValue(true, forKey: "allowFileAccessFromFileURLs")
+        //     setValue(true, forKey: "allowUniversalAccessFromFileURLs")
+        // 想的是「让 file:// 页面读本地视频」。这两个名字只是 WebKit 内部的偏好名，
+        // 并不对应 WKPreferences 公开的 KVC 属性；只要系统版本不认，KVC 就抛
+        // NSUnknownKeyException，ObjC 异常 Swift 接不住，直接一路炸到 UIApplicationMain，
+        // 表现是「点图标瞬间退回桌面」—— 每次启动必现。
+        //
+        // 视频背景那条链实际走的是「原生文件选择面板 → 页面拿到 blob:」，
+        // 根本不读 file://，删掉这两行对功能没有影响。
         config.websiteDataStore = forceCleanStore ? .nonPersistent() : .default()
 
         // 让 UA 带 FoliaApp：网页版据此进入「壳模式」，关掉整页 86% 缩放，安全区改用实测值。
