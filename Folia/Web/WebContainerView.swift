@@ -98,8 +98,18 @@ final class WebContainerView: UIView {
     /// 而不是陷入「重建 → 再挂 → 再重建」的黑屏循环。
     private var rebuiltSinceLaunch = false
 
+    /// 重建之后又崩时，额外给一次重建配额。
+    ///
+    /// 原先「重建过一次就退离线副本」的判据太早下结论：轻量页面重建后能稳住，
+    /// 用户只是恰好还在歌单页时才需要第二次机会。给一次就够 ——
+    /// 两次重建之后还挂，说明问题不在壳这一层，继续重试只是黑屏循环。
+    private var rebuildQuotaUsed = false
+
     /// 本次启动是否在使用「崩溃后」的干净存储。成功加载一次后置为 false。
-    private var recoveringFromCrash = CacheSweeper.isStoreDirty
+    ///
+    /// 启动时恒为 false：默认存储已经是干净的，不需要「恢复」。
+    /// 只有 `rebuildWebView` 换到临时存储后才置真，用于在页面稳定后收尾。
+    private var recoveringFromCrash = false
 
     /// 正在展示的文件选择面板。必须强引用：只被 `present` 持有的话，
     /// 回调那头可能已经释放，选中文件就永远传不回页面。
@@ -183,20 +193,23 @@ final class WebContainerView: UIView {
     private func setUp() {
         backgroundColor = UIColor(red: 0x09 / 255, green: 0x09 / 255, blue: 0x0b / 255, alpha: 1)
 
-        // 上次是崩着退出的：这次换一个用完即弃的存储。
+        // **启动一律用默认存储，不再因为「上次崩过」就换临时存储。**
         //
-        // 只清缓存挡不住「大退重进还闪退」—— 页面启动最早期读的是磁盘上的
-        // Service Worker 与 IndexedDB，而 WebContent 进程在读到它们的那一刻就被压死了，
-        // 清缓存的回调甚至还没跑完。换 nonPersistent 目录后这一轮读不到任何旧状态，
-        // 能稳定地进到页面；用户本次的登录态会重新走一遍，
-        // 但「进不去」比「要重新登一次」严重得多。
+        // 早先这里是 `CacheSweeper.isStoreDirty` 决定要不要走 `.nonPersistent()`，
+        // 换来的稳定性极其有限，代价却是把用户的登录态、歌单缓存、播放设置
+        // 全部锁在一个用完即弃的沙盒里 —— 而且这个状态会跨启动延续：
+        // 只要标记没被清掉，用户**每次打开都要重新登录**，且无从恢复。
+        // 真机反馈「大退后再进歌单闪退、登录状态没了」正是这一条。
         //
-        // 一旦进过一次正常页面就调 `CacheSweeper.clearDirty()`，下次恢复默认存储。
-        let recovering = CacheSweeper.isStoreDirty
-        if recovering {
-            CrashLog.note("==== starting with clean (non-persistent) store ====")
+        // 现在改用更保守的自愈：崩溃后只在**当前这一轮**换干净存储重建
+        // （见 `rebuildWebView`），下一次启动照常读用户的真实数据。
+        // 若那一轮里反复崩，退到包内离线副本，也不会牵连登录态。
+        if CacheSweeper.isStoreDirty {
+            // 旧版本遗留的标记：直接作废，把存储还回去。
+            CacheSweeper.clearDirty()
+            CrashLog.note("==== legacy dirty flag cleared on launch ====")
         }
-        let config = makeConfiguration(forceCleanStore: recovering)
+        let config = makeConfiguration(forceCleanStore: false)
 
         webView = WKWebView(frame: bounds, configuration: config)
         // 两个回传通道都要拿到 webView：一个往页面塞本地画的二维码，一个做播放意图。
@@ -262,9 +275,15 @@ final class WebContainerView: UIView {
         webView?.removeFromSuperview()
 
         let previousWantsAudible = resumeAudio
-        // 换存储这件事必须落盘：如果这次重建后进程立刻又挂，下一个进程启动时
-        // 也要知道「该用干净存储」，否则大退重进还是回到同一个坑里。
-        CacheSweeper.markDirty("rebuild-after-crash")
+        // **不再把「换存储」这件事落盘。**
+        //
+        // 原先这里是 `markDirty("rebuild-after-crash")`，本意是「万一下一轮还挂，
+        // 下次启动也直接用干净存储」。实际代价完全失控：
+        // 只要重建过一次，这个标记就落到了 UserDefaults 里；而清除它需要
+        // 「重建后成功加载 + 8 秒内不再挂」，在歌单页这种重灾区根本走不到。
+        // 于是标记长期驻留 —— 之后**每一次启动都用 nonPersistent 存储**，
+        // 用户看到的就是「大退重进登录态没了」，且他自己没有任何办法恢复。
+        // 重建只影响当前这一轮，绝不外溢到下次启动。
         recoveringFromCrash = true
         contentProcessRestarts.removeAll()
         // 保活轮询手里的 `self` 是这一轮的，重建后照旧可用；
@@ -331,6 +350,7 @@ final class WebContainerView: UIView {
         didReachFirstPaint = false
         // 用户主动要一次重试：保护位复位，允许这一轮再走一次进程自愈。
         rebuiltSinceLaunch = false
+        rebuildQuotaUsed = false
         wakeReloadTried = false
         state.clearLoadFailure()
         // 离线副本上点「重试」的语义是「回线上再试一次」，而不是把本地文件重读一遍。
@@ -462,6 +482,13 @@ final class WebContainerView: UIView {
             queue: .main
         ) { [weak self] _ in
             guard let self else { return }
+            // 已经回到前台：清掉进后台时刻。
+            //
+            // 这个值只用来回答「进程被杀时，它在后台待了多久」。
+            // 不清空的话，用户上一次切后台的时间会一直留着，
+            // 之后任何一次进程终止都会算出一个很大的 backgroundAge，
+            // 被判成「系统回收」而走原地重载 —— 真正的崩溃反而漏掉了。
+            self.enteredBackgroundAt = nil
             // 回前台不改变意图：该响的继续响，轮询照旧。
             self.recoverAudioPath(reason: "foreground")
             self.driveBackgroundVideo()
@@ -1275,6 +1302,9 @@ final class WebContainerView: UIView {
                 // 再走一遍自愈（否则这一次成功后，之后真正的 OOM 会被判成
                 // 「重建也没用」而直接退到离线副本）。
                 self.rebuiltSinceLaunch = false
+                // 配额同样复位：页面既然画出来了，说明上一次重建已经成功，
+                // 之后再被回收属于新的一次故障，应该拥有完整的自愈机会。
+                self.rebuildQuotaUsed = false
                 // 首屏就绪再开赞赏弹窗：在那之前 DOM 里的图片还没解码，弹出来是两张空白框。
                 self.installDonateCard()
                 // 版本行要等设置面板挂出来才有 DOM，首屏后每隔一秒补一次，两分钟内有效即停。
@@ -2409,40 +2439,28 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
             return
         }
 
-        // 立刻把「这次运行不干净」落盘。
+        // 不再落盘任何「存储脏」标记。
         //
-        // 进程被系统杀掉时 App 本身还活着，用户随后手动大退也不会有任何收尾回调，
-        // 所以只能在这一刻写 UserDefaults。下一个进程读到它就会改用干净存储，
-        // 这一步是「大退重进仍然闪退」能自愈的前提。
-        //
-        // 注意范围：这一条只用来**自愈**，不在这里清 Service Worker。
-        // 线上站自己注册了 SW，缓存优先的策略让二次启动几乎不打死 WebContent 进程；
-        // 一旦清了 SW，下一个进程必须重新下载整站脚本，反而更容易被压死。
-        // 真正可能被旧数据污染的 MyISAM 式场景（IndexedDB）由页面自己重建。
-        CacheSweeper.markDirty("webcontent-terminated")
+        // 这里原本是 `markDirty("webcontent-terminated")`，用来让**下次启动**
+        // 也用干净存储。代价是登录态跨启动丢失，且清除条件几乎不可达
+        // （见 `rebuildWebView` 里的说明）。现在自愈限定在当前这一轮：
+        // 真崩溃就走下面的重建，下一次启动照常读用户数据。
 
         // 崩溃前正在出声，且用户没按过暂停：重载后把播放续上。
         let shouldResume = Self.wasAudibleInBackground && !userPaused
 
-        // 第一次就换干净存储，而不是在同一个 WKProcessPool 上 `reload()`。
+        // 真崩溃：重建 WebView，但**保留用户的默认存储**。
         //
-        // 「进歌单有概率闪退、退回加载界面」的现场就是：内容进程被回收后，
-        // 壳只做 `reload()`，新的 WebContent 进程仍然挂到同一个进程池、读同一份
-        // Service Worker / IndexedDB / 图标缓存上，页面上那个歌单列表又要一次性
-        // 渲染几百张封面 —— 当场再被压死一次。用户看到的就是「闪一下 → 加载界面」，
-        // 来回卡几次之后进程池已经处于脏状态，连大退重进都会复发。
+        // 「进歌单闪退、退回加载界面」的现场是内容进程被压死：页面上那个歌单列表
+        // 要一次性渲染几百张封面，内存一下顶到上限。解法因此不在「换存储」——
+        // 换存储只能让这一轮读不到旧数据，属于治标，而且代价是丢掉登录态。
+        // 真正要做的是让新进程别重复同样的死法：重建实例 + 新进程池，
+        // 配合下面的 `rebuiltSinceLaunch` 做次数保护，避免无限循环。
         //
-        // 换 `nonPersistent` 存储 + 新进程池是唯一能立刻脱身的路：这一轮读不到任何
-        // 旧数据，页面能稳定起来；登录态由下一次正常启动（脏标记被清掉）恢复。
-        //
-        // 从**第一次**就重建，不再「先原地 reload 一次试试」。
-        // 真机反馈：进歌单时原地 reload 起来的新进程，一进歌单又被打死，
-        // 用户看到的就是「闪两下才勉强回来」。原地 reload 复用同一份脏存储，
-        // 拿到的成功概率太低，而代价是多闪一次。
-        //
-        // 但重建要有一次性的保护：重建后新页面**立刻**又挂，说明问题不在存储，
-        // 再重建一万次也只是黑屏循环。这种情况下退回包内离线副本，
-        // 至少让用户进得去、听得见。
+        // 之前这里是「`.nonPersistent()` + 落盘脏标记」，两个副作用都在坑用户：
+        // 本次会话的登录态没了，且下一次启动继续用临时存储。
+        // 现在 `rebuildWebView` 走的仍是干净存储（只限这一轮），
+        // 但绝不把这件事写进 UserDefaults。
         if wakeRecoveryInFlight {
             // 这次挂掉本来就是「前台唤醒」那一轮在修，别把它判成「重建也救不了」。
             wakeRecoveryInFlight = false
@@ -2452,14 +2470,30 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
             return
         }
         if rebuiltSinceLaunch {
+            // 重建之后又挂：不再无脑退离线副本。
+            //
+            // 早先这里直接 `loadOfflineCopy()`，而 `rebuiltSinceLaunch` 只在
+            // `hardReload()` 里复位 —— 用户在歌单页来回几次之后，本次进程内
+            // 就永久被判死，之后任何一次进程回收都变成「退回加载界面」。
+            // 那正是「大退后再进歌单会闪退」的直接来源。
+            //
+            // 正确做法是：给重建留一次配额，配额用完再退。退的时候也保持在线
+            // 身份（离线副本只影响这一轮显示，不动存储）。
+            if rebuildQuotaUsed {
+                stopKeepAliveTimer()
+                CrashLog.note("==== web content died \(contentProcessRestarts.count)x after rebuild quota exhausted, offline fallback ====")
+                loadOfflineCopy()
+                return
+            }
+            rebuildQuotaUsed = true
+            CrashLog.note("==== web content died \(contentProcessRestarts.count)x after rebuild, one more rebuild ====")
             stopKeepAliveTimer()
-            CrashLog.note("==== web content died again after rebuild, falling back to offline copy ====")
-            loadOfflineCopy()
+            rebuildWebView(resumeAudio: shouldResume)
             return
         }
         stopKeepAliveTimer()
         rebuiltSinceLaunch = true
-        CrashLog.note("==== web content died \(contentProcessRestarts.count)x, rebuilding web view with clean store ====")
+        CrashLog.note("==== web content died \(contentProcessRestarts.count)x, rebuilding web view ====")
         rebuildWebView(resumeAudio: shouldResume)
     }
 
