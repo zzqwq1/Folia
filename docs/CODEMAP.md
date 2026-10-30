@@ -33,11 +33,11 @@
 
 | 被依赖量级 | 模块 |
 | --- | --- |
-| 1024+ | `Folia/www/assets/lucide-icons-BWrg6OBA.js` |
 | 1024+ | `src/types.ts` |
 | 256+ | `src/types/onlineMusic.ts` |
 | 128+ | `src/types/ponder.ts` |
 | 128+ | `src/utils/appPlaybackGuards.ts` |
+| 64+ | `Folia/www/assets/lucide-icons-BWrg6OBA.js` |
 | 64+ | `Folia/www/assets/noLyricLines-BWAU2uCh.js` |
 | 64+ | `Folia/www/assets/preload-helper-vuKwV25Y.js` |
 | 64+ | `src/components/command-palette/types.ts` |
