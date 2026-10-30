@@ -323,17 +323,18 @@ final class AudioSessionController {
             queue: .main
         ) { [weak self] _ in
             guard let self else { return }
-            // **正在播放时不要碰会话。**
+            // 回到前台时**不在这里**动会话。
             //
-            // `setActive(true)` 会让系统重新评估音频资格并把 WebKit 的媒体元素按停一次，
-            // 表现就是「切到桌面再切回来，歌停了一下」。播放中会话本来就好好的，
-            // 什么都不做才是正确做法；真被掐断了（来电、控制中心）由
-            // `WebContainerView.recoverAudioPath` 按需恢复，只在检测到无声时才动手。
+            // 这里的两个分支（没在播就 `reactivate()`、在播就把 `sessionIsActive` 置假）
+            // 都只在「会话确实已经被系统收走」时才有意义，而这一条判断只有
+            // `didBecomeActive` 那一拍才可靠 —— 它紧跟在本通知之后。
+            // 放在这里的问题是：`willEnterForeground` 会先于 `didBecomeActive` 触发，
+            // 用户只是切出去看了一眼别的 App、会话好端端的，也会被置假并走一次
+            // `setActive(true)`，表现为「切回来歌停半拍」。
             //
-            // 只有在「没在播」时无脑激活才不会误伤任何声音。
-            if !self.isPlaying {
-                self.reactivate()
-            }
+            // 统一收口到 `didBecomeActive`：那里先看会话有没有被收走，再看是否需要
+            // 重建通路，重复调用也是幂等的。
+            _ = self
         }
 
         // 状态栏划出控制中心：系统把音频通路静音、状态却仍是「播放中」，
@@ -351,8 +352,22 @@ final class AudioSessionController {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.healIfSilenced()
-            self?.recoverIfInactive()
+            guard let self else { return }
+            // 回来时先看「音频通路是不是被别的 App 占着」。
+            //
+            // 这是「看完抖音回来，界面显示在播放、却一点声音都没有」的正面解法。
+            // 用户去看了个带声的视频，本 App 的会话被系统降级或收走；页面的播放器
+            // 状态仍是 playing，AudioContext 也还是 running，所以壳侧那套
+            // 「先探测再动手」的判据完全看不出问题。
+            //
+            // `.mixWithOthers` 下别家 App 出声时，`isOtherAudioPlaying` 会翻真；
+            // 只在这一刻把 `sessionIsActive` 置假，让下面那次幂等的 `setActive(true)`
+            // 真正跑一遍。它不重建 category，正在响的媒体不会被按停。
+            if self.isPlaying, AVAudioSession.sharedInstance().isOtherAudioPlaying {
+                self.sessionIsActive = false
+            }
+            self.healIfSilenced()
+            self.recoverIfInactive()
         }
     }
 

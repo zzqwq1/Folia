@@ -265,7 +265,10 @@ final class WebContainerView: UIView {
     /// 读不到任何磁盘上的旧 Service Worker / IndexedDB / 缓存。
     ///
     /// `resumeAudio` 为真时，等页面起来后把播放续上（用户感知是「歌断了一下又响」）。
-    private func rebuildWebView(resumeAudio: Bool) {
+    ///
+    /// `cleanStore` 只在线程被「脏数据」拖死的封顶那一轮才为真（见下面的注释），
+    /// 普通崩溃一律保留用户的默认存储 —— 登录态、歌单缓存、播放设置全在里面。
+    private func rebuildWebView(resumeAudio: Bool, cleanStore: Bool = false) {
         // 旧实例的事件全部解绑，避免它继续往原生回传状态。
         reloadObservation = nil
         webView?.stopLoading()
@@ -284,7 +287,7 @@ final class WebContainerView: UIView {
         // 于是标记长期驻留 —— 之后**每一次启动都用 nonPersistent 存储**，
         // 用户看到的就是「大退重进登录态没了」，且他自己没有任何办法恢复。
         // 重建只影响当前这一轮，绝不外溢到下次启动。
-        recoveringFromCrash = true
+        recoveringFromCrash = cleanStore
         contentProcessRestarts.removeAll()
         // 保活轮询手里的 `self` 是这一轮的，重建后照旧可用；
         // 但旧页面那份播放意图已经随进程消失，若还在响就重新记一次。
@@ -292,7 +295,16 @@ final class WebContainerView: UIView {
             Self.wasAudibleInBackground = true
         }
 
-        let config = makeConfiguration(forceCleanStore: true)
+        // **默认保留用户存储。**
+        //
+        // 早先这里无条件走 `.nonPersistent()`，理由是「新实例读不到磁盘上的旧数据，
+        // 也就不会按同样的方式再死一次」。实测这条既治不了根，又直接造成
+        // 「进歌单闪退之后登录态没了」：换存储只是让新页面看不到 cookie 与 localStorage，
+        // 崩溃本身照样发生。歌单页那一次进程死亡的原因是一次性渲染几百张封面把内存顶满，
+        // 跟磁盘数据无关 —— 真正管用的是新进程池 + 下面的配额保护。
+        // 只有「这一轮已经重建过、还是被压死」才动用干净存储做最后一次兜底，
+        // 而且它在 `didFinish` 后就会被收尾，不会带进下一次启动。
+        let config = makeConfiguration(forceCleanStore: cleanStore)
         webView = WKWebView(frame: bounds, configuration: config)
         webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         webView.isOpaque = false
@@ -394,7 +406,7 @@ final class WebContainerView: UIView {
             DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) { [weak self] in
                 guard let self, !self.didReachFirstPaint else { return }
                 CrashLog.note("==== foreground wake: reload did not paint, rebuilding ====")
-                self.rebuildWebView(resumeAudio: resume)
+                self.rebuildWebView(resumeAudio: resume, cleanStore: true)
             }
             return
         }
@@ -836,11 +848,19 @@ final class WebContainerView: UIView {
     private func probeThenRecover(reason: String) {
         let session = AVAudioSession.sharedInstance()
         let silencedHint = session.secondaryAudioShouldBeSilencedHint
+        // 本 App 的会话当前是否还「活着」。
+        //
+        // `setActive(true)` 是幂等的：会话活着时它是空操作，不会按停任何媒体元素。
+        // 但**会话已经被系统收走**时（看完抖音回来、别家播放器抢占），页面里的
+        // `<audio>` 往往仍报 `playing`、AudioContext 也还是 running ——
+        // 只看这两个事实会判成「通路完好」，于是什么都不做，用户听到的就是
+        // 「界面在放、进度在走，一点声音都没有」。所以把会话活性也算进判据。
+        let sessionAlive = session.isOtherAudioPlaying == false
 
         resumeAudioContexts { [weak self] contextOK in
             guard let self else { return }
 
-            if contextOK && !silencedHint {
+            if contextOK && !silencedHint && sessionAlive {
                 // 通路完好：一格音频状态都不要碰，只把「想做待办」结掉。
                 CrashLog.note("==== audio path healthy, skip rebuild (\(reason)) ====")
                 self.brokenProbeStreak = 0
@@ -856,7 +876,7 @@ final class WebContainerView: UIView {
             // 实际上 `none` 只表示「我们没记到页面用的 AudioContext」（播放器把实例
             // 留在闭包里、或者根本不走 WebAudio），页面自己的播放器好得很。
             self.isMediaHealthy { healthy in
-                if healthy && !silencedHint {
+                if healthy && !silencedHint && sessionAlive {
                     CrashLog.note("==== audio path healthy via media probe, skip rebuild (\(reason)) ====")
                     self.brokenProbeStreak = 0
                     self.finishAudioRecovery()
@@ -927,7 +947,18 @@ final class WebContainerView: UIView {
             guard let self else { return }
             self.resumeAudioContexts { [weak self] ok in
                 guard let self else { return }
-                if ok || attempt >= 3 {
+                if ok {
+                    self.resumeAudio(reason: reason)
+                    self.finishAudioRecovery()
+                } else if attempt >= 3 {
+                    // 上下文始终起不来，也不能就此收工。
+                    //
+                    // 早先这里是「attempt 用完就 `resumeAudio` 然后结束」：媒体元素被
+                    // `play()` 起来了，但 AudioContext 还是 suspended —— 页面上进度在走、
+                    // 一点声都没有，而且再没人重试。现在改成保留这一次的补放，
+                    // 同时**不重置**连续判据之外的状态：下一拍保活（4 秒后）会再走一遍，
+                    // 直到上下文真的 running 或者用户自己暂停。
+                    CrashLog.note("==== audio context still suspended after \(attempt) retries (\(reason)) ====")
                     self.resumeAudio(reason: reason)
                     self.finishAudioRecovery()
                 } else {
@@ -1160,9 +1191,23 @@ final class WebContainerView: UIView {
         didReachFirstPaint = false
         documentFinished = false
         hasEvaluatedFirstPaint = false
+        // 每次都重新取一份页面：浏览器缓存里可能留着上一版的入口脚本。
+        _ = fetchIndexStamp()
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.stallTimeout) { [weak self] in
             self?.reportStallIfNeeded()
         }
+    }
+
+    /// 读一次页面里记下的「文档版本」标记（见 `shellBridgeScript` 里的 `__foliaIndexStamp`）。
+    ///
+    /// 只用来在日志里留证据：卡在加载界面时，真机日志里这一行就能区分
+    /// 「脚本报错了」和「脚下这份 HTML / 入口脚本就是旧的那一份」。
+    private func fetchIndexStamp() -> Bool {
+        webView?.evaluateJavaScript("(window.__foliaIndexStamp || '-')") { result, _ in
+            guard let stamp = result as? String, !stamp.isEmpty else { return }
+            CrashLog.note("==== index stamp \(stamp) ====")
+        }
+        return true
     }
 
     private func reportStallIfNeeded() {
@@ -1184,6 +1229,7 @@ final class WebContainerView: UIView {
             'splash=' + (splash ? (splash.className || 'visible') : 'gone'),
             'rootChildren=' + (root ? root.children.length : -1),
             'scripts=' + loaded,
+            'stamp=' + (window.__foliaIndexStamp || '-'),
             'online=' + (navigator.onLine ? '1' : '0')
           ].join('\\n');
         })();
@@ -1235,8 +1281,16 @@ final class WebContainerView: UIView {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
             guard let self else { return }
             self.didReachFirstPaint = false
+            // 重试**必须绕开缓存**。
+            //
+            // 卡在加载界面的现场里有一条是「脚下这份文档/入口脚本本身是旧的那一份」：
+            // 线上发版后文件名带新哈希，而本地那份 HTML 仍指向已经下线的旧入口，
+            // 脚本 404 后 React 永远挂不上（诊断串里就是 `rootChildren=0`）。
+            // 用 `.reloadIgnoringLocalCacheData` 会把这份坏文档再读一遍，等于原地打转；
+            // 回退阈值虽然能兜到离线副本，但那是「能用但功能不全」。
+            // 这里直接按「重新取」发一次请求，坏文档才有机会被换掉。
             self.webView?.load(URLRequest(url: Self.startURL,
-                                          cachePolicy: .reloadIgnoringLocalCacheData,
+                                          cachePolicy: .reloadRevalidatingCacheData,
                                           timeoutInterval: 30))
             self.scheduleProgressWatchdog()
         }
@@ -2111,6 +2165,25 @@ final class WebContainerView: UIView {
           }
         } catch (e) {}
       })();
+      // 线上页的标志性版本号。
+      //
+      // 线上 `index.html` 里把 `#donate-version-num` 写死成了 1.8.5，线上的 JS 文件名
+      // 又是带哈希的（`main-Cboirmya.js`），两者都能用来判断「脚下这份文档是哪一版」。
+      // 这不是界面上的版本号（那个由 `installDonateCard` 改成壳的真实版本），
+      // 只用来识别「浏览器里还留着一份很老的 HTML/入口脚本」。
+      window.__foliaIndexStamp = (function(){
+        try {
+          var hit = document.getElementById('donate-version-num');
+          var text = hit ? (hit.textContent || '').trim() : '';
+          var scripts = document.querySelectorAll('script[src]');
+          var entry = '';
+          for (var i = 0; i < scripts.length; i += 1) {
+            var m = /\\/assets\\/(index|main)-([A-Za-z0-9_-]{6,})\\.js/.exec(scripts[i].src || '');
+            if (m) { entry = m[1] + '-' + m[2]; break; }
+          }
+          return text + '|' + entry;
+        } catch (e) { return ''; }
+      })();
       // 把页面里的未捕获错误回传原生。React 渲染时抛的 TypeError
       // 在 WKWebView 里只会让页面白掉/退回加载界面，控制台看不到，
       // 必须落到本地日志里才能定位是哪个字段为空。
@@ -2486,9 +2559,11 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
                 return
             }
             rebuildQuotaUsed = true
-            CrashLog.note("==== web content died \(contentProcessRestarts.count)x after rebuild, one more rebuild ====")
+            // 第二次仍被压死：这一次才换干净存储 —— 已经排除了「新实例」这一层因素，
+            // 剩下的可能是磁盘上那份数据本身（比如某个 IndexedDB 库损坏）。
+            CrashLog.note("==== web content died \(contentProcessRestarts.count)x after rebuild, retrying with clean store ====")
             stopKeepAliveTimer()
-            rebuildWebView(resumeAudio: shouldResume)
+            rebuildWebView(resumeAudio: shouldResume, cleanStore: true)
             return
         }
         stopKeepAliveTimer()
