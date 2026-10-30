@@ -365,10 +365,108 @@ final class AudioSessionController {
             // 真正跑一遍。它不重建 category，正在响的媒体不会被按停。
             if self.isPlaying, AVAudioSession.sharedInstance().isOtherAudioPlaying {
                 self.sessionIsActive = false
+                // 记下「这一轮确实被别家 App 占过」。
+                //
+                // 只看分数：切到抖音 / 微信看视频再回来，`isOtherAudioPlaying` 在
+                // `didBecomeActive` 这一拍经常已经翻回 false（对方已经在被系统
+                // 淡出），于是 `sessionAlive` 判成真、`healIfSilenced` 又只认
+                // 系统面板，两路都不动手 —— 用户听到的就是「界面在播，没声音」。
+                self.preemptedByOtherApp = true
             }
             self.healIfSilenced()
             self.recoverIfInactive()
+            // 被别家 App 抢占过：**重建一次 category**，再让页面侧把上下文与媒体重新唤醒。
+            //
+            // 这一类抢占丢的是 `setCategory` 那一层（系统把本 App 从「正在播放的
+            // 应用」里摘出去），`setActive(true)` 不重建通路，改不回来。
+            self.healIfPreempted()
+
+            // 同样的抢占，`isOtherAudioPlaying` 常常已经来不及反映。
+            //
+            // 用户切走的这一轮里，只要「进后台时该响」且「回来时不该静音」，通路就
+            // 可能已经被系统摘走；那个标志在切回来那一拍往往已经被对方淡出而翻回 false，
+            // `isPlaying` 也可能因为页面在后台收到过 pause 而早就变成 false。
+            // 两个判据都不成立时，这里补一次无条件重建 —— 代价只是切回来那一拍
+            // 丢一小节声音，比「界面在播、一点声都没有」强得多。
+            //
+            // 用户自己按了暂停的情况（`wantsAudible == false`）已经在这里被排除，
+            // 所以不会出现「我明明停了，换个 App 回来又自己响」。
+            if !self.preemptedByOtherApp,
+               self.backgroundedWhilePlayingOK,
+               self.wantsAudible {
+                self.backgroundedWhilePlayingOK = false
+                self.rebuildPathQuietly()
+            } else {
+                self.backgroundedWhilePlayingOK = false
+            }
         }
+    }
+
+    /// 上一次进后台时，「该响」这个前提是否成立。
+    ///
+    /// 由容器侧在 `didEnterBackground` 时同步过来：它掌握 `wantsAudible` / `userPaused`
+    /// 这两个页面意图，比 `isPlaying`（来自 Now Playing 上报，会被后台的暂停事件改写）更可信。
+    /// 回前台时用完即清，只影响「回来的第一拍」。
+    var backgroundedWhilePlayingOK = false {
+        didSet {
+            guard backgroundedWhilePlayingOK else { return }
+            // 进后台那一刻若还在放，记下 `isPlaying`，
+            // 免得后台的 pause 上报把它冲掉之后判据失真。
+            backgroundedAndPlaying = backgroundedAndPlaying || isPlaying
+        }
+    }
+
+    private var backgroundedAndPlaying = false
+
+    /// 页面侧是否认为自己「该响」。由容器同步，只用于回前台这一拍的判断。
+    var wantsAudible = false
+
+    private func rebuildPathQuietly() {
+        guard isPlaying || backgroundedAndPlaying else { return }
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(.playback, mode: .default, options: Self.categoryOptions)
+            try session.setActive(true)
+            sessionIsActive = true
+            NSLog("[Folia] audio path rebuilt after background (unconditional)")
+        } catch {
+            NSLog("[Folia] audio path rebuild after background failed: \(error.localizedDescription)")
+            sessionIsActive = false
+        }
+        NotificationCenter.default.post(name: .foliaAudioPathRebuilt, object: nil)
+    }
+
+    /// 上一轮切后台期间，音频被别的 App 占用过。
+    ///
+    /// 进后台时先挂上，回前台时按实际结果收窄：`isOtherAudioPlaying` 已经翻回
+    /// false 并不代表通路没丢（对方只是被系统淡出了），所以这里不无条件重建，
+    /// 而是交给 `preemptedByOtherApp` 与页面侧的「有没有在出声」共同判定。
+    private var preemptedByOtherApp = false
+
+    /// 被别家 App 抢占之后回到前台：重建一次通路。
+    ///
+    /// 与 `healIfSilenced` 的分工：那一条管「本 App 自己的系统面板」，
+    /// 这一条管「整个 App 被切到后台、通路被对方拿走」。
+    /// 只有用户明确「该响」（`isPlaying`）时才重建 —— 用户自己按了暂停就不该动，
+    /// 否则表现就是「我明明停了，换个 App 回来又自己响」。
+    private func healIfPreempted() {
+        guard preemptedByOtherApp else { return }
+        preemptedByOtherApp = false
+        guard isPlaying else { return }
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(.playback, mode: .default, options: Self.categoryOptions)
+            try session.setActive(true)
+            sessionIsActive = true
+            NSLog("[Folia] audio path rebuilt after other-app preemption")
+        } catch {
+            NSLog("[Folia] audio path rebuild after preemption failed: \(error.localizedDescription)")
+            sessionIsActive = false
+        }
+        // 页面侧跟上：AudioContext 多半停在 interrupted，媒体元素也被按停过。
+        // 恢复动作仍然只有 WebContainerView 那一份串行通道（见 `probeThenRecover`），
+        // 这里只发信号，不自己补 `play`，避免两路抢同一个 deck。
+        NotificationCenter.default.post(name: .foliaAudioPathRebuilt, object: nil)
     }
 
     /// 状态栏/控制中心盖住本 App 时记一笔，仅在「该响」时。
