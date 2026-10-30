@@ -1,1 +1,1 @@
-aW1wb3J0e05zIGFzIGV9ZnJvbSIuLi9sdWNpZGUtaWNvbnMtQldyZzZPQkEuanMiO3ZhciB0PXtuYW1lOmBjaGV2cm9uLWZpcnN0YCxzaXplOjI0LG5vZGU6W1tgcGF0aGAse2Q6YG0xNyAxOC02LTYgNi02YCxrZXk6YDF5ZXJ4MmB9XSxbYHBhdGhgLHtkOmBNNyA2djEyYCxrZXk6YDFwNTNyNmB9XV19O3Qubm9kZTt2YXIgbj1lKHQpO2V4cG9ydHt0IGFzIF9faWNvbkRhdGEsbiBhcyBkZWZhdWx0fTs=
+import{Ns as e}from"../lucide-icons-BWrg6OBA.js";var t={name:`chevron-first`,size:24,node:[[`path`,{d:`m17 18-6-6 6-6`,key:`1yerx2`}],[`path`,{d:`M7 6v12`,key:`1p53r6`}]]};t.node;var n=e(t);export{t as __iconData,n as default};

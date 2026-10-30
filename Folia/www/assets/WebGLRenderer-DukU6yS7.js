@@ -1,1 +1,1 @@
-aW1wb3J0e1dlYkdMUmVuZGVyZXIgYXMgZX1mcm9tIi4vbGliLUM4Z3pub3lmLmpzIjtleHBvcnR7ZSBhcyBXZWJHTFJlbmRlcmVyfTs=
+import{WebGLRenderer as e}from"./lib-C8gznoyf.js";export{e as WebGLRenderer};

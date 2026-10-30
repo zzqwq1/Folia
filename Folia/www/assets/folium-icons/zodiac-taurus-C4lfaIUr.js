@@ -1,1 +1,1 @@
-aW1wb3J0e05zIGFzIGV9ZnJvbSIuLi9sdWNpZGUtaWNvbnMtQldyZzZPQkEuanMiO3ZhciB0PXtuYW1lOmB6b2RpYWMtdGF1cnVzYCxzaXplOjI0LG5vZGU6W1tgY2lyY2xlYCx7Y3g6YDEyYCxjeTpgMTVgLHI6YDZgLGtleTpgbGhxY21iYH1dLFtgcGF0aGAse2Q6YE0xOCAzQTYgNiAwIDAgMSA2IDNgLGtleTpgMXAzOTllYH1dXX07dC5ub2RlO3ZhciBuPWUodCk7ZXhwb3J0e3QgYXMgX19pY29uRGF0YSxuIGFzIGRlZmF1bHR9Ow==
+import{Ns as e}from"../lucide-icons-BWrg6OBA.js";var t={name:`zodiac-taurus`,size:24,node:[[`circle`,{cx:`12`,cy:`15`,r:`6`,key:`lhqcmb`}],[`path`,{d:`M18 3A6 6 0 0 1 6 3`,key:`1p399e`}]]};t.node;var n=e(t);export{t as __iconData,n as default};

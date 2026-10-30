@@ -1,1 +1,106 @@
-aW1wb3J0IEZvdW5kYXRpb24KCi8vLyDnjrDlnLrorrDlvZXnmoTltKnmuoMv5byC5bi45pel5b+X44CCCi8vLwovLy8g5LmL5YmN55qE44CM6Zeq6YCA44CN5pyJ5Lik56eN5a6M5YWo5LiN5ZCM55qE5oiQ5Zug77yM5pel5b+X5aSW6KeC5Y205LiA5qC377yI6YO95piv5Zue5Yiw5Yqg6L2955WM6Z2i77yJ77yaCi8vLyAgIDEuIE9iakMg5byC5bi45p2A6L+b56iLIOKAlOKAlCBgV0tVUkxTY2hlbWVUYXNrYCDlj5bmtojlkI7ku43ooqvlm57osIPvvIxXZWJLaXQg5oqbIE5TSW50ZXJuYWxJbmNvbnNpc3RlbmN5RXhjZXB0aW9u77ybCi8vLyAgIDIuIOWGheWuuei/m+eoi+iiq+ezu+e7n+WbnuaUtiDigJTigJQg572R6aG16YeMIE9PTSDmiJYgUmVhY3Qg5oqb5pyq5o2V6I636ZSZ6K+v77yM5a+86Ie0IFdlYlByb2Nlc3Mg6YCA5Ye644CCCi8vLyDlj6rmnInnlZnkuIvosIPnlKjmoIjmiY3og73liIbmuIXvvIzmiYDku6Xov5nph4zmiorkuKTogIXpg73okL3liLDmspnnm5LnmoQgRG9jdW1lbnRzIOmHjO+8jAovLy8g55So5oi35Zyo44CM5paH5Lu244CNQXBwIOmHjOWPr+S7peebtOaOpeWPluWHuuadpeOAggplbnVtIENyYXNoTG9nIHsKICAgIC8vLyAqKuavj+asoeWQr+WKqOS4gOS4quaWsOaWh+S7tioq44CCCiAgICAvLy8KICAgIC8vLyDml6nlhYjmiYDmnInlkK/liqjlhbHnlKggYGZvbGlhLWNyYXNoLmxvZ2DvvIzotoXov4cgMjU2S0Ig5bCx5pW05L2T5oiq5pat44CC5Ya35ZCv5Yqo5pe2CiAgICAvLy8gYENhY2hlU3dlZXBlci5zd2VlcE9uQ29sZExhdW5jaCgpYCDkvJrnq4vliLvlhYjlhpnkuIDooYzvvIzkuo7mmK/jgIzkuIrkuIDmrKHov5vnqIvmmK/mgI7kuYjmrbvnmoTjgI0KICAgIC8vLyDpgqPlh6DooYznu4/luLjlnKjnlKjmiLfljrvlj5bml6Xlv5fkuYvliY3lsLHooqvopobnm5bmjokg4oCU4oCUIOi/meaBsOaBsOaYr+WumuS9jeOAjOWkp+mAgOmHjei/m+i/m+atjOWNlemXqumAgOOAjQogICAgLy8vIOWUr+S4gOmcgOimgeeahOivgeaNruOAguaUueaIkOaMieWQr+WKqOWIhuaWh+S7tuWQju+8jOS4iuS4gOS4qui/m+eoi+eahOiusOW9leS4gOWumui/mOWcqOOAggogICAgcHJpdmF0ZSBzdGF0aWMgbGV0IGxpbWl0ID0gMjU2ICogMTAyNAoKICAgIC8vLyDmnKzmrKHlkK/liqjkuJPlsZ7nmoTml6Xlv5fmlofku7bjgILnrKzkuIDmrKHlhpnml6Xlv5fml7bmiY3lu7rjgIIKICAgIHByaXZhdGUgc3RhdGljIHZhciBzZXNzaW9uVVJMOiBVUkw/ID0gewogICAgICAgIGd1YXJkIGxldCBkaXIgPSBGaWxlTWFuYWdlci5kZWZhdWx0LnVybHMoZm9yOiAuZG9jdW1lbnREaXJlY3RvcnksIGluOiAudXNlckRvbWFpbk1hc2spLmZpcnN0IGVsc2UgewogICAgICAgICAgICByZXR1cm4gbmlsCiAgICAgICAgfQogICAgICAgIGxldCBzdGFtcCA9IElTTzg2MDFEYXRlRm9ybWF0dGVyKCkuc3RyaW5nKGZyb206IERhdGUoKSkKICAgICAgICAgICAgLnJlcGxhY2luZ09jY3VycmVuY2VzKG9mOiAiOiIsIHdpdGg6ICItIikKICAgICAgICByZXR1cm4gZGlyLmFwcGVuZGluZ1BhdGhDb21wb25lbnQoImZvbGlhLWNyYXNoLVwoc3RhbXApLmxvZyIpCiAgICB9KCkKCiAgICAvLy8g5YW85a655pen6LCD55So5pa577ya5oyH5ZCR5pys5qyh5ZCv5Yqo6YKj5Lu944CCCiAgICBzdGF0aWMgdmFyIGZpbGVVUkw6IFVSTD8geyBzZXNzaW9uVVJMIH0KCiAgICAvLy8g5L+d55WZ5Yeg5Lu95Y6G5Y+y5ZCv5Yqo5pel5b+X44CC55So5oi35Y+W5pel5b+X5pe26YCa5bi46KaB44CM6L+Z5qyhICsg5LiK5qyh44CN77yM57uZIDYg5Lu96Laz5aSf44CCCiAgICBwcml2YXRlIHN0YXRpYyBsZXQga2VlcFNlc3Npb25zID0gNgoKICAgIHN0YXRpYyBmdW5jIGluc3RhbGwoKSB7CiAgICAgICAgVXNlckRlZmF1bHRzLnN0YW5kYXJkLnNldChmYWxzZSwgZm9yS2V5OiAiTlNBcHBsaWNhdGlvbkNyYXNoT25FeGNlcHRpb25zIikKCiAgICAgICAgLy8g6L+Z5Lik5LiqIEFQSSDopoHnmoTmmK8gQyDlh73mlbDmjIfpkojvvIzkuI3og73mjZXojrfkuIrkuIvmlofvvIwKICAgICAgICAvLyDmiYDku6Xlj6rog73mjIflkJHmlofku7bpobblsYLnmoTlhajlsYDlh73mlbDjgIIKICAgICAgICBOU1NldFVuY2F1Z2h0RXhjZXB0aW9uSGFuZGxlcihmb2xpYVVuY2F1Z2h0RXhjZXB0aW9uSGFuZGxlcikKCiAgICAgICAgZm9yIHNpZyBpbiBbU0lHQUJSVCwgU0lHU0VHViwgU0lHQlVTLCBTSUdJTEwsIFNJR0ZQRV0gewogICAgICAgICAgICBzaWduYWwoc2lnLCBmb2xpYUZhdGFsU2lnbmFsSGFuZGxlcikKICAgICAgICB9CiAgICAgICAgdHJpbU9sZFNlc3Npb25zKCkKICAgIH0KCiAgICBzdGF0aWMgZnVuYyBub3RlKF8gdGV4dDogU3RyaW5nKSB7CiAgICAgICAgd3JpdGUodGV4dCkKICAgIH0KCiAgICBzdGF0aWMgZnVuYyB3cml0ZShfIHRleHQ6IFN0cmluZykgewogICAgICAgIGd1YXJkIGxldCB1cmwgPSBzZXNzaW9uVVJMIGVsc2UgeyByZXR1cm4gfQogICAgICAgIGxldCBzdGFtcCA9IElTTzg2MDFEYXRlRm9ybWF0dGVyKCkuc3RyaW5nKGZyb206IERhdGUoKSkKICAgICAgICBsZXQgbGluZSA9ICJbXChzdGFtcCldIFwodGV4dClcbiIKICAgICAgICBndWFyZCBsZXQgZGF0YSA9IGxpbmUuZGF0YSh1c2luZzogLnV0ZjgpIGVsc2UgeyByZXR1cm4gfQoKICAgICAgICBpZiBsZXQgaGFuZGxlID0gdHJ5PyBGaWxlSGFuZGxlKGZvcldyaXRpbmdUbzogdXJsKSB7CiAgICAgICAgICAgIGRlZmVyIHsgdHJ5PyBoYW5kbGUuY2xvc2UoKSB9CiAgICAgICAgICAgIGxldCBzaXplID0gKHRyeT8gaGFuZGxlLnNlZWtUb0VuZCgpKSA/PyAwCiAgICAgICAgICAgIGlmIHNpemUgPiBVSW50NjQobGltaXQpIHsKICAgICAgICAgICAgICAgIC8vIOi2hei/h+S4iumZkOWwseaVtOS9k+aIquaWre+8jOmBv+WFjeaXoOmZkOWinumVv+aKiuS4gOS4quijheacuueUqOaIt+eahOaymeebkuWhnua7oeOAggogICAgICAgICAgICAgICAgdHJ5PyBoYW5kbGUudHJ1bmNhdGUoYXRPZmZzZXQ6IDApCiAgICAgICAgICAgICAgICB0cnk/IGhhbmRsZS53cml0ZShjb250ZW50c09mOiBkYXRhKQogICAgICAgICAgICB9IGVsc2UgewogICAgICAgICAgICAgICAgdHJ5PyBoYW5kbGUud3JpdGUoY29udGVudHNPZjogZGF0YSkKICAgICAgICAgICAgfQogICAgICAgIH0gZWxzZSB7CiAgICAgICAgICAgIHRyeT8gZGF0YS53cml0ZSh0bzogdXJsLCBvcHRpb25zOiAuYXRvbWljKQogICAgICAgIH0KICAgICAgICBOU0xvZygiW0ZvbGlhXSAlQCIsIHRleHQpCiAgICB9CgogICAgLy8vIOWPquS/neeVmeacgOi/keeahOWHoOS7veWQr+WKqOaXpeW/l++8jOmBv+WFjSBEb2N1bWVudHMg6YeM5aCG5oiQ5LiA54mH44CCCiAgICBwcml2YXRlIHN0YXRpYyBmdW5jIHRyaW1PbGRTZXNzaW9ucygpIHsKICAgICAgICBndWFyZCBsZXQgZGlyID0gRmlsZU1hbmFnZXIuZGVmYXVsdC51cmxzKGZvcjogLmRvY3VtZW50RGlyZWN0b3J5LCBpbjogLnVzZXJEb21haW5NYXNrKS5maXJzdCBlbHNlIHsKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgfQogICAgICAgIGd1YXJkIGxldCBuYW1lcyA9IHRyeT8gRmlsZU1hbmFnZXIuZGVmYXVsdC5jb250ZW50c09mRGlyZWN0b3J5KGF0UGF0aDogZGlyLnBhdGgpIGVsc2UgeyByZXR1cm4gfQogICAgICAgIGxldCBzZXNzaW9ucyA9IG5hbWVzCiAgICAgICAgICAgIC5maWx0ZXIgeyAkMC5oYXNQcmVmaXgoImZvbGlhLWNyYXNoLSIpICYmICQwLmhhc1N1ZmZpeCgiLmxvZyIpIH0KICAgICAgICAgICAgLnNvcnRlZChieTogPikKICAgICAgICBndWFyZCBzZXNzaW9ucy5jb3VudCA+IGtlZXBTZXNzaW9ucyBlbHNlIHsgcmV0dXJuIH0KICAgICAgICBmb3IgbmFtZSBpbiBzZXNzaW9ucy5kcm9wRmlyc3Qoa2VlcFNlc3Npb25zKSB7CiAgICAgICAgICAgIHRyeT8gRmlsZU1hbmFnZXIuZGVmYXVsdC5yZW1vdmVJdGVtKGF0OiBkaXIuYXBwZW5kaW5nUGF0aENvbXBvbmVudChuYW1lKSkKICAgICAgICB9CiAgICB9Cn0KCi8vLyDmnKrmjZXojrfnmoQgT2JqQyDlvILluLjvvJpXS1VSTFNjaGVtZVRhc2sg6YeN5aSN5Zue6LCD44CB5pWw57uE6LaK55WM562J6YO95Lya6LWw5Yiw6L+Z6YeM44CCCnByaXZhdGUgZnVuYyBmb2xpYVVuY2F1Z2h0RXhjZXB0aW9uSGFuZGxlcihfIGV4Y2VwdGlvbjogTlNFeGNlcHRpb24pIHsKICAgIGxldCB0cmFjZSA9IGV4Y2VwdGlvbi5jYWxsU3RhY2tTeW1ib2xzLmpvaW5lZChzZXBhcmF0b3I6ICJcbiIpCiAgICBDcmFzaExvZy53cml0ZSgiIiIKICAgID09PT0gVU5DQVVHSFQgRVhDRVBUSU9OID09PT0KICAgIG5hbWU6IFwoZXhjZXB0aW9uLm5hbWUucmF3VmFsdWUpCiAgICByZWFzb246IFwoZXhjZXB0aW9uLnJlYXNvbiA/PyAiLSIpCiAgICBcKHRyYWNlKQogICAgIiIiKQp9CgovLy8g5L+h5Y+357G75bSp5rqD77yI6YeO5oyH6ZKI44CB5qCI5rqi5Ye677yJ5ou/5LiN5YiwIE5TRXhjZXB0aW9u77yM5Y+q6IO96K6w5L+h5Y+35ZCN44CCCnByaXZhdGUgZnVuYyBmb2xpYUZhdGFsU2lnbmFsSGFuZGxlcihfIGNvZGU6IEludDMyKSB7CiAgICBDcmFzaExvZy53cml0ZSgiPT09PSBGQVRBTCBTSUdOQUwgXChjb2RlKSA9PT09IikKICAgIHNpZ25hbChjb2RlLCBTSUdfREZMKQogICAgcmFpc2UoY29kZSkKfQo=
+import Foundation
+
+/// 现场记录的崩溃/异常日志。
+///
+/// 之前的「闪退」有两种完全不同的成因，日志外观却一样（都是回到加载界面）：
+///   1. ObjC 异常杀进程 —— `WKURLSchemeTask` 取消后仍被回调，WebKit 抛 NSInternalInconsistencyException；
+///   2. 内容进程被系统回收 —— 网页里 OOM 或 React 抛未捕获错误，导致 WebProcess 退出。
+/// 只有留下调用栈才能分清，所以这里把两者都落到沙盒的 Documents 里，
+/// 用户在「文件」App 里可以直接取出来。
+enum CrashLog {
+    /// **每次启动一个新文件**。
+    ///
+    /// 早先所有启动共用 `folia-crash.log`，超过 256KB 就整体截断。冷启动时
+    /// `CacheSweeper.sweepOnColdLaunch()` 会立刻先写一行，于是「上一次进程是怎么死的」
+    /// 那几行经常在用户去取日志之前就被覆盖掉 —— 这恰恰是定位「大退重进进歌单闪退」
+    /// 唯一需要的证据。改成按启动分文件后，上一个进程的记录一定还在。
+    private static let limit = 256 * 1024
+
+    /// 本次启动专属的日志文件。第一次写日志时才建。
+    private static var sessionURL: URL? = {
+        guard let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        let stamp = ISO8601DateFormatter().string(from: Date())
+            .replacingOccurrences(of: ":", with: "-")
+        return dir.appendingPathComponent("folia-crash-\(stamp).log")
+    }()
+
+    /// 兼容旧调用方：指向本次启动那份。
+    static var fileURL: URL? { sessionURL }
+
+    /// 保留几份历史启动日志。用户取日志时通常要「这次 + 上次」，给 6 份足够。
+    private static let keepSessions = 6
+
+    static func install() {
+        UserDefaults.standard.set(false, forKey: "NSApplicationCrashOnExceptions")
+
+        // 这两个 API 要的是 C 函数指针，不能捕获上下文，
+        // 所以只能指向文件顶层的全局函数。
+        NSSetUncaughtExceptionHandler(foliaUncaughtExceptionHandler)
+
+        for sig in [SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGFPE] {
+            signal(sig, foliaFatalSignalHandler)
+        }
+        trimOldSessions()
+    }
+
+    static func note(_ text: String) {
+        write(text)
+    }
+
+    static func write(_ text: String) {
+        guard let url = sessionURL else { return }
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        let line = "[\(stamp)] \(text)\n"
+        guard let data = line.data(using: .utf8) else { return }
+
+        if let handle = try? FileHandle(forWritingTo: url) {
+            defer { try? handle.close() }
+            let size = (try? handle.seekToEnd()) ?? 0
+            if size > UInt64(limit) {
+                // 超过上限就整体截断，避免无限增长把一个装机用户的沙盒塞满。
+                try? handle.truncate(atOffset: 0)
+                try? handle.write(contentsOf: data)
+            } else {
+                try? handle.write(contentsOf: data)
+            }
+        } else {
+            try? data.write(to: url, options: .atomic)
+        }
+        NSLog("[Folia] %@", text)
+    }
+
+    /// 只保留最近的几份启动日志，避免 Documents 里堆成一片。
+    private static func trimOldSessions() {
+        guard let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            return
+        }
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return }
+        let sessions = names
+            .filter { $0.hasPrefix("folia-crash-") && $0.hasSuffix(".log") }
+            .sorted(by: >)
+        guard sessions.count > keepSessions else { return }
+        for name in sessions.dropFirst(keepSessions) {
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent(name))
+        }
+    }
+}
+
+/// 未捕获的 ObjC 异常：WKURLSchemeTask 重复回调、数组越界等都会走到这里。
+private func foliaUncaughtExceptionHandler(_ exception: NSException) {
+    let trace = exception.callStackSymbols.joined(separator: "\n")
+    CrashLog.write("""
+    ==== UNCAUGHT EXCEPTION ====
+    name: \(exception.name.rawValue)
+    reason: \(exception.reason ?? "-")
+    \(trace)
+    """)
+}
+
+/// 信号类崩溃（野指针、栈溢出）拿不到 NSException，只能记信号名。
+private func foliaFatalSignalHandler(_ code: Int32) {
+    CrashLog.write("==== FATAL SIGNAL \(code) ====")
+    signal(code, SIG_DFL)
+    raise(code)
+}

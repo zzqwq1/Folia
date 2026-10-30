@@ -1,1 +1,1 @@
-aW1wb3J0e05zIGFzIGV9ZnJvbSIuLi9sdWNpZGUtaWNvbnMtQldyZzZPQkEuanMiO3ZhciB0PXtuYW1lOmBzaWduYWwtbG93YCxzaXplOjI0LG5vZGU6W1tgcGF0aGAse2Q6YE0yIDIwaC4wMWAsa2V5OmA0aGFqNm9gfV0sW2BwYXRoYCx7ZDpgTTcgMjB2LTRgLGtleTpgajI5NGp4YH1dXX07dC5ub2RlO3ZhciBuPWUodCk7ZXhwb3J0e3QgYXMgX19pY29uRGF0YSxuIGFzIGRlZmF1bHR9Ow==
+import{Ns as e}from"../lucide-icons-BWrg6OBA.js";var t={name:`signal-low`,size:24,node:[[`path`,{d:`M2 20h.01`,key:`4haj6o`}],[`path`,{d:`M7 20v-4`,key:`j294jx`}]]};t.node;var n=e(t);export{t as __iconData,n as default};

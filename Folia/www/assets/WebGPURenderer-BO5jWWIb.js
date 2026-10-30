@@ -1,1 +1,1 @@
-aW1wb3J0e1dlYkdQVVJlbmRlcmVyIGFzIGV9ZnJvbSIuL2xpYi1DOGd6bm95Zi5qcyI7ZXhwb3J0e2UgYXMgV2ViR1BVUmVuZGVyZXJ9Ow==
+import{WebGPURenderer as e}from"./lib-C8gznoyf.js";export{e as WebGPURenderer};

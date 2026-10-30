@@ -1,1 +1,1 @@
-aW1wb3J0e05zIGFzIGV9ZnJvbSIuLi9sdWNpZGUtaWNvbnMtQldyZzZPQkEuanMiO3ZhciB0PXtuYW1lOmBtdXNpYy0zYCxzaXplOjI0LG5vZGU6W1tgY2lyY2xlYCx7Y3g6YDEyYCxjeTpgMThgLHI6YDRgLGtleTpgbTNyOXdzYH1dLFtgcGF0aGAse2Q6YE0xNiAxOFYyYCxrZXk6YDQweDJtNWB9XV19O3Qubm9kZTt2YXIgbj1lKHQpO2V4cG9ydHt0IGFzIF9faWNvbkRhdGEsbiBhcyBkZWZhdWx0fTs=
+import{Ns as e}from"../lucide-icons-BWrg6OBA.js";var t={name:`music-3`,size:24,node:[[`circle`,{cx:`12`,cy:`18`,r:`4`,key:`m3r9ws`}],[`path`,{d:`M16 18V2`,key:`40x2m5`}]]};t.node;var n=e(t);export{t as __iconData,n as default};

@@ -1,1 +1,0 @@
-import{Oi as e}from"./noLyricLines-BWAU2uCh.js";var t=e((e,t)=>({tabs:null,list:null,registerTabs:n=>(e({tabs:n}),()=>{t().tabs===n&&e({tabs:null})}),registerList:n=>(e({list:n}),()=>{t().list===n&&e({list:null})})}));export{t};

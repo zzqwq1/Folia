@@ -2019,7 +2019,7 @@ final class WebContainerView: UIView {
           var QUARK_URL = 'https://pan.quark.cn/s/934c480d5b9c';
 
           // 两个版本号都取壳带进来的实际版本（Info.plist 的 MARKETING_VERSION）：
-          // 线上页的常量停在 1.8.5，沿用会让「当前版本」永远显示旧值。
+          // 旧版线上页的常量停在 1.8.5，沿用会让「当前版本」永远显示旧值。
           // 壳内「最新版本」=「当前版本」，因为包就是从网盘拿的最新那一份。
           var cur = window.__foliaAppVersion || '';
           var latest = cur;
@@ -2060,7 +2060,7 @@ final class WebContainerView: UIView {
 
           setTimeout(function(){ mask.classList.add('show'); }, 1200);
 
-          // 更新公告（#update-mask）在壳里不弹：版本号已经固定成 2.0，
+          // 更新公告（#update-mask）在壳里不弹：版本号已经固定成壳的实际版本，
           // 这条「新版本已发布」对已装最新包的人只是打扰。网盘入口保留在赞赏弹窗里。
           var updateMask = document.getElementById('update-mask');
           if (updateMask) { updateMask.style.display = 'none'; }
@@ -2247,7 +2247,7 @@ final class WebContainerView: UIView {
       document.documentElement.setAttribute('data-folia-shell', '1');
       window.__FOLIA_SHELL__ = 'ios';
       // 壳的实际版本（project.yml 的 MARKETING_VERSION），赞赏弹窗的「当前版本」用它，
-      // 免得线上页停在旧常量上，用户以为装错了包。
+      // 免得壳里显示的版本和装上的包对不上。
       window.__foliaAppVersion = '\(appVersion)';
       // 更新公告在壳里不弹。页面脚本自带 UA 判定会提前 return，本不该弹；
       // 这里在文档开始时先钉一条样式兜底，任何时序下都压住 #update-mask。
@@ -2496,10 +2496,13 @@ final class WebContainerView: UIView {
       })();
       // 线上页的标志性版本号。
       //
-      // 线上 `index.html` 里把 `#donate-version-num` 写死成了 1.8.5，线上的 JS 文件名
-      // 又是带哈希的（`main-Cboirmya.js`），两者都能用来判断「脚下这份文档是哪一版」。
+      // 线上 `index.html` 里整张赞赏卡（`#donate-version-num`）与实际部署的前端版本
+      // （`/assets/main-<hash>.js`）都能用来判断「脚下这份文档是哪一版」。
       // 这不是界面上的版本号（那个由 `installDonateCard` 改成壳的真实版本），
       // 只用来识别「浏览器里还留着一份很老的 HTML/入口脚本」。
+      //
+      // 新版（2.1）的 `index.html` 由 `vite build` 生成，里面没有赞赏卡，
+      // `#donate-version-num` 取不到：此时标记里那一项就是空串，只有入口脚本的哈希可看。
       window.__foliaIndexStamp = (function(){
         try {
           var hit = document.getElementById('donate-version-num');

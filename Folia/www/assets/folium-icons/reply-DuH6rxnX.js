@@ -1,1 +1,1 @@
-aW1wb3J0e05zIGFzIGV9ZnJvbSIuLi9sdWNpZGUtaWNvbnMtQldyZzZPQkEuanMiO3ZhciB0PXtuYW1lOmByZXBseWAsc2l6ZToyNCxub2RlOltbYHBhdGhgLHtkOmBNMjAgMTh2LTJhNCA0IDAgMCAwLTQtNEg0YCxrZXk6YDV2bWNwa2B9XSxbYHBhdGhgLHtkOmBtOSAxNy01LTUgNS01YCxrZXk6YG52bGMxMWB9XV19O3Qubm9kZTt2YXIgbj1lKHQpO2V4cG9ydHt0IGFzIF9faWNvbkRhdGEsbiBhcyBkZWZhdWx0fTs=
+import{Ns as e}from"../lucide-icons-BWrg6OBA.js";var t={name:`reply`,size:24,node:[[`path`,{d:`M20 18v-2a4 4 0 0 0-4-4H4`,key:`5vmcpk`}],[`path`,{d:`m9 17-5-5 5-5`,key:`nvlc11`}]]};t.node;var n=e(t);export{t as __iconData,n as default};

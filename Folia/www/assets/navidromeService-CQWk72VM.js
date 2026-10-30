@@ -1,1 +1,1 @@
-aW1wb3J0e2hyIGFzIGUseHIgYXMgdH1mcm9tIi4vYm9vdHN0cmFwLUIxU01vRkFZLmpzIjtleHBvcnR7ZSBhcyBnZXROYXZpZHJvbWVDb25maWcsdCBhcyBuYXZpZHJvbWVBcGl9Ow==
+import{hr as e,xr as t}from"./bootstrap-B1SMoFAY.js";export{e as getNavidromeConfig,t as navidromeApi};

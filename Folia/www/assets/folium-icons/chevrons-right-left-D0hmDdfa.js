@@ -1,1 +1,1 @@
-aW1wb3J0e05zIGFzIGV9ZnJvbSIuLi9sdWNpZGUtaWNvbnMtQldyZzZPQkEuanMiO3ZhciB0PXtuYW1lOmBjaGV2cm9ucy1yaWdodC1sZWZ0YCxzaXplOjI0LG5vZGU6W1tgcGF0aGAse2Q6YG0yMCAxNy01LTUgNS01YCxrZXk6YDMweDBuMmB9XSxbYHBhdGhgLHtkOmBtNCAxNyA1LTUtNS01YCxrZXk6YDE2c3BmNGB9XV19O3Qubm9kZTt2YXIgbj1lKHQpO2V4cG9ydHt0IGFzIF9faWNvbkRhdGEsbiBhcyBkZWZhdWx0fTs=
+import{Ns as e}from"../lucide-icons-BWrg6OBA.js";var t={name:`chevrons-right-left`,size:24,node:[[`path`,{d:`m20 17-5-5 5-5`,key:`30x0n2`}],[`path`,{d:`m4 17 5-5-5-5`,key:`16spf4`}]]};t.node;var n=e(t);export{t as __iconData,n as default};

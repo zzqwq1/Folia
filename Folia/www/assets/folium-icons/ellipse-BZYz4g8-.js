@@ -1,1 +1,1 @@
-aW1wb3J0e05zIGFzIGV9ZnJvbSIuLi9sdWNpZGUtaWNvbnMtQldyZzZPQkEuanMiO3ZhciB0PXtuYW1lOmBlbGxpcHNlYCxzaXplOjI0LG5vZGU6W1tgZWxsaXBzZWAse2N4OmAxMmAsY3k6YDEyYCxyeDpgMTBgLHJ5OmA2YCxrZXk6YHN3ZGt0NGB9XV19O3Qubm9kZTt2YXIgbj1lKHQpO2V4cG9ydHt0IGFzIF9faWNvbkRhdGEsbiBhcyBkZWZhdWx0fTs=
+import{Ns as e}from"../lucide-icons-BWrg6OBA.js";var t={name:`ellipse`,size:24,node:[[`ellipse`,{cx:`12`,cy:`12`,rx:`10`,ry:`6`,key:`swdkt4`}]]};t.node;var n=e(t);export{t as __iconData,n as default};

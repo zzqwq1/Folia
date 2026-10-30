@@ -1,1 +1,38 @@
-aW1wb3J0IEZvdW5kYXRpb24KaW1wb3J0IENvcmVJbWFnZQppbXBvcnQgVUlLaXQKCi8vLyDnlJ/miJDmiavnoIHnmbvlvZXnlKjnmoTkuoznu7TnoIEgZGF0YVVSTOOAggovLy8g572R6aG154mI5oqK5o6l5Y+j6L+U5Zue55qEIGBxcmltZ2Ag55u05o6l5aGe6L+bIGA8aW1nIHNyYz5g77yM5omA5Lul6L+Z6YeM57uZ5a6M5pW055qEIGBkYXRhOmltYWdlL3BuZztiYXNlNjQsYOOAggplbnVtIFFSVG9vbCB7CiAgICBwcml2YXRlIHN0YXRpYyBsZXQgY29udGV4dCA9IENJQ29udGV4dChvcHRpb25zOiBuaWwpCgogICAgLy8g5q+P5qyh5paw5bu65ruk6ZWc77yaQ0lGaWx0ZXIg5LiN5piv57q/56iL5a6J5YWo55qE77yM5qGl5o6l5bGC5Zyo5bm25Y+R6Zif5YiX6YeM6LCD55So44CCCiAgICAvLyDnlKggc2V0VmFsdWUg6ICM5LiN5pivIENJRmlsdGVyQnVpbHRpbnMg55qE57G75Z6L5YyW5bGe5oCn77yM6YG/5YWNIFNESyDniYjmnKzlt67lvILlr7zoh7TnvJbor5HkuI3ov4fjgIIKICAgIHByaXZhdGUgc3RhdGljIGZ1bmMgbWFrZUZpbHRlcigpIC0+IENJRmlsdGVyPyB7CiAgICAgICAgZ3VhcmQgbGV0IGZpbHRlciA9IENJRmlsdGVyKG5hbWU6ICJDSVFSQ29kZUdlbmVyYXRvciIpIGVsc2UgeyByZXR1cm4gbmlsIH0KICAgICAgICBmaWx0ZXIuc2V0VmFsdWUoIk0iLCBmb3JLZXk6ICJpbnB1dENvcnJlY3Rpb25MZXZlbCIpCiAgICAgICAgcmV0dXJuIGZpbHRlcgogICAgfQoKICAgIHN0YXRpYyBmdW5jIGRhdGFVUkwoZm9yIHRleHQ6IFN0cmluZywgc2NhbGU6IENHRmxvYXQgPSAxMCkgLT4gU3RyaW5nPyB7CiAgICAgICAgZ3VhcmQgbGV0IGRhdGEgPSB0ZXh0LmRhdGEodXNpbmc6IC51dGY4KSwgbGV0IGZpbHRlciA9IG1ha2VGaWx0ZXIoKSBlbHNlIHsgcmV0dXJuIG5pbCB9CiAgICAgICAgZmlsdGVyLnNldFZhbHVlKGRhdGEsIGZvcktleTogImlucHV0TWVzc2FnZSIpCiAgICAgICAgZ3VhcmQgbGV0IG91dHB1dCA9IGZpbHRlci5vdXRwdXRJbWFnZSBlbHNlIHsgcmV0dXJuIG5pbCB9CgogICAgICAgIC8vIOaUvuWkp+WQjumHjee7mO+8jOmBv+WFjeWwj+WbvuS4iuWxj+WPkeeziuOAggogICAgICAgIGxldCBzY2FsZWQgPSBvdXRwdXQudHJhbnNmb3JtZWQoYnk6IENHQWZmaW5lVHJhbnNmb3JtKHNjYWxlWDogc2NhbGUsIHk6IHNjYWxlKSkKCiAgICAgICAgLy8g5LqM57u056CB6KeE6IyD6KaB5rGC5Zub5ZGo55WZIDQg5Liq5qih5Z2X5a6955qE6Z2Z5Yy677yIcXVpZXQgem9uZe+8ieOAggogICAgICAgIC8vIOS5i+WJjeWPquWBmuS6huWQjOWwuuWvuOeahOeZveiJsuW6le+8jOetieS6juayoeacieeVmeeZve+8jOaJq+eggeWZqOivhuWIq+S4jeWHuuadpeOAggogICAgICAgIC8vIENJSW1hZ2Ug6YeM6YCP5piO5Yy655qEIFJHQiDmmK8gMO+8jOebtOaOpemTuueZveS8muaKiumAj+aYjuW9k+aIkOm7keiJsueUu+WHuuadpe+8jAogICAgICAgIC8vIOaJgOS7peWFiOeUqOeZveiJsuW6lemTuua7oeaVtOW8oOeUu+W4g++8jOWGjeaKiuS6jOe7tOeggeWQiOaIkOS4iuWOu+OAggogICAgICAgIGxldCBxdWlldCA9IHNjYWxlICogNAogICAgICAgIGxldCBjYW52YXMgPSBzY2FsZWQuZXh0ZW50Lmluc2V0QnkoZHg6IC1xdWlldCwgZHk6IC1xdWlldCkKICAgICAgICBsZXQgd2hpdGUgPSBDSUltYWdlKGNvbG9yOiAud2hpdGUpLmNyb3BwZWQodG86IGNhbnZhcykKICAgICAgICBsZXQgcGFkZGVkID0gc2NhbGVkLmNvbXBvc2l0ZWQob3Zlcjogd2hpdGUpCiAgICAgICAgZ3VhcmQgbGV0IGNnSW1hZ2UgPSBjb250ZXh0LmNyZWF0ZUNHSW1hZ2UocGFkZGVkLCBmcm9tOiBjYW52YXMpIGVsc2UgeyByZXR1cm4gbmlsIH0KICAgICAgICBndWFyZCBsZXQgcG5nID0gVUlJbWFnZShjZ0ltYWdlOiBjZ0ltYWdlKS5wbmdEYXRhKCkgZWxzZSB7IHJldHVybiBuaWwgfQogICAgICAgIHJldHVybiAiZGF0YTppbWFnZS9wbmc7YmFzZTY0LCIgKyBwbmcuYmFzZTY0RW5jb2RlZFN0cmluZygpCiAgICB9Cn0K
+import Foundation
+import CoreImage
+import UIKit
+
+/// 生成扫码登录用的二维码 dataURL。
+/// 网页版把接口返回的 `qrimg` 直接塞进 `<img src>`，所以这里给完整的 `data:image/png;base64,`。
+enum QRTool {
+    private static let context = CIContext(options: nil)
+
+    // 每次新建滤镜：CIFilter 不是线程安全的，桥接层在并发队列里调用。
+    // 用 setValue 而不是 CIFilterBuiltins 的类型化属性，避免 SDK 版本差异导致编译不过。
+    private static func makeFilter() -> CIFilter? {
+        guard let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
+        filter.setValue("M", forKey: "inputCorrectionLevel")
+        return filter
+    }
+
+    static func dataURL(for text: String, scale: CGFloat = 10) -> String? {
+        guard let data = text.data(using: .utf8), let filter = makeFilter() else { return nil }
+        filter.setValue(data, forKey: "inputMessage")
+        guard let output = filter.outputImage else { return nil }
+
+        // 放大后重绘，避免小图上屏发糊。
+        let scaled = output.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+
+        // 二维码规范要求四周留 4 个模块宽的静区（quiet zone）。
+        // 之前只做了同尺寸的白色底，等于没有留白，扫码器识别不出来。
+        // CIImage 里透明区的 RGB 是 0，直接铺白会把透明当成黑色画出来，
+        // 所以先用白色底铺满整张画布，再把二维码合成上去。
+        let quiet = scale * 4
+        let canvas = scaled.extent.insetBy(dx: -quiet, dy: -quiet)
+        let white = CIImage(color: .white).cropped(to: canvas)
+        let padded = scaled.composited(over: white)
+        guard let cgImage = context.createCGImage(padded, from: canvas) else { return nil }
+        guard let png = UIImage(cgImage: cgImage).pngData() else { return nil }
+        return "data:image/png;base64," + png.base64EncodedString()
+    }
+}

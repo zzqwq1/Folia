@@ -1,1 +1,1 @@
-aW1wb3J0e05zIGFzIGV9ZnJvbSIuLi9sdWNpZGUtaWNvbnMtQldyZzZPQkEuanMiO3ZhciB0PXtuYW1lOmB3aWZpLWxvd2Asc2l6ZToyNCxub2RlOltbYHBhdGhgLHtkOmBNMTIgMjBoLjAxYCxrZXk6YHpla2VpOWB9XSxbYHBhdGhgLHtkOmBNOC41IDE2LjQyOWE1IDUgMCAwIDEgNyAwYCxrZXk6YDFieWNmZmB9XV19O3Qubm9kZTt2YXIgbj1lKHQpO2V4cG9ydHt0IGFzIF9faWNvbkRhdGEsbiBhcyBkZWZhdWx0fTs=
+import{Ns as e}from"../lucide-icons-BWrg6OBA.js";var t={name:`wifi-low`,size:24,node:[[`path`,{d:`M12 20h.01`,key:`zekei9`}],[`path`,{d:`M8.5 16.429a5 5 0 0 1 7 0`,key:`1bycff`}]]};t.node;var n=e(t);export{t as __iconData,n as default};

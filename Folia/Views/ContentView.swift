@@ -1,1 +1,146 @@
-aW1wb3J0IFN3aWZ0VUkKaW1wb3J0IFVJS2l0CmltcG9ydCBDb21iaW5lCgpzdHJ1Y3QgQ29udGVudFZpZXc6IFZpZXcgewogICAgQEVudmlyb25tZW50T2JqZWN0IHByaXZhdGUgdmFyIHN0YXRlOiBXZWJTaGVsbFN0YXRlCgogICAgdmFyIGJvZHk6IHNvbWUgVmlldyB7CiAgICAgICAgWlN0YWNrIHsKICAgICAgICAgICAgQ29sb3IocmVkOiAweDA5IC8gMjU1LCBncmVlbjogMHgwOSAvIDI1NSwgYmx1ZTogMHgwYiAvIDI1NSkKICAgICAgICAgICAgICAgIC5pZ25vcmVzU2FmZUFyZWEoKQogICAgICAgICAgICBXZWJTaGVsbFZpZXcoc3RhdGU6IHN0YXRlKQogICAgICAgICAgICAgICAgLmlnbm9yZXNTYWZlQXJlYSgpCiAgICAgICAgICAgIGlmIHN0YXRlLnNob3dzQmxvY2tpbmdOb3RpY2UsIGxldCByZWFzb24gPSBzdGF0ZS5vZmZsaW5lUmVhc29uIHsKICAgICAgICAgICAgICAgIE9mZmxpbmVOb3RpY2UocmVhc29uOiByZWFzb24sIGRldGFpbDogc3RhdGUuZmFpbHVyZURldGFpbCkgeyBzdGF0ZS5yZWxvYWQoKSB9CiAgICAgICAgICAgIH0gZWxzZSBpZiBzdGF0ZS5pc09mZmxpbmVDb3B5IHsKICAgICAgICAgICAgICAgIC8vIOW3sue7j+WbnumAgOWIsOWMheWGheWJr+acrOOAgemhtemdouacrOi6q+WPr+eUqO+8muWPqueVmeS4gOadoeS4jeaMoeaTjeS9nOeahOaPkOekuuadoeOAggogICAgICAgICAgICAgICAgT2ZmbGluZUJhbm5lciB7IHN0YXRlLnJlbG9hZCgpIH0KICAgICAgICAgICAgICAgICAgICAuZml4ZWRTaXplKCkKICAgICAgICAgICAgICAgICAgICAuZnJhbWUobWF4SGVpZ2h0OiAuaW5maW5pdHksIGFsaWdubWVudDogLnRvcCkKICAgICAgICAgICAgICAgICAgICAucGFkZGluZygudG9wLCA4KQogICAgICAgICAgICAgICAgICAgIC5wYWRkaW5nKC5ob3Jpem9udGFsLCAxNikKICAgICAgICAgICAgfQogICAgICAgIH0KICAgICAgICAuc3RhdHVzQmFySGlkZGVuKGZhbHNlKQogICAgICAgIC8vIOWbnuWJjeWPsOaXtioq5LiN6KaBKirlnKjov5nph4zlho3osIMgYHJlYWN0aXZhdGUoKWDjgIIKICAgICAgICAvLwogICAgICAgIC8vIGBzZXRBY3RpdmUodHJ1ZSlgIOeahOWJr+S9nOeUqOaYr+iuqeezu+e7n+mHjeaWsOivhOS8sOacrCBBcHAg55qE6Z+z6aKR6LWE5qC877yMCiAgICAgICAgLy8gV2ViS2l0IOeahOWqkuS9k+WFg+e0oOS8muWboOatpOiiq+aMieWBnOS4gOasoSDigJTigJQg55So5oi355yL5Yiw55qE5bCx5piv44CM5YiH5Zue5qGM6Z2i5YaN5Zue5p2l77yM5q2M5YGc5LqG5LiA5LiL44CN44CCCiAgICAgICAgLy8g5Zue5YmN5Y+w55qE5Lya6K+d5oGi5aSN57uf5LiA55SxIFdlYkNvbnRhaW5lclZpZXcg55qEIGByZWNvdmVyQXVkaW9QYXRoYCDotJ/otKPvvJoKICAgICAgICAvLyDlroPlhYjliKTmlq3pobXpnaLmmK/kuI3mmK/nnJ/nmoTooqvpnZnpn7PkuobvvIzmsqHooqvmjpDmlq3lsLHlrozlhajkuI3liqjpn7PpopHjgIIKICAgIH0KfQoKLy8vIOaKiuaJv+i9vee6v+S4iumhteeahCBXS1dlYlZpZXcg5a655Zmo5o6l6L+bIFN3aWZ0VUnjgIIKc3RydWN0IFdlYlNoZWxsVmlldzogVUlWaWV3UmVwcmVzZW50YWJsZSB7CiAgICBsZXQgc3RhdGU6IFdlYlNoZWxsU3RhdGUKCiAgICBmdW5jIG1ha2VVSVZpZXcoY29udGV4dDogQ29udGV4dCkgLT4gV2ViQ29udGFpbmVyVmlldyB7CiAgICAgICAgV2ViQ29udGFpbmVyVmlldyhzdGF0ZTogc3RhdGUpCiAgICB9CgogICAgZnVuYyB1cGRhdGVVSVZpZXcoXyB1aVZpZXc6IFdlYkNvbnRhaW5lclZpZXcsIGNvbnRleHQ6IENvbnRleHQpIHt9Cn0KCi8vLyDnur/kuIrpobXliqDovb3lpLHotKXml7bnmoTmj5DnpLrlsYLjgILlo7PliqDovb3nmoTmmK/nur/kuIrnq5nngrnvvIzmlq3nvZHlsLHmsqHmnInpobXpnaLlj6/nlKjvvIwKLy8vIOW/hemhu+e7meWHuuWPr+ingeeahOivtOaYjuS4jumHjeivleWFpeWPo++8jOS4jeiDveiuqeeUqOaIt+mdouWvueS4gOeJh+m7keOAggovLy8KLy8vIOi/meS4gOWxguW/hemhu+iHquW3seaMoeS9j+aVtOWxj++8muS4i+mdoueahCBgV2ViU2hlbGxWaWV3YCDmmK8gYFVJVmlld1JlcHJlc2VudGFibGVgCi8vLyDvvIhXS1dlYlZpZXfvvInvvIxVSUtpdCDop4blm77kvJrmiorokL3lnKjoh6rlt7HouqvkuIrnmoTop6bmkbjnm7TmjqXlkIPmjonvvIwKLy8vIFN3aWZ0VUkg5Y+q55S75LiN5o6l55qE5Y2h54mH5rWu5Zyo5LiK6Z2i5pe244CM6YeN6K+V44CN5oyJ5LiL5Y675rKh5pyJ5Lu75L2V5Y+N5bqU44CCCi8vLyDmiYDku6Xov5nph4zpk7rmu6HkuIDlsYLnnJ/lrp7og4zmma8gKyBgY29udGVudFNoYXBlYO+8jOiuqeinpuaRuOWFiOiQveWIsOWNoeeJh+S4iuOAggpwcml2YXRlIHN0cnVjdCBPZmZsaW5lTm90aWNlOiBWaWV3IHsKICAgIGxldCByZWFzb246IFN0cmluZwogICAgbGV0IGRldGFpbDogU3RyaW5nPwogICAgbGV0IHJldHJ5OiAoKSAtPiBWb2lkCgogICAgdmFyIGJvZHk6IHNvbWUgVmlldyB7CiAgICAgICAgWlN0YWNrIHsKICAgICAgICAgICAgQ29sb3IuYmxhY2sub3BhY2l0eSgwLjcyKQogICAgICAgICAgICAgICAgLmlnbm9yZXNTYWZlQXJlYSgpCiAgICAgICAgICAgICAgICAvLyDnqbrnmb3lpITkuZ/lkJ7mjonop6bmkbjvvIzpgb/lhY3nqb/pgI/liLDkuIvpnaLnmoTnvZHpobXjgIIKICAgICAgICAgICAgICAgIC5jb250ZW50U2hhcGUoUmVjdGFuZ2xlKCkpCiAgICAgICAgICAgICAgICAub25UYXBHZXN0dXJlIHt9CgogICAgICAgICAgICBWU3RhY2soc3BhY2luZzogMTYpIHsKICAgICAgICAgICAgICAgIEltYWdlKHN5c3RlbU5hbWU6ICJ3aWZpLmV4Y2xhbWF0aW9ubWFyayIpCiAgICAgICAgICAgICAgICAgICAgLmZvbnQoLnN5c3RlbShzaXplOiA0NCwgd2VpZ2h0OiAubGlnaHQpKQogICAgICAgICAgICAgICAgVGV4dChyZWFzb24pCiAgICAgICAgICAgICAgICAgICAgLmZvbnQoLmhlYWRsaW5lKQogICAgICAgICAgICAgICAgVGV4dCgiRm9saWEg6ZyA6KaB6IGU572R5Yqg6L295pKt5pS+6aG177yM6K+35qOA5p+l572R57uc5ZCO6YeN6K+V44CCIikKICAgICAgICAgICAgICAgICAgICAuZm9udCguZm9vdG5vdGUpCiAgICAgICAgICAgICAgICAgICAgLm11bHRpbGluZVRleHRBbGlnbm1lbnQoLmNlbnRlcikKICAgICAgICAgICAgICAgICAgICAuZm9yZWdyb3VuZFN0eWxlKC5zZWNvbmRhcnkpCiAgICAgICAgICAgICAgICBUZXh0KCLnvZHnu5zmgaLlpI3lkI7kvJroh6rliqjph43mlrDliqDovb3jgIIiKQogICAgICAgICAgICAgICAgICAgIC5mb250KC5jYXB0aW9uMikKICAgICAgICAgICAgICAgICAgICAuZm9yZWdyb3VuZFN0eWxlKC50ZXJ0aWFyeSkKICAgICAgICAgICAgICAgIGlmIGxldCBkZXRhaWwgewogICAgICAgICAgICAgICAgICAgIC8vIOeOsOWcuuS/oeaBr++8muecn+acuuS4iuS4gOecvOiDveeci+WHuuaYr+iEmuacrOayoei3keWIsOOAgei/mOaYr+i1hOa6kOayoeS4i+adpeOAggogICAgICAgICAgICAgICAgICAgIFRleHQoZGV0YWlsKQogICAgICAgICAgICAgICAgICAgICAgICAuZm9udCguc3lzdGVtKHNpemU6IDEwLCBkZXNpZ246IC5tb25vc3BhY2VkKSkKICAgICAgICAgICAgICAgICAgICAgICAgLmZvcmVncm91bmRTdHlsZSgudGVydGlhcnkpCiAgICAgICAgICAgICAgICAgICAgICAgIC5tdWx0aWxpbmVUZXh0QWxpZ25tZW50KC5sZWFkaW5nKQogICAgICAgICAgICAgICAgICAgICAgICAuZnJhbWUobWF4V2lkdGg6IC5pbmZpbml0eSwgYWxpZ25tZW50OiAubGVhZGluZykKICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgIEJ1dHRvbihhY3Rpb246IHJldHJ5KSB7CiAgICAgICAgICAgICAgICAgICAgVGV4dCgi6YeN6K+VIikKICAgICAgICAgICAgICAgICAgICAgICAgLmZvbnQoLmJvZHkud2VpZ2h0KC5zZW1pYm9sZCkpCiAgICAgICAgICAgICAgICAgICAgICAgIC5mcmFtZShtYXhXaWR0aDogLmluZmluaXR5KQogICAgICAgICAgICAgICAgICAgICAgICAucGFkZGluZygudmVydGljYWwsIDEyKQogICAgICAgICAgICAgICAgICAgICAgICAuY29udGVudFNoYXBlKFJlY3RhbmdsZSgpKQogICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgLmJ1dHRvblN0eWxlKC5ib3JkZXJlZFByb21pbmVudCkKICAgICAgICAgICAgICAgIC50aW50KC5ibHVlKQogICAgICAgICAgICAgICAgLmNvbnRlbnRTaGFwZShSZWN0YW5nbGUoKSkKICAgICAgICAgICAgfQogICAgICAgICAgICAucGFkZGluZygyNCkKICAgICAgICAgICAgLmZyYW1lKG1heFdpZHRoOiAzMjApCiAgICAgICAgICAgIC5iYWNrZ3JvdW5kKC51bHRyYVRoaW5NYXRlcmlhbCwgaW46IFJvdW5kZWRSZWN0YW5nbGUoY29ybmVyUmFkaXVzOiAyMCwgc3R5bGU6IC5jb250aW51b3VzKSkKICAgICAgICAgICAgLnBhZGRpbmcoMjQpCiAgICAgICAgfQogICAgfQp9CgovLy8g5bey57uP6LeR5Zyo5YyF5YaF56a757q/5Ymv5pys5LiK5pe255qE6L275o+Q56S644CCCi8vLwovLy8g6aG16Z2i5pys6Lqr5piv5Y+v55So55qE77yM5omA5Lul5LiN6IO95YOPIGBPZmZsaW5lTm90aWNlYCDpgqPmoLfpk7rmu6HmlbTlsY/miormkq3mlL7lmajmjKHkvY/igJTigJQKLy8vIOeUqOaIt+S8muS7peS4uiBBcHAg5Z2P5LqG44CC6L+Z6YeM5Y+q5Zyo6aG26YOo55WZ5LiA5p2h57uG56qE55qE6K+05piOICsg44CM6YeN5paw6L+e5o6l44CN77yMCi8vLyDngrnlroznlLHlrrnlmajph43mlrDotbDkuIDmrKHnur/kuIrliqDovb3vvIzmiJDlip/lsLHoh6rlt7HmtojlpLHjgIIKLy8vCi8vLyDnlKggYFVJS2l0YCDnmoTmjInpkq7ogIzkuI3mmK8gU3dpZnRVSSBgQnV0dG9uYO+8mui/meS4gOadoea1ruWcqCBgV0tXZWJWaWV3YCDkuIrpnaLvvIwKLy8vIOaMiemSruWMuuWfn+S5i+WkluayoeacieS7u+S9leWPr+eCueeahOiDjOaZr++8jFN3aWZ0VUkg55qE5ZG95Lit5rWL6K+V5ou/5LiN5Yiw6JC954K577yMCi8vLyDnlKjmiLfngrnjgIzph43mlrDov57mjqXjgI3kvJrlg4/ngrnlnKjkuIDlnZfnjrvnkoPkuIrigJTigJTnnIvotbfmnaXlsLHmmK/jgIzmjInpkq7lnY/kuobjgIFBcHAg6Zeq6YCA5LqG44CN44CCCi8vLyDljp/nlJ/nmoQgYFVJQnV0dG9uYCDotbDnnJ/lrp7lk43lupTpk77vvIzokL3ngrnkuIDlrprlhYjliLDlroPmiYvkuIrjgIIKcHJpdmF0ZSBzdHJ1Y3QgT2ZmbGluZUJhbm5lcjogVUlWaWV3UmVwcmVzZW50YWJsZSB7CiAgICBsZXQgcmVjb25uZWN0OiAoKSAtPiBWb2lkCgogICAgZnVuYyBtYWtlVUlWaWV3KGNvbnRleHQ6IENvbnRleHQpIC0+IFVJQnV0dG9uIHsKICAgICAgICBsZXQgYnV0dG9uID0gVUlCdXR0b24odHlwZTogLnN5c3RlbSkKICAgICAgICBidXR0b24uc2V0VGl0bGUoIuemu+e6v+eJiOacrCDCtyDlip/og73lj6/og73kuI3lhaggIMK3ICDph43mlrDov57mjqUiLCBmb3I6IC5ub3JtYWwpCiAgICAgICAgYnV0dG9uLnRpdGxlTGFiZWw/LmZvbnQgPSAuc3lzdGVtRm9udChvZlNpemU6IDEyLCB3ZWlnaHQ6IC5zZW1pYm9sZCkKICAgICAgICBidXR0b24udGl0bGVMYWJlbD8ubnVtYmVyT2ZMaW5lcyA9IDEKICAgICAgICBidXR0b24uc2V0VGl0bGVDb2xvcihVSUNvbG9yLndoaXRlLndpdGhBbHBoYUNvbXBvbmVudCgwLjkpLCBmb3I6IC5ub3JtYWwpCiAgICAgICAgYnV0dG9uLmJhY2tncm91bmRDb2xvciA9IFVJQ29sb3IuYmxhY2sud2l0aEFscGhhQ29tcG9uZW50KDAuNTUpCiAgICAgICAgYnV0dG9uLmxheWVyLmNvcm5lclJhZGl1cyA9IDE1CiAgICAgICAgYnV0dG9uLmxheWVyLmJvcmRlcldpZHRoID0gMC41CiAgICAgICAgYnV0dG9uLmxheWVyLmJvcmRlckNvbG9yID0gVUlDb2xvci53aGl0ZS53aXRoQWxwaGFDb21wb25lbnQoMC4xMikuY2dDb2xvcgogICAgICAgIGJ1dHRvbi5jb250ZW50RWRnZUluc2V0cyA9IFVJRWRnZUluc2V0cyh0b3A6IDgsIGxlZnQ6IDE0LCBib3R0b206IDgsIHJpZ2h0OiAxNCkKICAgICAgICBidXR0b24uYWRkVGFyZ2V0KGNvbnRleHQuY29vcmRpbmF0b3IsCiAgICAgICAgICAgICAgICAgICAgICAgICBhY3Rpb246ICNzZWxlY3RvcihDb29yZGluYXRvci50YXApLAogICAgICAgICAgICAgICAgICAgICAgICAgZm9yOiAudG91Y2hVcEluc2lkZSkKICAgICAgICByZXR1cm4gYnV0dG9uCiAgICB9CgogICAgZnVuYyB1cGRhdGVVSVZpZXcoXyB1aVZpZXc6IFVJQnV0dG9uLCBjb250ZXh0OiBDb250ZXh0KSB7CiAgICAgICAgY29udGV4dC5jb29yZGluYXRvci5yZWNvbm5lY3QgPSByZWNvbm5lY3QKICAgIH0KCiAgICBmdW5jIG1ha2VDb29yZGluYXRvcigpIC0+IENvb3JkaW5hdG9yIHsgQ29vcmRpbmF0b3IocmVjb25uZWN0OiByZWNvbm5lY3QpIH0KCiAgICBmaW5hbCBjbGFzcyBDb29yZGluYXRvcjogTlNPYmplY3QgewogICAgICAgIHZhciByZWNvbm5lY3Q6ICgpIC0+IFZvaWQKICAgICAgICBpbml0KHJlY29ubmVjdDogQGVzY2FwaW5nICgpIC0+IFZvaWQpIHsgc2VsZi5yZWNvbm5lY3QgPSByZWNvbm5lY3QgfQogICAgICAgIEBvYmpjIGZ1bmMgdGFwKCkgeyByZWNvbm5lY3QoKSB9CiAgICB9Cn0K
+import SwiftUI
+import UIKit
+import Combine
+
+struct ContentView: View {
+    @EnvironmentObject private var state: WebShellState
+
+    var body: some View {
+        ZStack {
+            Color(red: 0x09 / 255, green: 0x09 / 255, blue: 0x0b / 255)
+                .ignoresSafeArea()
+            WebShellView(state: state)
+                .ignoresSafeArea()
+            if state.showsBlockingNotice, let reason = state.offlineReason {
+                OfflineNotice(reason: reason, detail: state.failureDetail) { state.reload() }
+            } else if state.isOfflineCopy {
+                // 已经回退到包内副本、页面本身可用：只留一条不挡操作的提示条。
+                OfflineBanner { state.reload() }
+                    .fixedSize()
+                    .frame(maxHeight: .infinity, alignment: .top)
+                    .padding(.top, 8)
+                    .padding(.horizontal, 16)
+            }
+        }
+        .statusBarHidden(false)
+        // 回前台时**不要**在这里再调 `reactivate()`。
+        //
+        // `setActive(true)` 的副作用是让系统重新评估本 App 的音频资格，
+        // WebKit 的媒体元素会因此被按停一次 —— 用户看到的就是「切回桌面再回来，歌停了一下」。
+        // 回前台的会话恢复统一由 WebContainerView 的 `recoverAudioPath` 负责：
+        // 它先判断页面是不是真的被静音了，没被掐断就完全不动音频。
+    }
+}
+
+/// 把承载线上页的 WKWebView 容器接进 SwiftUI。
+struct WebShellView: UIViewRepresentable {
+    let state: WebShellState
+
+    func makeUIView(context: Context) -> WebContainerView {
+        WebContainerView(state: state)
+    }
+
+    func updateUIView(_ uiView: WebContainerView, context: Context) {}
+}
+
+/// 线上页加载失败时的提示层。壳加载的是线上站点，断网就没有页面可用，
+/// 必须给出可见的说明与重试入口，不能让用户面对一片黑。
+///
+/// 这一层必须自己挡住整屏：下面的 `WebShellView` 是 `UIViewRepresentable`
+/// （WKWebView），UIKit 视图会把落在自己身上的触摸直接吃掉，
+/// SwiftUI 只画不接的卡片浮在上面时「重试」按下去没有任何反应。
+/// 所以这里铺满一层真实背景 + `contentShape`，让触摸先落到卡片上。
+private struct OfflineNotice: View {
+    let reason: String
+    let detail: String?
+    let retry: () -> Void
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.72)
+                .ignoresSafeArea()
+                // 空白处也吞掉触摸，避免穿透到下面的网页。
+                .contentShape(Rectangle())
+                .onTapGesture {}
+
+            VStack(spacing: 16) {
+                Image(systemName: "wifi.exclamationmark")
+                    .font(.system(size: 44, weight: .light))
+                Text(reason)
+                    .font(.headline)
+                Text("Folia 需要联网加载播放页，请检查网络后重试。")
+                    .font(.footnote)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+                Text("网络恢复后会自动重新加载。")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                if let detail {
+                    // 现场信息：真机上一眼能看出是脚本没跑到、还是资源没下来。
+                    Text(detail)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                Button(action: retry) {
+                    Text("重试")
+                        .font(.body.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.blue)
+                .contentShape(Rectangle())
+            }
+            .padding(24)
+            .frame(maxWidth: 320)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .padding(24)
+        }
+    }
+}
+
+/// 已经跑在包内离线副本上时的轻提示。
+///
+/// 页面本身是可用的，所以不能像 `OfflineNotice` 那样铺满整屏把播放器挡住——
+/// 用户会以为 App 坏了。这里只在顶部留一条细窄的说明 + 「重新连接」，
+/// 点完由容器重新走一次线上加载，成功就自己消失。
+///
+/// 用 `UIKit` 的按钮而不是 SwiftUI `Button`：这一条浮在 `WKWebView` 上面，
+/// 按钮区域之外没有任何可点的背景，SwiftUI 的命中测试拿不到落点，
+/// 用户点「重新连接」会像点在一块玻璃上——看起来就是「按钮坏了、App 闪退了」。
+/// 原生的 `UIButton` 走真实响应链，落点一定先到它手上。
+private struct OfflineBanner: UIViewRepresentable {
+    let reconnect: () -> Void
+
+    func makeUIView(context: Context) -> UIButton {
+        let button = UIButton(type: .system)
+        button.setTitle("离线版本 · 功能可能不全  ·  重新连接", for: .normal)
+        button.titleLabel?.font = .systemFont(ofSize: 12, weight: .semibold)
+        button.titleLabel?.numberOfLines = 1
+        button.setTitleColor(UIColor.white.withAlphaComponent(0.9), for: .normal)
+        button.backgroundColor = UIColor.black.withAlphaComponent(0.55)
+        button.layer.cornerRadius = 15
+        button.layer.borderWidth = 0.5
+        button.layer.borderColor = UIColor.white.withAlphaComponent(0.12).cgColor
+        button.contentEdgeInsets = UIEdgeInsets(top: 8, left: 14, bottom: 8, right: 14)
+        button.addTarget(context.coordinator,
+                         action: #selector(Coordinator.tap),
+                         for: .touchUpInside)
+        return button
+    }
+
+    func updateUIView(_ uiView: UIButton, context: Context) {
+        context.coordinator.reconnect = reconnect
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(reconnect: reconnect) }
+
+    final class Coordinator: NSObject {
+        var reconnect: () -> Void
+        init(reconnect: @escaping () -> Void) { self.reconnect = reconnect }
+        @objc func tap() { reconnect() }
+    }
+}

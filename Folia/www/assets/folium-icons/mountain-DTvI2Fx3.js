@@ -1,1 +1,1 @@
-aW1wb3J0e05zIGFzIGV9ZnJvbSIuLi9sdWNpZGUtaWNvbnMtQldyZzZPQkEuanMiO3ZhciB0PXtuYW1lOmBtb3VudGFpbmAsc2l6ZToyNCxub2RlOltbYHBhdGhgLHtkOmBtOCAzIDQgOCA1LTUgNSAxNUgyTDggM3pgLGtleTpgb3RrbDYzYH1dXX07dC5ub2RlO3ZhciBuPWUodCk7ZXhwb3J0e3QgYXMgX19pY29uRGF0YSxuIGFzIGRlZmF1bHR9Ow==
+import{Ns as e}from"../lucide-icons-BWrg6OBA.js";var t={name:`mountain`,size:24,node:[[`path`,{d:`m8 3 4 8 5-5 5 15H2L8 3z`,key:`otkl63`}]]};t.node;var n=e(t);export{t as __iconData,n as default};

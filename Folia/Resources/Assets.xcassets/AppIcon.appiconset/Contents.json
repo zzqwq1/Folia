@@ -1,1 +1,62 @@
-ewogICJpbWFnZXMiIDogWwogICAgewogICAgICAiZmlsZW5hbWUiIDogImljb24tMTAyNC5wbmciLAogICAgICAiaWRpb20iIDogInVuaXZlcnNhbCIsCiAgICAgICJwbGF0Zm9ybSIgOiAiaW9zIiwKICAgICAgInNpemUiIDogIjEwMjR4MTAyNCIKICAgIH0sCiAgICB7CiAgICAgICJmaWxlbmFtZSIgOiAiaWNvbi0yMEAyeC5wbmciLAogICAgICAiaWRpb20iIDogImlwaG9uZSIsCiAgICAgICJzY2FsZSIgOiAiMngiLAogICAgICAic2l6ZSIgOiAiMjB4MjAiCiAgICB9LAogICAgewogICAgICAiZmlsZW5hbWUiIDogImljb24tMjBAM3gucG5nIiwKICAgICAgImlkaW9tIiA6ICJpcGhvbmUiLAogICAgICAic2NhbGUiIDogIjN4IiwKICAgICAgInNpemUiIDogIjIweDIwIgogICAgfSwKICAgIHsKICAgICAgImZpbGVuYW1lIiA6ICJpY29uLTI5QDJ4LnBuZyIsCiAgICAgICJpZGlvbSIgOiAiaXBob25lIiwKICAgICAgInNjYWxlIiA6ICIyeCIsCiAgICAgICJzaXplIiA6ICIyOXgyOSIKICAgIH0sCiAgICB7CiAgICAgICJmaWxlbmFtZSIgOiAiaWNvbi0yOUAzeC5wbmciLAogICAgICAiaWRpb20iIDogImlwaG9uZSIsCiAgICAgICJzY2FsZSIgOiAiM3giLAogICAgICAic2l6ZSIgOiAiMjl4MjkiCiAgICB9LAogICAgewogICAgICAiZmlsZW5hbWUiIDogImljb24tNDBAMngucG5nIiwKICAgICAgImlkaW9tIiA6ICJpcGhvbmUiLAogICAgICAic2NhbGUiIDogIjJ4IiwKICAgICAgInNpemUiIDogIjQweDQwIgogICAgfSwKICAgIHsKICAgICAgImZpbGVuYW1lIiA6ICJpY29uLTQwQDN4LnBuZyIsCiAgICAgICJpZGlvbSIgOiAiaXBob25lIiwKICAgICAgInNjYWxlIiA6ICIzeCIsCiAgICAgICJzaXplIiA6ICI0MHg0MCIKICAgIH0sCiAgICB7CiAgICAgICJmaWxlbmFtZSIgOiAiaWNvbi02MEAyeC5wbmciLAogICAgICAiaWRpb20iIDogImlwaG9uZSIsCiAgICAgICJzY2FsZSIgOiAiMngiLAogICAgICAic2l6ZSIgOiAiNjB4NjAiCiAgICB9LAogICAgewogICAgICAiZmlsZW5hbWUiIDogImljb24tNjBAM3gucG5nIiwKICAgICAgImlkaW9tIiA6ICJpcGhvbmUiLAogICAgICAic2NhbGUiIDogIjN4IiwKICAgICAgInNpemUiIDogIjYweDYwIgogICAgfQogIF0sCiAgImluZm8iIDogewogICAgImF1dGhvciIgOiAieGNvZGUiLAogICAgInZlcnNpb24iIDogMQogIH0KfQo=
+{
+  "images" : [
+    {
+      "filename" : "icon-1024.png",
+      "idiom" : "universal",
+      "platform" : "ios",
+      "size" : "1024x1024"
+    },
+    {
+      "filename" : "icon-20@2x.png",
+      "idiom" : "iphone",
+      "scale" : "2x",
+      "size" : "20x20"
+    },
+    {
+      "filename" : "icon-20@3x.png",
+      "idiom" : "iphone",
+      "scale" : "3x",
+      "size" : "20x20"
+    },
+    {
+      "filename" : "icon-29@2x.png",
+      "idiom" : "iphone",
+      "scale" : "2x",
+      "size" : "29x29"
+    },
+    {
+      "filename" : "icon-29@3x.png",
+      "idiom" : "iphone",
+      "scale" : "3x",
+      "size" : "29x29"
+    },
+    {
+      "filename" : "icon-40@2x.png",
+      "idiom" : "iphone",
+      "scale" : "2x",
+      "size" : "40x40"
+    },
+    {
+      "filename" : "icon-40@3x.png",
+      "idiom" : "iphone",
+      "scale" : "3x",
+      "size" : "40x40"
+    },
+    {
+      "filename" : "icon-60@2x.png",
+      "idiom" : "iphone",
+      "scale" : "2x",
+      "size" : "60x60"
+    },
+    {
+      "filename" : "icon-60@3x.png",
+      "idiom" : "iphone",
+      "scale" : "3x",
+      "size" : "60x60"
+    }
+  ],
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}

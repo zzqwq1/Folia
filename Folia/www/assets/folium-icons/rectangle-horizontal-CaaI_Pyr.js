@@ -1,1 +1,1 @@
-aW1wb3J0e05zIGFzIGV9ZnJvbSIuLi9sdWNpZGUtaWNvbnMtQldyZzZPQkEuanMiO3ZhciB0PXtuYW1lOmByZWN0YW5nbGUtaG9yaXpvbnRhbGAsc2l6ZToyNCxub2RlOltbYHJlY3RgLHt3aWR0aDpgMjBgLGhlaWdodDpgMTJgLHg6YDJgLHk6YDZgLHJ4OmAyYCxrZXk6YDlsdTNnNmB9XV19O3Qubm9kZTt2YXIgbj1lKHQpO2V4cG9ydHt0IGFzIF9faWNvbkRhdGEsbiBhcyBkZWZhdWx0fTs=
+import{Ns as e}from"../lucide-icons-BWrg6OBA.js";var t={name:`rectangle-horizontal`,size:24,node:[[`rect`,{width:`20`,height:`12`,x:`2`,y:`6`,rx:`2`,key:`9lu3g6`}]]};t.node;var n=e(t);export{t as __iconData,n as default};

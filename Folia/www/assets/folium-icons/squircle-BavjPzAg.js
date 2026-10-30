@@ -1,1 +1,1 @@
-aW1wb3J0e05zIGFzIGV9ZnJvbSIuLi9sdWNpZGUtaWNvbnMtQldyZzZPQkEuanMiO3ZhciB0PXtuYW1lOmBzcXVpcmNsZWAsc2l6ZToyNCxub2RlOltbYHBhdGhgLHtkOmBNMTIgM2M3LjIgMCA5IDEuOCA5IDlzLTEuOCA5LTkgOS05LTEuOC05LTkgMS44LTkgOS05YCxrZXk6YGdhcmZrY2B9XV19O3Qubm9kZTt2YXIgbj1lKHQpO2V4cG9ydHt0IGFzIF9faWNvbkRhdGEsbiBhcyBkZWZhdWx0fTs=
+import{Ns as e}from"../lucide-icons-BWrg6OBA.js";var t={name:`squircle`,size:24,node:[[`path`,{d:`M12 3c7.2 0 9 1.8 9 9s-1.8 9-9 9-9-1.8-9-9 1.8-9 9-9`,key:`garfkc`}]]};t.node;var n=e(t);export{t as __iconData,n as default};

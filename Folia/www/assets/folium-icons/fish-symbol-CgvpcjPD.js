@@ -1,1 +1,1 @@
-aW1wb3J0e05zIGFzIGV9ZnJvbSIuLi9sdWNpZGUtaWNvbnMtQldyZzZPQkEuanMiO3ZhciB0PXtuYW1lOmBmaXNoLXN5bWJvbGAsc2l6ZToyNCxub2RlOltbYHBhdGhgLHtkOmBNMiAxNnM5LTE1IDIwLTRDMTEgMjMgMiA4IDIgOGAsa2V5OmBoNG9oNG9gfV1dfTt0Lm5vZGU7dmFyIG49ZSh0KTtleHBvcnR7dCBhcyBfX2ljb25EYXRhLG4gYXMgZGVmYXVsdH07
+import{Ns as e}from"../lucide-icons-BWrg6OBA.js";var t={name:`fish-symbol`,size:24,node:[[`path`,{d:`M2 16s9-15 20-4C11 23 2 8 2 8`,key:`h4oh4o`}]]};t.node;var n=e(t);export{t as __iconData,n as default};

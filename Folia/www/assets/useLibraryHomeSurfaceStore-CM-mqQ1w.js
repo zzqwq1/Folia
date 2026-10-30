@@ -1,1 +1,1 @@
-aW1wb3J0e09pIGFzIGV9ZnJvbSIuL25vTHlyaWNMaW5lcy1CdVB0QmJWTy5qcyI7dmFyIHQ9ZSgoZSx0KT0+KHt0YWJzOm51bGwsbGlzdDpudWxsLHJlZ2lzdGVyVGFiczpuPT4oZSh7dGFiczpufSksKCk9Pnt0KCkudGFicz09PW4mJmUoe3RhYnM6bnVsbH0pfSkscmVnaXN0ZXJMaXN0Om49PihlKHtsaXN0Om59KSwoKT0+e3QoKS5saXN0PT09biYmZSh7bGlzdDpudWxsfSl9KX0pKTtleHBvcnR7dH07
+import{Oi as e}from"./noLyricLines-BuPtBbVO.js";var t=e((e,t)=>({tabs:null,list:null,registerTabs:n=>(e({tabs:n}),()=>{t().tabs===n&&e({tabs:null})}),registerList:n=>(e({list:n}),()=>{t().list===n&&e({list:null})})}));export{t};

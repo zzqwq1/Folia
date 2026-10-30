@@ -1,1 +1,1 @@
-aWYoJ3NlcnZpY2VXb3JrZXInIGluIG5hdmlnYXRvcikge3dpbmRvdy5hZGRFdmVudExpc3RlbmVyKCdsb2FkJywgKCkgPT4ge25hdmlnYXRvci5zZXJ2aWNlV29ya2VyLnJlZ2lzdGVyKCcvc3cuanMnLCB7IHNjb3BlOiAnLycgfSl9KX0=
+if('serviceWorker' in navigator) {window.addEventListener('load', () => {navigator.serviceWorker.register('/sw.js', { scope: '/' })})}
