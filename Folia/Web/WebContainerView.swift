@@ -1222,10 +1222,15 @@ final class WebContainerView: UIView {
     private func checkFirstPaint() {
         guard !didReachFirstPaint else { return }
         webView?.evaluateJavaScript(
-            "(document.getElementById('app-splash') ? 0 : 1)"
+            "(function(){var s=document.getElementById('app-splash');"
+                + "var r=document.getElementById('root');"
+                + "return (s ? 0 : 1) + (r && r.children.length > 0 ? 2 : 0);})()"
         ) { [weak self] result, _ in
             guard let self else { return }
-            if let painted = result as? Int, painted == 1 {
+            let flags = (result as? NSNumber)?.intValue ?? 0
+            // 遮罩被移走、或者 React 已经往 `#root` 里挂了东西（此时遮罩多半正在淡出）：
+            // 都算首屏到了。只看遮罩的话，遮罩被 CSS 隐藏而没被删掉时会一直判成没就绪。
+            if flags & 1 == 1 || flags & 2 == 2 {
                 DispatchQueue.main.async {
                     self.didReachFirstPaint = true
                     self.hasEvaluatedFirstPaint = true
@@ -2283,6 +2288,13 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
 
     /// 服务器已经有响应、导航真正开始了：这里才敢把「离线副本」标记撤掉。
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        // 主框架还在跑，说明上次的断网/失败现场已经不成立了。不在这里清的话，
+        // 提示层会一直盖在已经画好的页面上（`showsBlockingNotice` 只认 `offlineReason`），
+        // 用户看到的就是「页面明明能开，却一直停在加载界面，只能点重试」。
+        if state.offlineReason != nil {
+            CrashLog.note("==== main frame committed, clearing stale failure notice ====")
+            state.clearLoadFailure()
+        }
         guard pendingOnlineHandoff else { return }
         pendingOnlineHandoff = false
         isShowingOfflineCopy = false
