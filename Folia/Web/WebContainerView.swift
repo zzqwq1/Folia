@@ -3,6 +3,7 @@ import SwiftUI
 import WebKit
 import Combine
 import AVFoundation
+import UniformTypeIdentifiers
 
 /// 承载官方网页版的 WKWebView 容器。
 ///
@@ -88,6 +89,13 @@ final class WebContainerView: UIView {
 
     /// 本次启动是否在使用「崩溃后」的干净存储。成功加载一次后置为 false。
     private var recoveringFromCrash = CacheSweeper.isStoreDirty
+
+    /// 正在展示的文件选择面板。必须强引用：只被 `present` 持有的话，
+    /// 回调那头可能已经释放，选中文件就永远传不回页面。
+    private var filePicker: FilePickerPresenter?
+
+    /// 上一次从页面拿到的「哪首、放到哪」。壳补放之后用它把声音的位置校回字幕的进度。
+    private var lastKnownPlayback: (src: String, position: Double)?
 
     init(state: WebShellState) {
         self.state = state
@@ -481,6 +489,23 @@ final class WebContainerView: UIView {
         AudioSessionController.shared.updatePlaybackState(true)
         CrashLog.note("==== intent audible (state=\(UIApplication.shared.applicationState.rawValue)) ====")
         startKeepAliveTimer()
+        // 页面开始播放的这一刻，位置由页面自己掌握：先记下来，
+        // 后面壳补放之后如果偏差太大，用它把声音校回字幕的进度。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self, self.wantsAudible, !self.userPaused else { return }
+            let js = """
+            (function(){
+              var el = window.__foliaAudioKeeper ? window.__foliaAudioKeeper.current() : null;
+              return el ? {src: el.src, position: el.position} : null;
+            })();
+            """
+            self.webView?.evaluateJavaScript(js) { [weak self] result, _ in
+                guard let dict = result as? [String: Any],
+                      let src = dict["src"] as? String, !src.isEmpty else { return }
+                let position = (dict["position"] as? NSNumber)?.doubleValue ?? 0
+                self?.lastKnownPlayback = (src, position)
+            }
+        }
     }
 
     /// 页面自己暂停了。
@@ -877,6 +902,11 @@ final class WebContainerView: UIView {
         webView?.evaluateJavaScript(js) { result, _ in
             guard let flag = result as? String, flag == "resumed" else { return }
             CrashLog.note("==== audio resumed (\(reason)) ====")
+        }
+        // 补放之后再对一次位置：被系统按停过的元素会从它停下的那一秒接着走，
+        // 而字幕按页面时钟一直在前进，不管的话声音就整体落后一段。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            self?.healAudioDrift(reason: reason)
         }
         // 上下文是异步起搏的，等一帧再补一次：
         // 只在上一次没放成（元素仍被按停）时才动手，不会和上面那次叠着放。
@@ -1365,6 +1395,17 @@ final class WebContainerView: UIView {
             // 切后台前再补一条最新进度：系统随后就会把 AudioContext 钉住，
             // 页面的 currentTime 不再前进，原生只能拿到这条里的数字。
             reportProgress();
+            // 同时把「哪首、放到哪」留在原生手上：后台被按停再补放时，
+            // 壳要把声音的位置校回这个进度，否则会落后一整个后台时长。
+            try {
+              var cur = currentAudio();
+              if (cur) {
+                window.webkit.messageHandlers.foliaAudioIntent.postMessage('clock|' + JSON.stringify({
+                  src: cur.src,
+                  position: cur.currentTime || 0
+                }));
+              }
+            } catch (e) {}
           });
           // 暴露一个只读的状态查询口：原生回前台时用它确认「页面自己认为在不在播」，
           // 不再靠派发合成事件去逼页面重建。只读 DOM，没有任何副作用。
@@ -1634,6 +1675,76 @@ final class WebContainerView: UIView {
         })();
         """
         webView?.evaluateJavaScript(js, completionHandler: nil)
+    }
+
+    /// 记录页面上那条 `<audio>` 的播放位置，供 `healAudioDrift()` 做校正。
+    /// 页面在切后台时用 `clock|{src,position}` 主动报送。
+    fileprivate func rememberPlaybackPositionClock(_ body: String) {
+        guard let json = Self.jsonBody(body, prefix: "clock|") else { return }
+        applyPlaybackClock(json)
+    }
+
+    /// 后台每 5 秒一条的进度，同样是「页面认为现在放到哪」的权威值。
+    fileprivate func rememberPlaybackPositionProgress(_ body: String) {
+        guard let json = Self.jsonBody(body, prefix: "progress|") else { return }
+        applyPlaybackClock(json)
+    }
+
+    private func applyPlaybackClock(_ json: [String: Any]) {
+        guard let src = json["src"] as? String, !src.isEmpty else { return }
+        let position = (json["position"] as? NSNumber)?.doubleValue ?? 0
+        lastKnownPlayback = (src, position)
+    }
+
+    private static func jsonBody(_ body: String, prefix: String) -> [String: Any]? {
+        guard body.hasPrefix(prefix) else { return nil }
+        let raw = String(body.dropFirst(prefix.count))
+        guard let data = raw.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return object
+    }
+
+    /// 把音频元素的播放位置拉回页面记录的进度（「声音跟字幕不匹配」的解法）。
+    ///
+    /// 现场：字幕和进度条按页面自己的时钟走（rAF 推进的播放位置），声音出自 `<audio>`。
+    /// 这两者只在页面正常 `play()` / `seek` 时同步；一旦被壳补放（后台被系统按停、
+    /// 回前台续播、WebAudio 断流后重放），`<audio>` 会从它自己被暂停的那一秒接着走，
+    /// 而页面时钟从没停过 —— 于是声音整体落后字幕一个「暂停时长」，越听越不对。
+    ///
+    /// 处理方式与页面自己切歌时一致：把元素的 `currentTime` 设回已知进度。
+    /// 只动位置、不动 `play` / `pause`，不会跟串行的恢复通道抢。
+    private func healAudioDrift(reason: String) {
+        guard let known = lastKnownPlayback, known.position > 0.5 else { return }
+        let js = """
+        (function(){
+          try {
+            var src = \(Self.jsString(known.src));
+            var want = \(String(format: "%.3f", known.position));
+            var list = document.querySelectorAll('audio');
+            for (var i = 0; i < list.length; i += 1) {
+              var el = list[i];
+              if (el.src !== src || el.ended || el.paused) { continue; }
+              if (!isFinite(el.duration) || el.duration <= 0) { return 'wait'; }
+              // 播放中本来就有几百毫秒的正常误差，超过它才说明是「断流后重放」。
+              if (Math.abs(el.currentTime - want) < 0.6) { return 'ok'; }
+              el.currentTime = want;
+              return 'fixed';
+            }
+            return 'none';
+          } catch (e) { return 'error'; }
+        })();
+        """
+        webView?.evaluateJavaScript(js) { result, _ in
+            guard let flag = result as? String, flag == "fixed" else { return }
+            CrashLog.note("==== audio position realigned to page clock (\(reason)) ====")
+        }
+    }
+
+    /// 拼一个安全的 JS 字符串字面量（媒体 URL 里可能有引号和反斜杠）。
+    private static func jsString(_ value: String) -> String {
+        let data = try? JSONSerialization.data(withJSONObject: [value])
+        guard let data, let text = String(data: data, encoding: .utf8) else { return "\"\"" }
+        return String(text.dropFirst().dropLast())
     }
 
     // MARK: - 安全区
@@ -1977,6 +2088,36 @@ final class WebContainerView: UIView {
 // MARK: - 导航
 
 extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
+    /// 页面里 `<input type="file">` 被 `click()` 时的原生选择面板。
+    ///
+    /// 不实现这一条，WKWebView 会把选文件静默吞掉（Safari 有默认实现，WKWebView 没有）。
+    /// 背景视频的「选择本地视频」正好落在这条链上，所以它是「上传了没反应」的正面解法。
+    func webView(_ webView: WKWebView,
+                 runOpenPanelWith parameters: WKOpenPanelParameters,
+                 initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping ([URL]?) -> Void) {
+        let presenter = FilePickerPresenter()
+        filePicker = presenter
+        let kinds = parameters.allowedFileExtensions?.joined(separator: ",") ?? ""
+        CrashLog.note("==== open panel requested \(kinds) ====")
+        presenter.present(from: topPresenter) { [weak self] urls in
+            CrashLog.note("==== open panel picked \(urls?.count ?? 0) ====")
+            completionHandler(urls)
+            self?.filePicker = nil
+        }
+    }
+
+    /// 找到当前最上层的控制器来挂模态面板。
+    private var topPresenter: UIViewController? {
+        let scene = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive } ?? UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }.first
+        var controller = scene?.windows.first { $0.isKeyWindow }?.rootViewController
+        while let presented = controller?.presentedViewController { controller = presented }
+        return controller
+    }
+
     /// 站内（含子域）与媒体资源一律放行；只有主框架跳到站外时才交给系统浏览器。
     ///
     /// 线上页是远程 https：音频、封面、二维码图片全在站外 CDN 上，
@@ -2230,6 +2371,43 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
     }
 }
 
+// MARK: - 文件选择
+
+/// 页面里 `<input type="file">` 的处理者，也是 `WKUIDelegate` 里回调的原生选择面板。
+///
+/// 背景视频走的是「点按钮 → 页面建 input → `click()` → 用户选视频」这条链。
+/// WKWebView 与 Safari 不同：**没有实现 `runOpenPanelWith` 就什么都不会发生** ——
+/// 面板不弹、`change` 不触发，页面那边永远停在等待里，界面也不报错。
+/// 用户看到的就是「上传了视频背景，背景完全没变化」。
+private final class FilePickerPresenter: NSObject, UIDocumentPickerDelegate {
+    private var completion: (([URL]?) -> Void)?
+
+    func present(from controller: UIViewController?, completion: @escaping ([URL]?) -> Void) {
+        self.completion = completion
+        var types: [UTType] = [.movie]
+        if #available(iOS 14.0, *) { types.append(.mpeg4Movie) }
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: true)
+        picker.delegate = self
+        picker.allowsMultipleSelection = false
+        picker.modalPresentationStyle = .formSheet
+        controller?.present(picker, animated: true)
+    }
+
+    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        let block = completion
+        completion = nil
+        // `asCopy: true`：拿到的已经是沙盒里的副本，必须留在原地。
+        // WKWebView 会在这一拍同步读文件，删掉就变成一个空视频。
+        block?(urls)
+    }
+
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+        let block = completion
+        completion = nil
+        block?(nil)
+    }
+}
+
 // MARK: - 播放状态上报
 
 /// 页面里的播放器播放/暂停时通知原生，用来维持锁屏与控制中心的「正在播放」状态。
@@ -2256,6 +2434,10 @@ private final class AudioIntentRelay: NSObject, WKScriptMessageHandler {
                 container?.markAudibleIntent()
             } else if body == "intent-pause" {
                 container?.markPausedIntent()
+            } else if body.hasPrefix("clock|") {
+                container?.rememberPlaybackPositionClock(body)
+            } else if body.hasPrefix("progress|") {
+                container?.rememberPlaybackPositionProgress(body)
             }
         }
     }
