@@ -162,6 +162,8 @@ final class WebContainerView: UIView {
     init(state: WebShellState) {
         self.state = state
         super.init(frame: .zero)
+        // 会话控制器回前台要判断「通路到底断没断」，只有容器能跨进程问页面的播放时钟。
+        state.container = self
         setUp()
     }
 
@@ -597,11 +599,14 @@ final class WebContainerView: UIView {
             // 于是「页面好好地在歌单上」也会被判成唤醒失败 → 白走一次重载 →
             // 用户看到的就是「切回来闪一下加载界面，歌也断了」。
             // 用 `reachedFirstPaintOnce`（本次启动出现过首屏）当判据才准。
-            guard !self.reachedFirstPaintOnce else {
-                self.probePageLiveness(thenRecover: false)
+            // 再加一条「主框架提交过站内文档」（`lastCommittedURL`）：大退重进之后
+            // 首屏常常没被采到，只看前一条会把一份正在正常显示的页面判成死的。
+            // 两条都不成立，才确实「没有任何可用的页面」，走唤醒恢复。
+            if !self.reachedFirstPaintOnce, self.lastCommittedURL == nil {
+                self.probePageLiveness(thenRecover: true)
                 return
             }
-            self.probePageLiveness(thenRecover: true)
+            self.probePageLiveness(thenRecover: false)
         }
     }
 
@@ -1150,6 +1155,11 @@ final class WebContainerView: UIView {
         }
     }
 
+    /// 供会话控制器在回前台那一拍调用：页面时钟还在走吗（只读，不动任何状态）。
+    func verifyPlaybackClockAdvancing(_ completion: @escaping (Bool) -> Void) {
+        isPlaybackClockAdvancing(completion)
+    }
+
     /// 页面时钟到底有没有在走（比 `paused` 更硬的事实）。
     ///
     /// 被抖音这类 App 抢过之后，页面里的 `<audio>` 常常仍报 `paused == false`、
@@ -1494,6 +1504,17 @@ final class WebContainerView: UIView {
         // 三次之后还要回退到离线副本。用户看到的就是「歌听得好好地，界面突然转圈」。
         // 页面既然已经画出来过，就没有「首屏卡住」这回事了，这条判据必须最先返回。
         guard !reachedFirstPaintOnce else { return }
+        // **用户手上正有一份 SPA 页面时，也不能重载。**
+        //
+        // 上面那条只认「本次启动成功画过首屏」。但「大退重进 → 进歌单 → 闪回加载界面」
+        // 的现场里，这一次启动的首屏可能根本没被采到（`checkFirstPaint` 只在 `didFinish`
+        // 之后才排，而 SPA 路由切换不触发 `didFinish`；进程还被回收过一次），
+        // `reachedFirstPaintOnce` 于是为假。此时看门狗 30 秒到点照样会判「卡在首屏」
+        // 去 `retryLoadForStall()` —— 用户看到的就是「正在用，突然整页退回加载界面」。
+        //
+        // 判据换成「主框架已经提交过站内文档」（`lastCommittedURL` 在 `didCommit` 里写）。
+        // 这只可能意味着页面确实被服务器送达并开始渲染，与首屏采样是否成功无关。
+        guard lastCommittedURL == nil else { return }
         let js = """
         (function(){
           var splash = document.getElementById('app-splash');
@@ -2582,11 +2603,23 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
     }
 
     /// 两条入口共用的实现：弹一个只放行视频的原生选择面板。
+    ///
+    /// 「点了导入、选好视频了，界面一点提示都没有」的现场里，有两种完全不同的原因：
+    /// 面板根本没弹出来（没有可用的 `topPresenter`），或者弹出来了、页面那侧没有接住。
+    /// 双方都不报错，用户只能干等，所以这里把入口与结果都记进日志。
     private func presentFilePicker(_ completionHandler: @escaping ([URL]?) -> Void) {
         let presenter = FilePickerPresenter()
         filePicker = presenter
-        CrashLog.note("==== open panel requested ====")
-        presenter.present(from: topPresenter) { [weak self] urls in
+        let controller = topPresenter
+        CrashLog.note("==== open panel requested (presenter=\(controller == nil ? "nil" : "ok")) ====")
+        guard let controller else {
+            // 没有可挂的面板：必须回一个空结果，否则页面那条 `change` 永远不触发。
+            CrashLog.note("==== open panel abandoned: no presenter ====")
+            filePicker = nil
+            completionHandler(nil)
+            return
+        }
+        presenter.present(from: controller) { [weak self] urls in
             // 把选中的文件描述记下来：用户反馈「导入视频后没变化」，
             // 日志里至少要先能分清「面板根本没选中」「选中了但不是视频」
             // 与「选中了、扩展名也对，是页面那侧没接住」这三种完全不同的情况。

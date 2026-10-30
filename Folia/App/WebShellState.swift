@@ -394,12 +394,38 @@ final class AudioSessionController {
             if !self.preemptedByOtherApp,
                self.backgroundedWhilePlayingOK,
                self.wantsAudible {
+                // **重建之前先确认它真的已经没在出声。**
+                //
+                // 这里原本是无条件 `rebuildPathQuietly()`。可 `setCategory` 会重建整条
+                // 音频通路，WebKit 的媒体元素会被一并按停 —— 于是「切出去看一眼抖音、
+                // 回来歌其实一直响着」也会被这一下打断，用户听到的就是「回来就没声音了」。
+                // 注意这时 `preemptedByOtherApp` 常常是假：对方已经被系统淡出，
+                // `isOtherAudioPlaying` 翻回了 false，只有页面自己的播放时钟能说明真相。
                 self.backgroundedWhilePlayingOK = false
-                self.rebuildPathQuietly()
+                self.audioPathVerify { alive in
+                    guard !alive else {
+                        NSLog("[Folia] audio clock advancing after background, keep path")
+                        return
+                    }
+                    self.rebuildPathQuietly()
+                }
             } else {
                 self.backgroundedWhilePlayingOK = false
             }
         }
+    }
+
+    /// 回前台后问页面：「你的播放时钟还在走吗」。
+    ///
+    /// 只看 `paused` 不够 —— 被别家 App 抢占后媒体元素常常仍报 `playing`，
+    /// 时间轴却已经冻住；而只看 `AudioContext.state` 同样不够，它会停在 running。
+    /// 隔 400ms 采两次 `currentTime`，只有确实没推进才算「通路真的断了」。
+    private func audioPathVerify(_ completion: @escaping (Bool) -> Void) {
+        guard let container else {
+            completion(false)
+            return
+        }
+        container.verifyPlaybackClockAdvancing(completion)
     }
 
     /// 上一次进后台时，「该响」这个前提是否成立。
@@ -420,6 +446,12 @@ final class AudioSessionController {
 
     /// 页面侧是否认为自己「该响」。由容器同步，只用于回前台这一拍的判断。
     var wantsAudible = false
+
+    /// 当前承载页面的容器。
+    ///
+    /// 回前台判断「通路到底断没断」必须去问页面自己的播放时钟，而唯一能跨进程执行
+    /// JS 的地方在容器里。弱引用：容器持有 `state`，反向持有会成环。
+    weak var container: WebContainerView?
 
     private func rebuildPathQuietly() {
         guard isPlaying || backgroundedAndPlaying else { return }
