@@ -429,7 +429,6 @@ final class WebContainerView: UIView {
             // `1+1` 能答只说明 JS 引擎还在；页面剩下空壳时同样是「点了没反应」，
             // 再确认一次挂载点是不是还在。
             self.webView.evaluateJavaScript("document.body ? document.body.children.length : 0") { alive, _ in
-                guard let self else { return }
                 guard (alive as? NSNumber)?.intValue ?? 0 == 0 else { return }
                 CrashLog.note("==== wake probe: page is an empty shell ====")
                 if recover { self.recoverAfterForegroundWake() }
