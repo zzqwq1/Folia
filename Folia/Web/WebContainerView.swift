@@ -105,9 +105,6 @@ final class WebContainerView: UIView {
     /// 回调那头可能已经释放，选中文件就永远传不回页面。
     private var filePicker: FilePickerPresenter?
 
-    /// 上一次从页面拿到的「哪首、放到哪」。壳补放之后用它把声音的位置校回字幕的进度。
-    private var lastKnownPlayback: (src: String, position: Double)?
-
     init(state: WebShellState) {
         self.state = state
         super.init(frame: .zero)
@@ -582,23 +579,6 @@ final class WebContainerView: UIView {
         AudioSessionController.shared.updatePlaybackState(true)
         CrashLog.note("==== intent audible (state=\(UIApplication.shared.applicationState.rawValue)) ====")
         startKeepAliveTimer()
-        // 页面开始播放的这一刻，位置由页面自己掌握：先记下来，
-        // 后面壳补放之后如果偏差太大，用它把声音校回字幕的进度。
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            guard let self, self.wantsAudible, !self.userPaused else { return }
-            let js = """
-            (function(){
-              var el = window.__foliaAudioKeeper ? window.__foliaAudioKeeper.current() : null;
-              return el ? {src: el.src, position: el.position} : null;
-            })();
-            """
-            self.webView?.evaluateJavaScript(js) { [weak self] result, _ in
-                guard let dict = result as? [String: Any],
-                      let src = dict["src"] as? String, !src.isEmpty else { return }
-                let position = (dict["position"] as? NSNumber)?.doubleValue ?? 0
-                self?.lastKnownPlayback = (src, position)
-            }
-        }
     }
 
     /// 页面自己暂停了。
@@ -1040,11 +1020,14 @@ final class WebContainerView: UIView {
             guard let flag = result as? String, flag == "resumed" else { return }
             CrashLog.note("==== audio resumed (\(reason)) ====")
         }
-        // 补放之后再对一次位置：被系统按停过的元素会从它停下的那一秒接着走，
-        // 而字幕按页面时钟一直在前进，不管的话声音就整体落后一段。
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-            self?.healAudioDrift(reason: reason)
-        }
+        // 补放时**不再把 position 往回调**。
+        //
+        // 这里原本会调用 `healAudioDrift()`，用原生记住的页面进度覆盖 `currentTime`。
+        // 但那份进度是页面**几秒前**上报的快照：拿它去纠正正在播放的元素，
+        // 等于每次都把歌拽回过去。真机反馈正是这样 ——
+        // 进度条卡在同一处反复播放，怎么都过不去；大退重开后又从旧位置开始。
+        // 声音与字幕的偏差在「保活补放」这一条路上本来就只有几百毫秒，
+        // 交给页面自己的播放时钟推进即可，不需要原生插手。
         // 上下文是异步起搏的，等一帧再补一次：
         // 只在上一次没放成（元素仍被按停）时才动手，不会和上面那次叠着放。
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
@@ -1537,17 +1520,6 @@ final class WebContainerView: UIView {
             // 切后台前再补一条最新进度：系统随后就会把 AudioContext 钉住，
             // 页面的 currentTime 不再前进，原生只能拿到这条里的数字。
             reportProgress();
-            // 同时把「哪首、放到哪」留在原生手上：后台被按停再补放时，
-            // 壳要把声音的位置校回这个进度，否则会落后一整个后台时长。
-            try {
-              var cur = currentAudio();
-              if (cur) {
-                window.webkit.messageHandlers.foliaAudioIntent.postMessage('clock|' + JSON.stringify({
-                  src: cur.src,
-                  position: cur.currentTime || 0
-                }));
-              }
-            } catch (e) {}
           });
           // 暴露一个只读的状态查询口：原生回前台时用它确认「页面自己认为在不在播」，
           // 不再靠派发合成事件去逼页面重建。只读 DOM，没有任何副作用。
@@ -1817,76 +1789,6 @@ final class WebContainerView: UIView {
         })();
         """
         webView?.evaluateJavaScript(js, completionHandler: nil)
-    }
-
-    /// 记录页面上那条 `<audio>` 的播放位置，供 `healAudioDrift()` 做校正。
-    /// 页面在切后台时用 `clock|{src,position}` 主动报送。
-    fileprivate func rememberPlaybackPositionClock(_ body: String) {
-        guard let json = Self.jsonBody(body, prefix: "clock|") else { return }
-        applyPlaybackClock(json)
-    }
-
-    /// 后台每 5 秒一条的进度，同样是「页面认为现在放到哪」的权威值。
-    fileprivate func rememberPlaybackPositionProgress(_ body: String) {
-        guard let json = Self.jsonBody(body, prefix: "progress|") else { return }
-        applyPlaybackClock(json)
-    }
-
-    private func applyPlaybackClock(_ json: [String: Any]) {
-        guard let src = json["src"] as? String, !src.isEmpty else { return }
-        let position = (json["position"] as? NSNumber)?.doubleValue ?? 0
-        lastKnownPlayback = (src, position)
-    }
-
-    private static func jsonBody(_ body: String, prefix: String) -> [String: Any]? {
-        guard body.hasPrefix(prefix) else { return nil }
-        let raw = String(body.dropFirst(prefix.count))
-        guard let data = raw.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
-        return object
-    }
-
-    /// 把音频元素的播放位置拉回页面记录的进度（「声音跟字幕不匹配」的解法）。
-    ///
-    /// 现场：字幕和进度条按页面自己的时钟走（rAF 推进的播放位置），声音出自 `<audio>`。
-    /// 这两者只在页面正常 `play()` / `seek` 时同步；一旦被壳补放（后台被系统按停、
-    /// 回前台续播、WebAudio 断流后重放），`<audio>` 会从它自己被暂停的那一秒接着走，
-    /// 而页面时钟从没停过 —— 于是声音整体落后字幕一个「暂停时长」，越听越不对。
-    ///
-    /// 处理方式与页面自己切歌时一致：把元素的 `currentTime` 设回已知进度。
-    /// 只动位置、不动 `play` / `pause`，不会跟串行的恢复通道抢。
-    private func healAudioDrift(reason: String) {
-        guard let known = lastKnownPlayback, known.position > 0.5 else { return }
-        let js = """
-        (function(){
-          try {
-            var src = \(Self.jsString(known.src));
-            var want = \(String(format: "%.3f", known.position));
-            var list = document.querySelectorAll('audio');
-            for (var i = 0; i < list.length; i += 1) {
-              var el = list[i];
-              if (el.src !== src || el.ended || el.paused) { continue; }
-              if (!isFinite(el.duration) || el.duration <= 0) { return 'wait'; }
-              // 播放中本来就有几百毫秒的正常误差，超过它才说明是「断流后重放」。
-              if (Math.abs(el.currentTime - want) < 0.6) { return 'ok'; }
-              el.currentTime = want;
-              return 'fixed';
-            }
-            return 'none';
-          } catch (e) { return 'error'; }
-        })();
-        """
-        webView?.evaluateJavaScript(js) { result, _ in
-            guard let flag = result as? String, flag == "fixed" else { return }
-            CrashLog.note("==== audio position realigned to page clock (\(reason)) ====")
-        }
-    }
-
-    /// 拼一个安全的 JS 字符串字面量（媒体 URL 里可能有引号和反斜杠）。
-    private static func jsString(_ value: String) -> String {
-        let data = try? JSONSerialization.data(withJSONObject: [value])
-        guard let data, let text = String(data: data, encoding: .utf8) else { return "\"\"" }
-        return String(text.dropFirst().dropLast())
     }
 
     // MARK: - 安全区
@@ -2650,10 +2552,6 @@ private final class AudioIntentRelay: NSObject, WKScriptMessageHandler {
                 container?.markAudibleIntent()
             } else if body == "intent-pause" {
                 container?.markPausedIntent()
-            } else if body.hasPrefix("clock|") {
-                container?.rememberPlaybackPositionClock(body)
-            } else if body.hasPrefix("progress|") {
-                container?.rememberPlaybackPositionProgress(body)
             }
         }
     }
