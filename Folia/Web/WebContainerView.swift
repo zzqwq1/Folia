@@ -380,6 +380,10 @@ final class WebContainerView: UIView {
         stallRetries.removeAll()
         isShowingOfflineCopy = false
         wakeReloadTried = false
+        // 新实例还没有提交过任何文档：上一次那个地址属于旧进程，留着只会让
+        // 「页面已不存在」那条分支把用户送回一个已经不属于当前实例的 URL。
+        lastCommittedURL = nil
+        consecutiveAutoReloads = 0
         state.clearLoadFailure()
         state.leaveOfflineCopy()
 
