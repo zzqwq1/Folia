@@ -486,6 +486,7 @@ final class WebContainerView: UIView {
             queue: .main
         ) { [weak self] _ in
             guard let self else { return }
+            self.enteredBackgroundAt = Date()
             // 进后台只做两件事：开始轮询、记下播放进度。
             //
             // 这里**不再调用 `reactivate()`**。`setActive(true)` 会让系统重新评估
@@ -947,6 +948,18 @@ final class WebContainerView: UIView {
     /// 单次探测会因为页面换页 / seek / 交叉淡化的瞬间抖动而误报，
     /// 误报的代价是「亲手把正在放歌按停一次」，用户听到的就是无端卡顿。
     private var brokenProbeStreak = 0
+
+    /// 进入后台的时刻。用来区分「进程被系统正常回收」与「进程真的崩了」。
+    private var enteredBackgroundAt: Date?
+
+    /// 后台待多久后进程被杀算「系统回收」而不是崩溃。
+    ///
+    /// iOS 在应用退到后台后随时会回收 WebContent 进程，这是**正常行为**：
+    /// 内存吃紧、切走了几分钟、开了别的 App 都会触发。把它当成崩溃处理会连累
+    /// 三件事：判脏存储（下次启动没登录态）、换临时存储（歌单数据全丢）、
+    /// 自动续播（页面从 0 开始，听起来就是「自己重播了」）。
+    /// 30 秒是个保守分界：真正在用的崩溃几乎都发生在进程活跃期间。
+    private static let backgroundReclaimThreshold: TimeInterval = 30
 
     /// 回前台时的补放：不看前后台状态，其余条件与轮询一致。
     ///
@@ -2464,6 +2477,36 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         // 计进日志才能区分到底是哪一种。
         CrashLog.note("==== web content process terminated (#\(contentProcessRestarts.count)) url=\(webView.url?.absoluteString ?? "-") ====")
 
+        // 先判断这次进程死亡是「系统回收」还是「真崩溃」。
+        //
+        // 这个区分决定后面三件事怎么办，是本次修复的核心：
+        // 系统回收（在后台待久了才被杀）不应该判脏存储、不换临时存储、
+        // 也不自动续播 —— 否则用户看到的就是「大退后没登录态、歌单数据没了、
+        // 一点播放就从 0 开始重播」。
+        let backgroundAge = enteredBackgroundAt.map { Date().timeIntervalSince($0) } ?? 0
+        let reclaimedBySystem = UIApplication.shared.applicationState != .active
+            && backgroundAge >= Self.backgroundReclaimThreshold
+
+        // 网页进程被打死后，页面里的 `<audio>` 随之消失，声音立刻断掉 ——
+        // 用户实际经历的是「切歌词界面，音乐停了 / App 退回首页」。
+        // 这里先把现场抓下来：崩溃前的标题、当前路由，以及崩溃时是否还在出声。
+        collectTerminationContext()
+
+        if reclaimedBySystem {
+            // 后台被系统回收：复用默认存储原地重载即可。
+            //
+            // 这一条以前会 `markDirty` + `nonPersistent` 重建，代价是全套登录态与
+            // 歌单缓存清零；而它恰恰发生在「用户切出去一会儿再回来」这种最平常的场景里，
+            // 于是「大退重进要重新登录」变成了必然。系统回收本就没弄脏任何数据，
+            // 原存储继续用才是正确的。
+            CrashLog.note("==== web content reclaimed by system after \(Int(backgroundAge))s in background, reloading in place ====")
+            CacheSweeper.clearDirty()
+            stopKeepAliveTimer()
+            // 不自动续播：用户此刻多半是刚从别处回来，页面重新起来后由他自己按播放。
+            webView.reloadFromOrigin()
+            return
+        }
+
         // 立刻把「这次运行不干净」落盘。
         //
         // 进程被系统杀掉时 App 本身还活着，用户随后手动大退也不会有任何收尾回调，
@@ -2475,11 +2518,6 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         // 一旦清了 SW，下一个进程必须重新下载整站脚本，反而更容易被压死。
         // 真正可能被旧数据污染的 MyISAM 式场景（IndexedDB）由页面自己重建。
         CacheSweeper.markDirty("webcontent-terminated")
-
-        // 网页进程被打死后，页面里的 `<audio>` 随之消失，声音立刻断掉 ——
-        // 用户实际经历的是「切歌词界面，音乐停了 / App 退回首页」。
-        // 这里先把现场抓下来：崩溃前的标题、当前路由，以及崩溃时是否还在出声。
-        collectTerminationContext()
 
         // 崩溃前正在出声，且用户没按过暂停：重载后把播放续上。
         let shouldResume = Self.wasAudibleInBackground && !userPaused

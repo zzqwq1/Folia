@@ -102,6 +102,17 @@ enum CacheSweeper {
     /// 崩过之后下一次启动改用一次性的干净存储目录（见 `WebContainerView.setUp()`），
     /// 成功加载出一轮后自动清掉。正常退出时不动它，否则每次启动都要重新下载全站。
     private static let dirtyKey = "folia.webstore.dirty"
+    private static let dirtyAtKey = "folia.webstore.dirtyAt"
+
+    /// 脏标记的有效期。
+    ///
+    /// 这个标记的意义是「上一次运行崩了，这一次用临时存储绕开脏数据」。
+    /// 但它此前只有一条清除路径：重建后页面加载完成、且 8 秒内没再挂。
+    /// 只要用户在歌单页反复触发进程死亡，这条路径就永远走不到，标记就一直挂着，
+    /// 于是**每次启动都是临时存储**：登录态没了、歌单缓存没了 —— 用户看到的就是
+    /// 「大退后软件复原了，要重新登录」，而且他自己不可能知道怎么恢复。
+    /// 加一个有效期：超过一天就认为旧数据已经不是问题，回到默认存储。
+    private static let dirtyTTL: TimeInterval = 24 * 60 * 60
 
     /// 标记「这次运行不干净」。
     ///
@@ -109,17 +120,31 @@ enum CacheSweeper {
     /// 用户描述的现象是「大退重进还是闪退」，说明上一次崩溃没有任何收尾机会，
     /// 只能在运行期实时落盘。
     static func markDirty(_ reason: String) {
-        UserDefaults.standard.set(reason, forKey: dirtyKey)
-        UserDefaults.standard.synchronize()
+        let defaults = UserDefaults.standard
+        defaults.set(reason, forKey: dirtyKey)
+        defaults.set(Date().timeIntervalSince1970, forKey: dirtyAtKey)
+        defaults.synchronize()
     }
 
     static var isStoreDirty: Bool {
-        UserDefaults.standard.string(forKey: dirtyKey) != nil
+        let defaults = UserDefaults.standard
+        guard defaults.string(forKey: dirtyKey) != nil else { return false }
+        // 过期的标记自动作废：宁可冒一次「旧数据还在」的风险，
+        // 也不能让用户永远回不到自己的登录态。
+        let stamped = defaults.double(forKey: dirtyAtKey)
+        if stamped > 0, Date().timeIntervalSince1970 - stamped > dirtyTTL {
+            clearDirty()
+            CrashLog.note("==== dirty store flag expired, back to default store ====")
+            return false
+        }
+        return true
     }
 
     static func clearDirty() {
-        UserDefaults.standard.removeObject(forKey: dirtyKey)
-        UserDefaults.standard.synchronize()
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: dirtyKey)
+        defaults.removeObject(forKey: dirtyAtKey)
+        defaults.synchronize()
     }
 
     static func sweepOnColdLaunch() {
