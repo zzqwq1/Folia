@@ -45,6 +45,11 @@ final class WebContainerView: UIView {
 
     /// 当前是否正在用包内离线副本。决定「重试」是回线上还是重新读本地文件。
     private var isShowingOfflineCopy = false
+    /// 离线副本正在往线上切、但还没确认完成。
+    ///
+    /// `decidePolicyFor` 只能表示「准备导航」，弱网下这次导航经常当场失败。
+    /// 只有 `didCommit`（服务器已经有响应）才说明真的回到线上了。
+    private var pendingOnlineHandoff = false
 
     /// 线上加载失败后自动回退到包内副本前，允许重试的次数。
     ///
@@ -104,9 +109,16 @@ final class WebContainerView: UIView {
     /// Service Worker 与 IndexedDB，等于原地打转。
     private func makeConfiguration(forceCleanStore: Bool) -> WKWebViewConfiguration {
         let config = WKWebViewConfiguration()
+        // 视频背景（以及 <video> 的自动播放 + 非静音）要求内联播放且不要求用户手势。
+        // 若这两项缺一项，页面里那张背景视频会停在首帧：
+        // 用户看到的就是「上传了视频背景，却还是原来的静态背景」。
         config.allowsInlineMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = []
         config.suppressesIncrementalRendering = false
+        // 视频背景走的是「用户选本地视频 → 页面用 blob:/file: 播放」这条链，
+        // WKWebView 默认禁止 file 页读外部资源，表现为选了视频却仍显示原背景。
+        config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
+        config.preferences.setValue(true, forKey: "allowUniversalAccessFromFileURLs")
         config.websiteDataStore = forceCleanStore ? .nonPersistent() : .default()
 
         // 让 UA 带 FoliaApp：网页版据此进入「壳模式」，关掉整页 86% 缩放，安全区改用实测值。
@@ -203,6 +215,7 @@ final class WebContainerView: UIView {
         audioPathObservation = NotificationCenter.default
             .addObserver(forName: .foliaAudioPathRebuilt, object: nil, queue: .main) { [weak self] _ in
                 self?.recoverAudioPath(reason: "panel-closed")
+                self?.driveBackgroundVideo()
             }
     }
 
@@ -355,6 +368,7 @@ final class WebContainerView: UIView {
             guard let self else { return }
             // 回前台不改变意图：该响的继续响，轮询照旧。
             self.recoverAudioPath(reason: "foreground")
+            self.driveBackgroundVideo()
             CrashLog.note("==== foreground resume done (audible=\(self.wantsAudible ? 1 : 0) paused=\(self.userPaused ? 1 : 0)) ====")
             // 真正加载失败（没有页面可用）时用户往往先去开 Wi-Fi 再切回来，
             // 这里自己重试一次，不用等他再点「重试」。
@@ -590,6 +604,9 @@ final class WebContainerView: UIView {
 
         // 前台：走统一的探测式恢复，通路没问题时一格都不动。
         recoverAudioPath(reason: reason)
+        // 视频背景是另一条独立的媒体元素：音频恢复只放 `<audio>`，
+        // 视频被系统挂起后不会自己起来，这里顺手补一次。
+        driveBackgroundVideo()
     }
 
     /// 页面上真实在用的 AudioContext 是否处于 running。
@@ -833,6 +850,12 @@ final class WebContainerView: UIView {
     }
 
     private func resumeAudio(reason: String) {
+        // 先叫醒 AudioContext 再补 play。
+        //
+        // 线上页是 WebAudio 出声：`<audio>` 只当解码源，接在 `AudioContext` 上。
+        // 控制中心收起后 AudioContext 往往停在 interrupted，此时 `play()` 会返回成功
+        // 却一点声都没有 —— 用户看到的就是「状态栏滑下去再回来，进度在走但没声音」。
+        revivePageAudio()
         let js = """
         (function(){
           try {
@@ -854,6 +877,15 @@ final class WebContainerView: UIView {
         webView?.evaluateJavaScript(js) { result, _ in
             guard let flag = result as? String, flag == "resumed" else { return }
             CrashLog.note("==== audio resumed (\(reason)) ====")
+        }
+        // 上下文是异步起搏的，等一帧再补一次：
+        // 只在上一次没放成（元素仍被按停）时才动手，不会和上面那次叠着放。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self, self.wantsAudible, !self.userPaused else { return }
+            self.isMediaHealthy { healthy in
+                guard !healthy else { return }
+                self.webView?.evaluateJavaScript(js, completionHandler: nil)
+            }
         }
     }
 
@@ -924,10 +956,24 @@ final class WebContainerView: UIView {
 
     /// 页面多久还没画出东西就算卡住。线上页要拉主 bundle 与一批 CDN 依赖，正常两三秒；
     /// 超过这个时间基本可以判为「黑屏卡死」。
-    private static let stallTimeout: TimeInterval = 15
+    ///
+    /// 现在的主 bundle 已经到 7MB 量级（bootstrap 2.0MB + 歌词引擎 1.8MB + 组件注册 1.5MB），
+    /// 老机型在弱网下首屏 10 秒以上是常态。原先 15 秒会在页面正在正常加载时误判成
+    /// 「没能启动起来」，于是壳自己把一次好端端的加载重载掉 —— 用户看到的就是
+    /// 「启动着启动着又回到加载界面」。这里放宽到 30 秒，并且看门狗只做提示，
+    /// 不再主动打断正在进行的加载。
+    private static let stallTimeout: TimeInterval = 30
 
     /// 首屏是否已经就绪（React 挂上、加载遮罩淡出）。
     private var didReachFirstPaint = false
+    /// 这一次导航的文档是否已经加载完（`didFinish`）。
+    private var documentFinished = false
+    /// 首屏检查是否已经跑出一轮结论（遮罩被去掉）。
+    ///
+    /// 只看「文档是否加载完」不够：有些页面把 `#app-splash` 直接在文档里去掉，
+    /// 此时 React 已经挂载，只是这一步没被 `checkFirstPaint` 采样到。
+    /// 用它区分「页面真的还没跑起来」与「跑起来了但没采到」。
+    private var hasEvaluatedFirstPaint = false
 
     /// 盯着首屏：到点还没就绪，就把当前 URL、标题与页面文本回传，让用户看到到底卡在哪。
     ///
@@ -935,6 +981,8 @@ final class WebContainerView: UIView {
     /// 还是页面里的模块加载被卡住，在外面完全看不出来。这里把现场收集起来直接显示。
     private func scheduleProgressWatchdog() {
         didReachFirstPaint = false
+        documentFinished = false
+        hasEvaluatedFirstPaint = false
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.stallTimeout) { [weak self] in
             self?.reportStallIfNeeded()
         }
@@ -971,6 +1019,17 @@ final class WebContainerView: UIView {
                 guard !self.isShowingOfflineCopy else { return }
                 let detail = (result as? String) ?? (error?.localizedDescription ?? "页面无响应")
                 CrashLog.note("==== first paint timeout ====\n\(detail)")
+                // 文档已经加载完、只是首屏还没画出来：此时主动重载是「帮倒忙」。
+                // 页面自己的 bundle 还在下载/解析，重载会把已下载的部分全部丢掉，
+                // 弱网与老机型上直接变成「永远进不去」。只提示，不打断。
+                if self.documentFinished && !self.hasEvaluatedFirstPaint {
+                    CrashLog.note("==== first paint late, keep loading (no reload) ====")
+                    self.state.noteStalled(detail: detail)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
+                        self?.reportStallIfNeeded()
+                    }
+                    return
+                }
                 self.state.noteStalled(detail: detail)
                 self.retryLoadForStall()
             }
@@ -1053,7 +1112,10 @@ final class WebContainerView: UIView {
         ) { [weak self] result, _ in
             guard let self else { return }
             if let painted = result as? Int, painted == 1 {
-                DispatchQueue.main.async { self.didReachFirstPaint = true }
+                DispatchQueue.main.async {
+                    self.didReachFirstPaint = true
+                    self.hasEvaluatedFirstPaint = true
+                }
                 // 页面已经画出来了：解除「刚重建过」的保护位，允许下一次进程被回收
                 // 再走一遍自愈（否则这一次成功后，之后真正的 OOM 会被判成
                 // 「重建也没用」而直接退到离线副本）。
@@ -1543,6 +1605,37 @@ final class WebContainerView: UIView {
         webView?.evaluateJavaScript(js, completionHandler: nil)
     }
 
+    /// 视频背景的兜底驱动。
+    ///
+    /// 线上页的背景 `<video>` 的播放时机挂在「播放器状态变化」与一个 2 秒的定时校正上：
+    /// 只要那次 `play()` 被拦（控制中心收起后媒体进程被挂起、切后台再回来），
+    /// 它就再也不会自己起来 —— 用户看到的就是「视频背景设了，画面却一直是静态的、
+    /// 或者停在第一帧找不到效果」。这里补的正是这一拍：
+    /// - 页面已经在放：一格都不动；
+    /// - 明确处于暂停且有源：补一次 `play()`。
+    /// 只读 DOM，不改任何全局原型，对普通播放页的音频没有影响。
+    private func driveBackgroundVideo() {
+        let js = """
+        (function(){
+          try {
+            var list = document.querySelectorAll('video[aria-hidden="true"]');
+            for (var i = 0; i < list.length; i += 1) {
+              var v = list[i];
+              if (!v.src || v.ended) { continue; }
+              if (v.paused) {
+                var p = v.play();
+                if (p && p.catch) { p.catch(function(){}); }
+                return 'played';
+              }
+              return 'playing';
+            }
+            return 'none';
+          } catch (e) { return 'error'; }
+        })();
+        """
+        webView?.evaluateJavaScript(js, completionHandler: nil)
+    }
+
     // MARK: - 安全区
 
     override func layoutSubviews() {
@@ -1632,6 +1725,203 @@ final class WebContainerView: UIView {
         }
         return nativeOpen ? nativeOpen.apply(window, arguments) : null;
       };
+      // 老机型兼容垫片。
+      //
+      // 线上页大量依赖近几年的 Web API，老机型（iOS 16 封顶的机型、A10 及更早的芯片）
+      // 缺其中一部分，缺哪个就在哪一步静默中断：常见表现是「点了播放没反应」，
+      // 或者整页卡在加载界面（模块顶层就调用了缺失的 API）。
+      // 这里只补「缺失即报错」的那几个，且全部是可枚举对象的原型方法，
+      // 实现按规范语义写，不改变已支持机型的任何行为。
+      (function(){
+        try {
+          if (typeof Object.groupBy !== 'function') {
+            Object.defineProperty(Object, 'groupBy', {
+              configurable: true, writable: true,
+              value: function(items, callback){
+                var out = {};
+                var list = Array.from(items || []);
+                for (var i = 0; i < list.length; i += 1) {
+                  var key = callback(list[i], i);
+                  if (!Object.prototype.hasOwnProperty.call(out, key)) { out[key] = []; }
+                  out[key].push(list[i]);
+                }
+                return out;
+              }
+            });
+          }
+          if (typeof Map.groupBy !== 'function') {
+            Object.defineProperty(Map, 'groupBy', {
+              configurable: true, writable: true,
+              value: function(items, callback){
+                var out = new Map();
+                var list = Array.from(items || []);
+                for (var i = 0; i < list.length; i += 1) {
+                  var key = callback(list[i], i);
+                  if (!out.has(key)) { out.set(key, []); }
+                  out.get(key).push(list[i]);
+                }
+                return out;
+              }
+            });
+          }
+          if (typeof Array.prototype.at !== 'function') {
+            Object.defineProperty(Array.prototype, 'at', {
+              configurable: true, writable: true,
+              value: function(index){
+                var len = this.length >>> 0;
+                var k = Math.trunc(index) || 0;
+                if (k < 0) { k += len; }
+                return (k < 0 || k >= len) ? undefined : this[k];
+              }
+            });
+          }
+          if (typeof String.prototype.at !== 'function') {
+            Object.defineProperty(String.prototype, 'at', {
+              configurable: true, writable: true,
+              value: function(index){
+                var s = String(this);
+                var len = s.length;
+                var k = Math.trunc(index) || 0;
+                if (k < 0) { k += len; }
+                return (k < 0 || k >= len) ? undefined : s.charAt(k);
+              }
+            });
+          }
+          if (typeof Array.prototype.findLast !== 'function') {
+            Object.defineProperty(Array.prototype, 'findLast', {
+              configurable: true, writable: true,
+              value: function(callback, thisArg){
+                for (var i = this.length - 1; i >= 0; i -= 1) {
+                  if (callback.call(thisArg, this[i], i, this)) { return this[i]; }
+                }
+                return undefined;
+              }
+            });
+          }
+          if (typeof Array.prototype.findLastIndex !== 'function') {
+            Object.defineProperty(Array.prototype, 'findLastIndex', {
+              configurable: true, writable: true,
+              value: function(callback, thisArg){
+                for (var i = this.length - 1; i >= 0; i -= 1) {
+                  if (callback.call(thisArg, this[i], i, this)) { return i; }
+                }
+                return -1;
+              }
+            });
+          }
+          if (typeof Array.prototype.toSorted !== 'function') {
+            Object.defineProperty(Array.prototype, 'toSorted', {
+              configurable: true, writable: true,
+              value: function(compare){
+                return Array.from(this).sort(compare);
+              }
+            });
+          }
+          if (typeof Array.prototype.toReversed !== 'function') {
+            Object.defineProperty(Array.prototype, 'toReversed', {
+              configurable: true, writable: true,
+              value: function(){ return Array.from(this).reverse(); }
+            });
+          }
+          if (typeof Array.prototype.toSpliced !== 'function') {
+            Object.defineProperty(Array.prototype, 'toSpliced', {
+              configurable: true, writable: true,
+              value: function(start, deleteCount){
+                var copy = Array.from(this);
+                var args = Array.prototype.slice.call(arguments);
+                copy.splice.apply(copy, args);
+                return copy;
+              }
+            });
+          }
+          if (typeof Array.prototype.with !== 'function') {
+            Object.defineProperty(Array.prototype, 'with', {
+              configurable: true, writable: true,
+              value: function(index, value){
+                var copy = Array.from(this);
+                var k = Math.trunc(index) || 0;
+                if (k < 0) { k += copy.length; }
+                copy[k] = value;
+                return copy;
+              }
+            });
+          }
+          if (typeof Object.hasOwn !== 'function') {
+            Object.defineProperty(Object, 'hasOwn', {
+              configurable: true, writable: true,
+              value: function(obj, key){ return Object.prototype.hasOwnProperty.call(obj, key); }
+            });
+          }
+          if (typeof Promise.withResolvers !== 'function') {
+            Object.defineProperty(Promise, 'withResolvers', {
+              configurable: true, writable: true,
+              value: function(){
+                var resolve, reject;
+                var promise = new Promise(function(res, rej){ resolve = res; reject = rej; });
+                return { promise: promise, resolve: resolve, reject: reject };
+              }
+            });
+          }
+          if (typeof queueMicrotask !== 'function') {
+            window.queueMicrotask = function(cb){
+              Promise.resolve().then(cb);
+            };
+          }
+          if (typeof requestIdleCallback !== 'function') {
+            window.requestIdleCallback = function(cb){
+              var start = Date.now();
+              return setTimeout(function(){
+                cb({ didTimeout: false, timeRemaining: function(){ return Math.max(0, 50 - (Date.now() - start)); } });
+              }, 1);
+            };
+            window.cancelIdleCallback = function(id){ clearTimeout(id); };
+          }
+          if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout !== 'function') {
+            AbortSignal.timeout = function(ms){
+              var ctrl = new AbortController();
+              setTimeout(function(){ ctrl.abort(new DOMException('TimeoutError', 'TimeoutError')); }, ms);
+              return ctrl.signal;
+            };
+          }
+          // 结构化克隆兜底：部分老版本没有 `structuredClone`，
+          // 播放器在切歌 / 持久化队列时会用到。
+          if (typeof structuredClone !== 'function') {
+            window.structuredClone = function(value){ return JSON.parse(JSON.stringify(value)); };
+          }
+          // ResizeObserver 缺失时给一个只回调一次的空实现：
+          // 缺它会让可视化外壳在构造时直接抛错，整页白掉。
+          if (typeof ResizeObserver !== 'function') {
+            window.ResizeObserver = function(cb){
+              this._cb = cb;
+              var self = this;
+              setTimeout(function(){
+                try { self._cb([{ contentRect: document.body.getBoundingClientRect() }], self); } catch (e) {}
+              }, 0);
+            };
+            window.ResizeObserver.prototype.observe = function(){};
+            window.ResizeObserver.prototype.unobserve = function(){};
+            window.ResizeObserver.prototype.disconnect = function(){};
+          }
+          if (typeof IntersectionObserver !== 'function') {
+            window.IntersectionObserver = function(cb){
+              this._cb = cb;
+              var self = this;
+              setTimeout(function(){
+                try { self._cb([{ isIntersecting: true, intersectionRatio: 1, target: document.body }], self); } catch (e) {}
+              }, 0);
+            };
+            window.IntersectionObserver.prototype.observe = function(){};
+            window.IntersectionObserver.prototype.unobserve = function(){};
+            window.IntersectionObserver.prototype.disconnect = function(){};
+            window.IntersectionObserver.prototype.takeRecords = function(){ return []; };
+          }
+          // `AudioContext` 在部分老系统的 WKWebView 里只有 webkit 前缀。
+          if (typeof window.AudioContext !== 'function' && typeof window.webkitAudioContext === 'function') {
+            window.AudioContext = window.webkitAudioContext;
+            window.OfflineAudioContext = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+          }
+        } catch (e) {}
+      })();
       // 把页面里的未捕获错误回传原生。React 渲染时抛的 TypeError
       // 在 WKWebView 里只会让页面白掉/退回加载界面，控制台看不到，
       // 必须落到本地日志里才能定位是哪个字段为空。
@@ -1650,6 +1940,36 @@ final class WebContainerView: UIView {
         var r = e && e.reason;
         report('REJECTION', (r && (r.stack || r.message)) || String(r));
       });
+      // 视频背景不生效时，错误往往只发生在 <video> 元素上（解码失败、sources 为空、
+      // 被 WKWebView 的自动播放策略拦下），不会冒泡到 window。这里补一条捕获阶段的监听，
+      // 把媒体元素的错误码记下来，真机日志里才能判断是解码问题还是策略问题。
+      document.addEventListener('error', function(e){
+        var t = e && e.target;
+        if (!t || (t.tagName !== 'VIDEO' && t.tagName !== 'AUDIO')) { return; }
+        var err = t.error;
+        report('MEDIA', (t.tagName || '') + ' code=' + (err ? err.code : '-')
+          + ' msg=' + (err && err.message ? err.message : '-')
+          + ' src=' + String(t.currentSrc || t.src || '').slice(0, 120));
+      }, true);
+      // 媒体自动播放被拦（视频背景停在首帧）同样不会冒泡：安卓/桌面浏览器的提示框
+      // 在 WKWebView 里也不存在，页面只会静默失败。这里把 `play()` 的拒绝原因记下来。
+      (function(){
+        if (typeof HTMLMediaElement !== 'function') { return; }
+        var originalPlay = HTMLMediaElement.prototype.play;
+        if (typeof originalPlay !== 'function') { return; }
+        HTMLMediaElement.prototype.play = function(){
+          var self = this;
+          var p = originalPlay.apply(self, arguments);
+          if (p && typeof p.catch === 'function') {
+            p.catch(function(err){
+              report('PLAY', (self.tagName || '') + ' ' + ((err && (err.name + ':' + err.message)) || 'rejected')
+                + ' muted=' + (self.muted ? '1' : '0')
+                + ' src=' + String(self.currentSrc || self.src || '').slice(0, 120));
+            });
+          }
+          return p;
+        };
+      })();
     })();
     """
 }
@@ -1693,15 +2013,34 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         // 离线副本里站内链接如果是绝对地址（https://app.folia-api.top/...），
         // 主框架会直接跳到线上：此时壳还以为自己在本地页上，"重试"会不断往 file:// 打。
         // 主框架真的走出去时，就地切回线上加载态。
-        if isMainFrame && isSameSite && scheme != "file" {
-            isShowingOfflineCopy = false
+        //
+        // 但**失败的导航不能算**：这一句在 `decidePolicyFor` 里，决策时还没开始加载。
+        // 弱网下跳到线上往往当场失败，若此时已经清掉离线标记，`didFailProvisionalNavigation`
+        // 就会走「重试两次 → 回退」那条路，把正在正常出声的离线页整页重载掉 ——
+        // 用户看到的就是「用着用着又闪回加载界面」。真正的切换由 `didCommit` 确认。
+        if isMainFrame && isSameSite && scheme != "file" && !isShowingOfflineCopy {
+            pendingOnlineHandoff = true
         }
 
         decisionHandler(.allow)
     }
 
+    /// 服务器已经有响应、导航真正开始了：这里才敢把「离线副本」标记撤掉。
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        guard pendingOnlineHandoff else { return }
+        pendingOnlineHandoff = false
+        isShowingOfflineCopy = false
+        CrashLog.note("==== offline copy handed off to online ====")
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         lastInsets = .zero
+        documentFinished = true
+        // 文档级导航成功，说明这次加载是好的：「卡住」的配额必须一起清零。
+        // 只在 didFinish 清 stallRetries 而不管 consecutiveLoadFailures 是不对的 ——
+        // 弱网下「卡住一次 → 重载成功」重复三遍后，计数攒到阈值，
+        // 下一次刚正常的加载也会被判成「连不上」，直接被打回离线副本。
+        consecutiveLoadFailures = 0
         pushInsetsIfNeeded()
         ensureShellFlag()
         state.clearLoadFailure()
@@ -1710,9 +2049,6 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         if !isShowingOfflineCopy {
             state.leaveOfflineCopy()
         }
-        // 这一轮导航成功了，连续失败计数要归零；否则几次零星失败会一直累加，
-        // 之后某一次无关的抖动就能直接触发回退。
-        consecutiveLoadFailures = 0
         // 卡住重试的配额同属「这一轮」的概念，成功一次就该重新计数。
         stallRetries.removeAll()
         // 文档加载完不等于画出来了：页面还要拉主 bundle 才能挂 React。
@@ -1757,6 +2093,14 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         let code = (error as NSError).code
         // -999 是「被新导航取消」，属正常流程。
         guard code != NSURLErrorCancelled else { return }
+        // 从离线副本切线上失败：留在本地页上继续用，别让后面的重试/回退
+        // 把正在出声的播放器重载掉。
+        if pendingOnlineHandoff {
+            pendingOnlineHandoff = false
+            CrashLog.note("==== online handoff failed \(code), staying on offline copy ====")
+            state.enterOfflineCopy()
+            return
+        }
         CrashLog.note("==== provisional navigation failed \(code) \(error.localizedDescription) ====")
         state.noteLoadFailure(code)
         // 失败原因分得很细：DNS(-1003)、超时(-1001)、拒绝连接(-1004)、TLS(-1200~)，
@@ -1873,6 +2217,12 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        documentFinished = false
+        hasEvaluatedFirstPaint = false
+        // 每次导航重新判定：上一轮没确认成功的手递手状态不能遗留到下一次。
+        if !isShowingOfflineCopy {
+            pendingOnlineHandoff = false
+        }
         // 播放中不动会话：新导航开始时 `setActive(true)` 会打断正在出声的媒体元素。
         if !wantsAudible || userPaused {
             AudioSessionController.shared.reactivate()

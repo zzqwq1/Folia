@@ -184,7 +184,9 @@ final class AudioSessionController {
         do {
             try session.setCategory(.playback, mode: .default, options: [])
             try session.setActive(true)
+            sessionIsActive = true
         } catch {
+            sessionIsActive = false
             // 失败不影响网页功能，只是切后台可能被系统暂停。
             NSLog("[Folia] audio session setup failed: \(error.localizedDescription)")
         }
@@ -192,7 +194,12 @@ final class AudioSessionController {
 
     /// 从后台回到前台时再激活一次：系统可能在后台把会话降级。
     func reactivate() {
-        try? AVAudioSession.sharedInstance().setActive(true)
+        do {
+            try AVAudioSession.sharedInstance().setActive(true)
+            sessionIsActive = true
+        } catch {
+            sessionIsActive = false
+        }
     }
 
     /// 正在播放时持有的后台任务。
@@ -311,6 +318,7 @@ final class AudioSessionController {
             queue: .main
         ) { [weak self] _ in
             self?.healIfSilenced()
+            self?.recoverIfInactive()
         }
     }
 
@@ -320,25 +328,42 @@ final class AudioSessionController {
     /// 只有「刚才被系统面板盖过」才值得动用 `setCategory`。
     private func markSilencedBySystemPanel() {
         silencedBySystemPanel = isPlaying
+        // 系统面板盖住本 App 时，会话极可能已被系统置为非 active（部分机型连
+        // `secondaryAudioShouldBeSilencedHint` 都不会置位）。先记下来，
+        // 让 `healIfSilenced` 在收起时一定会重建一次通路。
+        if isPlaying {
+            sessionIsActive = false
+            NSLog("[Folia] system panel opened while playing, session assumed inactive")
+        }
     }
 
     /// 收尾时若通路被静音，就重建一次 category 再把会话激活。
     ///
     /// 与 `activate()` 的区别只在触发条件：播放中不动 category 是为了避免误暂停，
     /// 而这里**已经没声了**，重建不会有额外损失；不重建则一直是「显示在播但没声音」。
+    ///
+    /// 原来的判据是 `secondaryAudioShouldBeSilencedHint`，但拉下状态栏 / 控制中心
+    /// 之后再收起时，这个 hint 在老机型与部分系统版本上根本不会置位（它描述的是
+    /// 「别的系统音该不该被静音」，不是「我们的音乐会话是否还活着」）。于是
+    /// 「状态栏滑下再回来没声音」一直没被这条兜住。
+    ///
+    /// 现在的判据换成「会话是否还 active」：拉下控制中心时系统会临时把我们的
+    /// 音频会话置为非 active，收起后不会有任何回调把它救回来。只要该响却已经
+    /// 不是 active，就重建。重建是幂等的，通路本来好着时最多丢一小节声音。
     private func healIfSilenced() {
         guard silencedBySystemPanel else { return }
         silencedBySystemPanel = false
         guard isPlaying else { return }
         let session = AVAudioSession.sharedInstance()
-        // 只在确实是静音泄漏态时动手；正常回前台交给 `reactivate()` 就够。
-        guard session.secondaryAudioShouldBeSilencedHint else { return }
+        guard session.secondaryAudioShouldBeSilencedHint || !sessionIsActive else { return }
         do {
             try session.setCategory(.playback, mode: .default, options: [])
             try session.setActive(true)
+            sessionIsActive = true
             NSLog("[Folia] audio path rebuilt after system panel")
         } catch {
             NSLog("[Folia] audio path rebuild failed: \(error.localizedDescription)")
+            sessionIsActive = false
         }
         // 页面那边此时仍是「在播」状态：重建通路后 AudioContext 可能停在 interrupted，
         // 需要页面自己再唤醒一次。
@@ -348,6 +373,30 @@ final class AudioSessionController {
         // 两路同时补 `play` 会让两套 deck 互相抢，表现为卡顿和爆音。
         // 页面侧的恢复统一由 WebContainerView 串行执行。
         NotificationCenter.default.post(name: .foliaAudioPathRebuilt, object: nil)
+    }
+
+    /// 会话当前是否「我们认为」仍处于 active。
+    ///
+    /// `AVAudioSession` 没有公开的「isActive」查询：只能自己在设过之后记一笔。
+    /// 这个标志只用来放宽 `healIfSilenced` / `recoverIfInactive` 的触发条件，
+    /// 错了也只会多一次幂等的 `setActive`。
+    private var sessionIsActive = false
+
+    /// 每次收到 `didBecomeActive` 后由壳确认：会话到底还活着没有。
+    ///
+    /// `healIfSilenced` 只在「刚才被系统面板盖过」时动 category，其余场景
+    /// （切到别的 App 再回来、来电结束）会话同样可能被系统置为非 active，
+    /// 而那一路没有任何回调。这里只做一次幂等的 `setActive(true)`：
+    /// 会话本来就活着时它是空操作，不会像 `setCategory` 那样把媒体按停。
+    private func recoverIfInactive() {
+        guard isPlaying, !sessionIsActive else { return }
+        do {
+            try AVAudioSession.sharedInstance().setActive(true)
+            sessionIsActive = true
+            NSLog("[Folia] session re-activated after becoming active")
+        } catch {
+            NSLog("[Folia] session re-activate failed: \(error.localizedDescription)")
+        }
     }
 
     /// 上一次 `willResignActive` 是否由状态栏/控制中心引起。
@@ -374,6 +423,7 @@ final class AudioSessionController {
             case .began:
                 // .began 时必须把会话让出去，否则系统会直接掐断音频。
                 self?.interrupted = true
+                self?.sessionIsActive = false
                 NSLog("[Folia] audio interrupted")
             default:
                 guard let self, self.interrupted else { return }

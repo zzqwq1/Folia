@@ -24,8 +24,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.folia.web
         PRODUCT_NAME: Folia
-        MARKETING_VERSION: "2.1.1"
-        CURRENT_PROJECT_VERSION: "211"
+        MARKETING_VERSION: "2.1"
+        CURRENT_PROJECT_VERSION: "212"
         SWIFT_VERSION: "5.0"
         TARGETED_DEVICE_FAMILY: "1,2"
         INFOPLIST_FILE: Folia/Info.plist
@@ -37,7 +37,10 @@ targets:
         SUPPORTS_MACCATALYST: NO
         SWIFT_EMIT_LOC_STRINGS: YES
         SWIFT_INSTALL_OBJC_HEADER: NO
+        # 只编 arm64：老机型（iPhone 7 及以前、iPhone 8 部分版本）在 arm64e 二进制上
+        # 出现过「装得上但一点播放就退出」。arm64 在所有 A 系列芯片上都能跑。
         ARCHS: arm64
+        EXCLUDED_ARCHS[sdk=iphoneos*]: arm64e
         ONLY_ACTIVE_ARCH: NO
         SWIFT_COMPILATION_MODE: wholemodule
         ENABLE_BITCODE: NO
