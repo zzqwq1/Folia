@@ -459,13 +459,24 @@ final class WebContainerView: UIView {
             wakeReloadTried = true
             wakeRecoveryInFlight = true
             didReachFirstPaint = false
+            // 这一次是「唤醒重载」，不是用户主动要重来：把看门狗也重开，
+            // 但**不能**因此把「本次启动见过首屏」这条事实抹掉 —— 那是判断
+            // 「页面是不是真的死了」的唯一依据，抹掉后下面那个 8 秒兜底
+            // 会在页面其实已经正常的情况下照样跑一次重建。
             webView.load(URLRequest(url: Self.startURL,
                                     cachePolicy: .reloadIgnoringLocalCacheData,
                                     timeoutInterval: 30))
             scheduleProgressWatchdog()
-            // 原地重载也唤不回来（进度看门狗会再判一次）：换干净存储重建。
+            // 页面上本来就有内容（曾被判死只是探测失败）：给足时间让这份文档
+            // 自己画回来，别在 8 秒后无脑重建 —— 重建会把用户手上的歌单整页丢掉。
+            let hadContent = reachedFirstPaintOnce
             DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) { [weak self] in
                 guard let self, !self.didReachFirstPaint else { return }
+                // 原来就有内容的页面，允许它在更长时间里自己画回来，绝不重建。
+                guard !hadContent else {
+                    CrashLog.note("==== foreground wake: page had content, keep waiting (no rebuild) ====")
+                    return
+                }
                 CrashLog.note("==== foreground wake: reload did not paint, rebuilding ====")
                 self.rebuildWebView(resumeAudio: resume, cleanStore: true)
             }
@@ -580,7 +591,16 @@ final class WebContainerView: UIView {
         guard documentFinished, !state.showsBlockingNotice else { return }
         // 缓冲期：冻结的进程被唤醒后要先跑几十毫秒 JS 才回答得上，紧贴着回调问会误判。
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            guard let self, !self.didReachFirstPaint else { return }
+            guard let self else { return }
+            // 判「页面死了」不能看 `didReachFirstPaint`：它会被导航与看门狗清零，
+            // 而用户从歌单页切回来时，这一路上很可能刚重开过一次看门狗。
+            // 于是「页面好好地在歌单上」也会被判成唤醒失败 → 白走一次重载 →
+            // 用户看到的就是「切回来闪一下加载界面，歌也断了」。
+            // 用 `reachedFirstPaintOnce`（本次启动出现过首屏）当判据才准。
+            guard !self.reachedFirstPaintOnce else {
+                self.probePageLiveness(thenRecover: false)
+                return
+            }
             self.probePageLiveness(thenRecover: true)
         }
     }
@@ -1415,6 +1435,16 @@ final class WebContainerView: UIView {
 
     /// 首屏是否已经就绪（React 挂上、加载遮罩淡出）。
     private var didReachFirstPaint = false
+
+    /// **本次启动**是否已经见过一次首屏。
+    ///
+    /// 与 `didReachFirstPaint` 的区别是它不会被导航 / 看门狗 / `probePageLiveness` 清掉：
+    /// 这些地方清 `didReachFirstPaint` 是为了「这一轮重新等首屏」，
+    /// 但回前台探测那一条路把「首屏没到」直接当成「页面已经死了」，
+    /// 于是只要用户切出去一会儿（或者只是页面慢了一拍），
+    /// 就会被判成唤醒失败、白走一遍重载 —— 用户看到的就是「切回来闪一下加载界面」。
+    /// 首屏一旦出现过，`WKWebView` 的 SPA 路由切换不会把它退回去，这个标记就可以当硬事实用。
+    private var reachedFirstPaintOnce = false
     /// 这一次导航的文档是否已经加载完（`didFinish`）。
     private var documentFinished = false
     /// 首屏检查是否已经跑出一轮结论（遮罩被去掉）。
@@ -1453,6 +1483,17 @@ final class WebContainerView: UIView {
 
     private func reportStallIfNeeded() {
         guard !didReachFirstPaint else { return }
+        // **曾经画出来过的页面，永远不再判「卡在首屏」。**
+        //
+        // 这是「进歌单 / 切歌词之后闪回加载界面」最直接的一条成因：
+        // 看门狗只看 `didReachFirstPaint`，而这个标志会被 `scheduleProgressWatchdog()`
+        // 无条件清零 —— 报暂停被拒、唤醒重载、原地重载都会重开一次。
+        // 于是用户正常听着歌、在歌单里翻两分钟，30 秒到点后这里照常跑一遍诊断：
+        // 这时 `documentFinished` 常被中间那次导航置回 false，
+        // `hasEvaluatedFirstPaint` 也是 false，两条豁免都不成立 → 直接 `retryLoadForStall()`。
+        // 三次之后还要回退到离线副本。用户看到的就是「歌听得好好地，界面突然转圈」。
+        // 页面既然已经画出来过，就没有「首屏卡住」这回事了，这条判据必须最先返回。
+        guard !reachedFirstPaintOnce else { return }
         let js = """
         (function(){
           var splash = document.getElementById('app-splash');
@@ -1592,6 +1633,7 @@ final class WebContainerView: UIView {
                 DispatchQueue.main.async {
                     self.didReachFirstPaint = true
                     self.hasEvaluatedFirstPaint = true
+                    self.reachedFirstPaintOnce = true
                 }
                 // 页面已经画出来了：解除「刚重建过」的保护位，允许下一次进程被回收
                 // 再走一遍自愈（否则这一次成功后，之后真正的 OOM 会被判成
@@ -2087,35 +2129,58 @@ final class WebContainerView: UIView {
         webView?.evaluateJavaScript(js, completionHandler: nil)
     }
 
-    /// 视频背景的兜底驱动。
+    /// 视频层（背景视频 / 歌词页可视化层）的兜底驱动。
     ///
-    /// 线上页的背景 `<video>` 的播放时机挂在「播放器状态变化」与一个 2 秒的定时校正上：
+    /// 线上页的 `<video>` 播放时机挂在「播放器状态变化」与一个 2 秒的定时校正上：
     /// 只要那次 `play()` 被拦（控制中心收起后媒体进程被挂起、切后台再回来），
     /// 它就再也不会自己起来 —— 用户看到的就是「视频背景设了，画面却一直是静态的、
     /// 或者停在第一帧找不到效果」。这里补的正是这一拍：
     /// - 页面已经在放：一格都不动；
     /// - 明确处于暂停且有源：补一次 `play()`。
+    /// 只覆盖**静音**的视频（或有 `aria-hidden` 标记的那些），
+    /// 带声音的视频层绝不碰，免得和播放器的音频通路抢。
     /// 只读 DOM，不改任何全局原型，对普通播放页的音频没有影响。
     private func driveBackgroundVideo() {
         let js = """
         (function(){
           try {
-            var list = document.querySelectorAll('video[aria-hidden="true"]');
+            var list = document.querySelectorAll('video');
+            var played = 0, none = 0;
             for (var i = 0; i < list.length; i += 1) {
               var v = list[i];
-              if (!v.src || v.ended) { continue; }
+              var hidden = v.getAttribute('aria-hidden') === 'true';
+              // **只有静音的视频才允许壳代它 play()。**
+              //
+              // 早先这里用的是 `video[aria-hidden="true"]` 这一个选择器，
+              // 只覆盖「设置里的背景视频」，歌词/可视化页那一层（用户自己导入的
+              // 本地视频）根本不在这条链上，于是「导入了却一直不显示」。
+              // 但也不能对所有 `<video>` 无脑补放：带声音的视频被壳反复 play()
+              // 会和播放器的音频抢通路，听起来就是歌一卡一顿。
+              // 所以判断依据改成「静音」这一条客观事实：静音的视频层
+              // （背景视频、可视化视频）都该一直在放，带声的一格都不碰。
+              if (!v.muted && !hidden) { continue; }
+              if (!v.currentSrc && !v.src) { none += 1; continue; }
+              if (v.ended) { continue; }
+              // 视频层必须是循环播放：页面自己的循环开关在重建图层后经常没接上，
+              // 播到结尾就停住，看起来就是「导入成功了但画面不动」。
+              try { v.loop = true; } catch (e) {}
               if (v.paused) {
                 var p = v.play();
                 if (p && p.catch) { p.catch(function(){}); }
-                return 'played';
+                played += 1;
               }
-              return 'playing';
             }
-            return 'none';
+            if (played > 0) { return 'played'; }
+            return none > 0 ? 'no-source' : (list.length ? 'playing' : 'none');
           } catch (e) { return 'error'; }
         })();
         """
-        webView?.evaluateJavaScript(js, completionHandler: nil)
+        webView?.evaluateJavaScript(js) { result, _ in
+            // 只在真的动了手、或者一个源都没有时留一行：
+            // 保活每 4 秒会走一次这里，健康时写日志会把文件刷满。
+            guard let flag = result as? String, flag == "played" || flag == "no-source" else { return }
+            CrashLog.note("==== video layer drive: \(flag) ====")
+        }
     }
 
     // MARK: - 安全区
@@ -2522,9 +2587,28 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         filePicker = presenter
         CrashLog.note("==== open panel requested ====")
         presenter.present(from: topPresenter) { [weak self] urls in
-            CrashLog.note("==== open panel picked \(urls?.count ?? 0) ====")
+            // 把选中的文件描述记下来：用户反馈「导入视频后没变化」，
+            // 日志里至少要先能分清「面板根本没选中」「选中了但不是视频」
+            // 与「选中了、扩展名也对，是页面那侧没接住」这三种完全不同的情况。
+            if let urls, !urls.isEmpty {
+                let described = urls.map { url -> String in
+                    let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.intValue ?? -1
+                    return "\(url.lastPathComponent) ext=\(url.pathExtension) size=\(size)"
+                }.joined(separator: " | ")
+                CrashLog.note("==== open panel picked \(urls.count): \(described) ====")
+            } else {
+                CrashLog.note("==== open panel picked 0 (cancelled) ====")
+            }
             completionHandler(urls)
             self?.filePicker = nil
+            // 选完两秒后补一份视频层现场：如果页面确实接住了文件，
+            // 这一份里就能看到 kind=blob、ready/err 的真实值；
+            // 若仍然 `videos=0` 或 `kind=none`，问题就在页面那一侧的赋值链上。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                self?.collectVideoLayerReport { report in
+                    CrashLog.note("==== video layer after pick ====\n\(report)")
+                }
+            }
         }
     }
 
@@ -2832,11 +2916,63 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
     /// 页面脚本早在切歌词时就已随进程一起消失，`evaluateJavaScript` 拿不到任何东西；
     /// 但 `title` / `url` 仍留在 UI 进程这一侧的 WKWebView 上，
     /// 足以判断「是不是在歌词页被杀」——若是，就能确认是页面重建播放器树时把进程搞死的。
+    ///
+    /// 另外补一份「视频层」现场：用户导入本地视频后界面没变化、随后退出就闪退，
+    /// 只有知道页面上那几个 `<video>` 到底有没有挂上源、是什么协议（`blob:` / `file:`）、
+    /// 解码到了哪一步（`readyState` / `error.code`），才能区分是
+    /// 「页面根本没接住这个文件」还是「接住了但解码把进程顶死」。
     private func collectTerminationContext() {
         let title = webView.title ?? "-"
         let url = webView.url?.absoluteString ?? "-"
         let audible = Self.wasAudibleInBackground ? "1" : "0"
-        CrashLog.note("==== termination context ====\ntitle=\(title)\nurl=\(url)\naudible=\(audible)")
+        let head = "==== termination context ====\ntitle=\(title)\nurl=\(url)\naudible=\(audible)"
+        // 进程刚死时这条 JS 通常已经打不回来，所以先落标题/URL，再异步补视频现场；
+        // 补回来的那几行会单独成段，不会覆盖上面的内容。
+        CrashLog.note(head)
+        collectVideoLayerReport { report in
+            CrashLog.note("==== video layer at termination ====\n\(report)")
+        }
+    }
+
+    /// 页面里所有 `<video>` 的关键状态，一行一个。
+    ///
+    /// 只读 DOM，不改任何状态。歌词/可视化页的视频层与背景视频
+    /// （`video[aria-hidden="true"]`）都在这份清单里。
+    private func collectVideoLayerReport(_ completion: @escaping (String) -> Void) {
+        let js = """
+        (function(){
+          try {
+            var list = document.querySelectorAll('video');
+            if (!list.length) { return 'videos=0'; }
+            var out = ['videos=' + list.length];
+            for (var i = 0; i < list.length; i += 1) {
+              var v = list[i];
+              var src = String(v.currentSrc || v.src || '');
+              var kind = src.indexOf('blob:') === 0 ? 'blob'
+                : src.indexOf('file:') === 0 ? 'file'
+                : src.indexOf('data:') === 0 ? 'data'
+                : src ? 'remote' : 'none';
+              out.push([i,
+                'hidden=' + (v.getAttribute('aria-hidden') || '-'),
+                'kind=' + kind,
+                'ready=' + v.readyState,
+                'net=' + v.networkState,
+                'err=' + (v.error ? v.error.code : '-'),
+                'size=' + v.videoWidth + 'x' + v.videoHeight,
+                'paused=' + (v.paused ? 1 : 0),
+                't=' + Math.round((v.currentTime || 0) * 10) / 10,
+                'd=' + (isFinite(v.duration) ? Math.round(v.duration * 10) / 10 : '-')
+              ].join(' '));
+            }
+            return out.join('\\n');
+          } catch (e) { return 'error ' + (e && e.message); }
+        })();
+        """
+        webView?.evaluateJavaScript(js) { result, error in
+            DispatchQueue.main.async {
+                completion((result as? String) ?? (error?.localizedDescription ?? "-"))
+            }
+        }
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {

@@ -14,7 +14,6 @@ enum CrashLog {
     /// `CacheSweeper.sweepOnColdLaunch()` 会立刻先写一行，于是「上一次进程是怎么死的」
     /// 那几行经常在用户去取日志之前就被覆盖掉 —— 这恰恰是定位「大退重进进歌单闪退」
     /// 唯一需要的证据。改成按启动分文件后，上一个进程的记录一定还在。
-    private static let fileName = "folia-crash.log"
     private static let limit = 256 * 1024
 
     /// 本次启动专属的日志文件。第一次写日志时才建。
