@@ -1,1 +1,1 @@
-import{Ns as e}from"../lucide-icons-BWrg6OBA.js";var t={name:`flag-triangle-right`,size:24,node:[[`path`,{d:`M6 22V2.8a.8.8 0 0 1 1.17-.71l11.38 5.69a.8.8 0 0 1 0 1.44L6 15.5`,key:`kfjsu0`}]]};t.node;var n=e(t);export{t as __iconData,n as default};
+aW1wb3J0e05zIGFzIGV9ZnJvbSIuLi9sdWNpZGUtaWNvbnMtQldyZzZPQkEuanMiO3ZhciB0PXtuYW1lOmBmbGFnLXRyaWFuZ2xlLXJpZ2h0YCxzaXplOjI0LG5vZGU6W1tgcGF0aGAse2Q6YE02IDIyVjIuOGEuOC44IDAgMCAxIDEuMTctLjcxbDExLjM4IDUuNjlhLjguOCAwIDAgMSAwIDEuNDRMNiAxNS41YCxrZXk6YGtmanN1MGB9XV19O3Qubm9kZTt2YXIgbj1lKHQpO2V4cG9ydHt0IGFzIF9faWNvbkRhdGEsbiBhcyBkZWZhdWx0fTs=

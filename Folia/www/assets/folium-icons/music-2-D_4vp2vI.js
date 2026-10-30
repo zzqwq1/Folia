@@ -1,1 +1,1 @@
-import{Ns as e}from"../lucide-icons-BWrg6OBA.js";var t={name:`music-2`,size:24,node:[[`circle`,{cx:`8`,cy:`18`,r:`4`,key:`1fc0mg`}],[`path`,{d:`M12 18V2l7 4`,key:`g04rme`}]]};t.node;var n=e(t);export{t as __iconData,n as default};
+aW1wb3J0e05zIGFzIGV9ZnJvbSIuLi9sdWNpZGUtaWNvbnMtQldyZzZPQkEuanMiO3ZhciB0PXtuYW1lOmBtdXNpYy0yYCxzaXplOjI0LG5vZGU6W1tgY2lyY2xlYCx7Y3g6YDhgLGN5OmAxOGAscjpgNGAsa2V5OmAxZmMwbWdgfV0sW2BwYXRoYCx7ZDpgTTEyIDE4VjJsNyA0YCxrZXk6YGcwNHJtZWB9XV19O3Qubm9kZTt2YXIgbj1lKHQpO2V4cG9ydHt0IGFzIF9faWNvbkRhdGEsbiBhcyBkZWZhdWx0fTs=

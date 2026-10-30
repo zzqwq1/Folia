@@ -1,1 +1,1 @@
-var e=(e,t,n,r)=>`clamp(${(e*r).toFixed(3)}rem, ${(t*r).toFixed(3)}vw, ${(n*r).toFixed(3)}rem)`,t=(t=1)=>{let n=Number.isFinite(t)&&t>0?t:1;return{translationFontSize:e(1.125,2.6,1.25,n),upcomingFontSize:e(.875,2,1,n)}};export{t};
+dmFyIGU9KGUsdCxuLHIpPT5gY2xhbXAoJHsoZSpyKS50b0ZpeGVkKDMpfXJlbSwgJHsodCpyKS50b0ZpeGVkKDMpfXZ3LCAkeyhuKnIpLnRvRml4ZWQoMyl9cmVtKWAsdD0odD0xKT0+e2xldCBuPU51bWJlci5pc0Zpbml0ZSh0KSYmdD4wP3Q6MTtyZXR1cm57dHJhbnNsYXRpb25Gb250U2l6ZTplKDEuMTI1LDIuNiwxLjI1LG4pLHVwY29taW5nRm9udFNpemU6ZSguODc1LDIsMSxuKX19O2V4cG9ydHt0fTs=

@@ -1,1 +1,1 @@
-import{Ns as e}from"../lucide-icons-BWrg6OBA.js";var t={name:`chevron-last`,size:24,node:[[`path`,{d:`m7 18 6-6-6-6`,key:`lwmzdw`}],[`path`,{d:`M17 6v12`,key:`1o0aio`}]]};t.node;var n=e(t);export{t as __iconData,n as default};
+aW1wb3J0e05zIGFzIGV9ZnJvbSIuLi9sdWNpZGUtaWNvbnMtQldyZzZPQkEuanMiO3ZhciB0PXtuYW1lOmBjaGV2cm9uLWxhc3RgLHNpemU6MjQsbm9kZTpbW2BwYXRoYCx7ZDpgbTcgMTggNi02LTYtNmAsa2V5OmBsd216ZHdgfV0sW2BwYXRoYCx7ZDpgTTE3IDZ2MTJgLGtleTpgMW8wYWlvYH1dXX07dC5ub2RlO3ZhciBuPWUodCk7ZXhwb3J0e3QgYXMgX19pY29uRGF0YSxuIGFzIGRlZmF1bHR9Ow==

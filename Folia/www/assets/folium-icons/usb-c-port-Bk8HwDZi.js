@@ -1,1 +1,1 @@
-import{Ns as e}from"../lucide-icons-BWrg6OBA.js";var t={name:`usb-c-port`,size:24,node:[[`path`,{d:`M6 12h12`,key:`8npq4p`}],[`rect`,{x:`2`,y:`8`,width:`20`,height:`8`,rx:`4`,key:`86l77p`}]]};t.node;var n=e(t);export{t as __iconData,n as default};
+aW1wb3J0e05zIGFzIGV9ZnJvbSIuLi9sdWNpZGUtaWNvbnMtQldyZzZPQkEuanMiO3ZhciB0PXtuYW1lOmB1c2ItYy1wb3J0YCxzaXplOjI0LG5vZGU6W1tgcGF0aGAse2Q6YE02IDEyaDEyYCxrZXk6YDhucHE0cGB9XSxbYHJlY3RgLHt4OmAyYCx5OmA4YCx3aWR0aDpgMjBgLGhlaWdodDpgOGAscng6YDRgLGtleTpgODZsNzdwYH1dXX07dC5ub2RlO3ZhciBuPWUodCk7ZXhwb3J0e3QgYXMgX19pY29uRGF0YSxuIGFzIGRlZmF1bHR9Ow==

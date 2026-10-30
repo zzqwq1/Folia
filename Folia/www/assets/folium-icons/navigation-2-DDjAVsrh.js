@@ -1,1 +1,1 @@
-import{Ns as e}from"../lucide-icons-BWrg6OBA.js";var t={name:`navigation-2`,size:24,node:[[`polygon`,{points:`12 2 19 21 12 17 5 21 12 2`,key:`x8c0qg`}]]};t.node;var n=e(t);export{t as __iconData,n as default};
+aW1wb3J0e05zIGFzIGV9ZnJvbSIuLi9sdWNpZGUtaWNvbnMtQldyZzZPQkEuanMiO3ZhciB0PXtuYW1lOmBuYXZpZ2F0aW9uLTJgLHNpemU6MjQsbm9kZTpbW2Bwb2x5Z29uYCx7cG9pbnRzOmAxMiAyIDE5IDIxIDEyIDE3IDUgMjEgMTIgMmAsa2V5OmB4OGMwcWdgfV1dfTt0Lm5vZGU7dmFyIG49ZSh0KTtleHBvcnR7dCBhcyBfX2ljb25EYXRhLG4gYXMgZGVmYXVsdH07

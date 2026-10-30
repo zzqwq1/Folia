@@ -1,1 +1,1 @@
-import{Ns as e}from"../lucide-icons-BWrg6OBA.js";var t={name:`chevrons-down-up`,size:24,node:[[`path`,{d:`m7 20 5-5 5 5`,key:`13a0gw`}],[`path`,{d:`m7 4 5 5 5-5`,key:`1kwcof`}]]};t.node;var n=e(t);export{t as __iconData,n as default};
+aW1wb3J0e05zIGFzIGV9ZnJvbSIuLi9sdWNpZGUtaWNvbnMtQldyZzZPQkEuanMiO3ZhciB0PXtuYW1lOmBjaGV2cm9ucy1kb3duLXVwYCxzaXplOjI0LG5vZGU6W1tgcGF0aGAse2Q6YG03IDIwIDUtNSA1IDVgLGtleTpgMTNhMGd3YH1dLFtgcGF0aGAse2Q6YG03IDQgNSA1IDUtNWAsa2V5OmAxa3djb2ZgfV1dfTt0Lm5vZGU7dmFyIG49ZSh0KTtleHBvcnR7dCBhcyBfX2ljb25EYXRhLG4gYXMgZGVmYXVsdH07

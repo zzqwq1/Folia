@@ -1,16 +1,1 @@
-var e=`
-in vec2 aPosition;
-out vec2 vTextureCoord;
-
-uniform vec4 uInputSize;
-uniform vec4 uOutputFrame;
-uniform vec4 uOutputTexture;
-
-void main(void) {
-    vec2 position = aPosition * uOutputFrame.zw + uOutputFrame.xy;
-    position.x = position.x * (2.0 / uOutputTexture.x) - 1.0;
-    position.y = position.y * (2.0 * uOutputTexture.z / uOutputTexture.y) - uOutputTexture.z;
-    gl_Position = vec4(position, 0.0, 1.0);
-    vTextureCoord = aPosition * (uOutputFrame.zw * uInputSize.zw);
-}
-`;export{e as t};
+dmFyIGU9YAppbiB2ZWMyIGFQb3NpdGlvbjsKb3V0IHZlYzIgdlRleHR1cmVDb29yZDsKCnVuaWZvcm0gdmVjNCB1SW5wdXRTaXplOwp1bmlmb3JtIHZlYzQgdU91dHB1dEZyYW1lOwp1bmlmb3JtIHZlYzQgdU91dHB1dFRleHR1cmU7Cgp2b2lkIG1haW4odm9pZCkgewogICAgdmVjMiBwb3NpdGlvbiA9IGFQb3NpdGlvbiAqIHVPdXRwdXRGcmFtZS56dyArIHVPdXRwdXRGcmFtZS54eTsKICAgIHBvc2l0aW9uLnggPSBwb3NpdGlvbi54ICogKDIuMCAvIHVPdXRwdXRUZXh0dXJlLngpIC0gMS4wOwogICAgcG9zaXRpb24ueSA9IHBvc2l0aW9uLnkgKiAoMi4wICogdU91dHB1dFRleHR1cmUueiAvIHVPdXRwdXRUZXh0dXJlLnkpIC0gdU91dHB1dFRleHR1cmUuejsKICAgIGdsX1Bvc2l0aW9uID0gdmVjNChwb3NpdGlvbiwgMC4wLCAxLjApOwogICAgdlRleHR1cmVDb29yZCA9IGFQb3NpdGlvbiAqICh1T3V0cHV0RnJhbWUuencgKiB1SW5wdXRTaXplLnp3KTsKfQpgO2V4cG9ydHtlIGFzIHR9Ow==

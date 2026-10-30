@@ -1,1 +1,1 @@
-import{Ns as e}from"../lucide-icons-BWrg6OBA.js";var t={name:`clock-12`,size:24,node:[[`circle`,{cx:`12`,cy:`12`,r:`10`,key:`1mglay`}],[`path`,{d:`M12 6v6`,key:`1ipuwl`}]]};t.node;var n=e(t);export{t as __iconData,n as default};
+aW1wb3J0e05zIGFzIGV9ZnJvbSIuLi9sdWNpZGUtaWNvbnMtQldyZzZPQkEuanMiO3ZhciB0PXtuYW1lOmBjbG9jay0xMmAsc2l6ZToyNCxub2RlOltbYGNpcmNsZWAse2N4OmAxMmAsY3k6YDEyYCxyOmAxMGAsa2V5OmAxbWdsYXlgfV0sW2BwYXRoYCx7ZDpgTTEyIDZ2NmAsa2V5OmAxaXB1d2xgfV1dfTt0Lm5vZGU7dmFyIG49ZSh0KTtleHBvcnR7dCBhcyBfX2ljb25EYXRhLG4gYXMgZGVmYXVsdH07

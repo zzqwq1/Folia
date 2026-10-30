@@ -1,1 +1,1 @@
-import{Ns as e}from"../lucide-icons-BWrg6OBA.js";var t={name:`rectangle-vertical`,size:24,node:[[`rect`,{width:`12`,height:`20`,x:`6`,y:`2`,rx:`2`,key:`1oxtiu`}]]};t.node;var n=e(t);export{t as __iconData,n as default};
+aW1wb3J0e05zIGFzIGV9ZnJvbSIuLi9sdWNpZGUtaWNvbnMtQldyZzZPQkEuanMiO3ZhciB0PXtuYW1lOmByZWN0YW5nbGUtdmVydGljYWxgLHNpemU6MjQsbm9kZTpbW2ByZWN0YCx7d2lkdGg6YDEyYCxoZWlnaHQ6YDIwYCx4OmA2YCx5OmAyYCxyeDpgMmAsa2V5OmAxb3h0aXVgfV1dfTt0Lm5vZGU7dmFyIG49ZSh0KTtleHBvcnR7dCBhcyBfX2ljb25EYXRhLG4gYXMgZGVmYXVsdH07

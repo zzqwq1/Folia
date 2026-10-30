@@ -1,1 +1,1 @@
-import{Ns as e}from"../lucide-icons-BWrg6OBA.js";var t={name:`russian-ruble`,size:24,node:[[`path`,{d:`M6 11h8a4 4 0 0 0 0-8H9v18`,key:`18ai8t`}],[`path`,{d:`M6 15h8`,key:`1y8f6l`}]]};t.node;var n=e(t);export{t as __iconData,n as default};
+aW1wb3J0e05zIGFzIGV9ZnJvbSIuLi9sdWNpZGUtaWNvbnMtQldyZzZPQkEuanMiO3ZhciB0PXtuYW1lOmBydXNzaWFuLXJ1YmxlYCxzaXplOjI0LG5vZGU6W1tgcGF0aGAse2Q6YE02IDExaDhhNCA0IDAgMCAwIDAtOEg5djE4YCxrZXk6YDE4YWk4dGB9XSxbYHBhdGhgLHtkOmBNNiAxNWg4YCxrZXk6YDF5OGY2bGB9XV19O3Qubm9kZTt2YXIgbj1lKHQpO2V4cG9ydHt0IGFzIF9faWNvbkRhdGEsbiBhcyBkZWZhdWx0fTs=
