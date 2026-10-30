@@ -684,7 +684,15 @@ final class WebContainerView: UIView {
             // 原生不碰；只有回到前台时才做一次**探测式**恢复，
             // 通路没问题就一格都不动 —— 这就是「切桌面 / 锁屏来回切，歌不停」的保证。
             guard UIApplication.shared.applicationState == .active else { return }
-            guard self.foregroundProbes < 6 else { return }
+            // 配额只用来「降低探测频率」，不能变成「探够就再也不管」。
+            //
+            // 早先是 `foregroundProbes < 6`：一直停在前台听歌时，12 秒后保活就彻底
+            // 停摆，之后无论被谁静默掐断都没人接手 —— 用户看到的是「放在那不动，
+            // 过一阵自己没声了」。现在改成每两拍（4 秒）重新放行一轮，
+            // 实际效果是「隔 2 秒探一次」，既不会每拍都碰音频通路，也不会漏掉。
+            if self.foregroundProbes >= 2 {
+                self.foregroundProbes = 0
+            }
             self.foregroundProbes += 1
             self.enforcePlaybackIfNeeded(reason: "keepalive")
         }
@@ -827,6 +835,7 @@ final class WebContainerView: UIView {
             if contextOK && !silencedHint {
                 // 通路完好：一格音频状态都不要碰，只把「想做待办」结掉。
                 CrashLog.note("==== audio path healthy, skip rebuild (\(reason)) ====")
+                self.brokenProbeStreak = 0
                 self.finishAudioRecovery()
                 return
             }
@@ -841,9 +850,26 @@ final class WebContainerView: UIView {
             self.isMediaHealthy { healthy in
                 if healthy && !silencedHint {
                     CrashLog.note("==== audio path healthy via media probe, skip rebuild (\(reason)) ====")
+                    self.brokenProbeStreak = 0
                     self.finishAudioRecovery()
                     return
                 }
+                // 连续两次判「断」才真去重建。
+                //
+                // 保活轮询是 2 秒一拍，而 `evaluateJavaScript` 与 `AudioContext.state`
+                // 都有一拍延迟：页面正在换页 / 正在 seek / 正在交叉淡化时，
+                // 单次探测很容易抓到「media 暂时还没进 playing」的瞬间。
+                // 早先这里一次为假就 `setCategory` + `setActive`，那是**自己动手把
+                // 好端端的歌按停**：用户听着就是「没碰它，突然停一下又接着放」，
+                // 一卡一顿。现在要求连续两拍都断才动手，误判窗口扩大到 4 秒，
+                // 真正的断流（进程挂起、会话被夺）照样能在 4 秒内被发现。
+                self.brokenProbeStreak += 1
+                guard self.brokenProbeStreak >= 2 else {
+                    CrashLog.note("==== audio probe suspicious, waiting second sample (\(reason)) ====")
+                    self.finishAudioRecovery()
+                    return
+                }
+                self.brokenProbeStreak = 0
                 CrashLog.note("==== audio path broken (contextOK=\(contextOK ? 1 : 0) silencedHint=\(silencedHint ? 1 : 0) reason=\(reason)) ====")
                 self.recoverAudioPathPass(reason: reason, attempt: 0)
             }
@@ -915,6 +941,12 @@ final class WebContainerView: UIView {
 
     private var audioRecoveryInFlight = false
     private var audioRecoveryPending = false
+
+    /// 连续几次探测判定「通路断了」。只有累计到 2 次才真的重建会话。
+    ///
+    /// 单次探测会因为页面换页 / seek / 交叉淡化的瞬间抖动而误报，
+    /// 误报的代价是「亲手把正在放歌按停一次」，用户听到的就是无端卡顿。
+    private var brokenProbeStreak = 0
 
     /// 回前台时的补放：不看前后台状态，其余条件与轮询一致。
     ///

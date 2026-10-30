@@ -182,7 +182,7 @@ final class AudioSessionController {
     func activate() {
         let session = AVAudioSession.sharedInstance()
         do {
-            try session.setCategory(.playback, mode: .default, options: [])
+            try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
             try session.setActive(true)
             sessionIsActive = true
         } catch {
@@ -191,6 +191,15 @@ final class AudioSessionController {
             NSLog("[Folia] audio session setup failed: \(error.localizedDescription)")
         }
     }
+
+    /// 重设 category 时统一走这里，保证各处策略一致。
+    ///
+    /// `.mixWithOthers` 是「不打断别人、也不被别人打断」的关键：
+    /// 用空的 options 时本 App 会**独占**音频通路 —— 用户原本在 QQ 音乐听歌，
+    /// 一切进 Folia，对方的会话就被系统掐掉（表现是进度在走却没声）；
+    /// 而本 App 一旦占住通路就不放，退出去之后对方也接不回来。
+    /// 混音模式下两边可以共存，退出任意一方都不会让另一方卡死。
+    private static let categoryOptions: AVAudioSession.CategoryOptions = [.mixWithOthers]
 
     /// 从后台回到前台时再激活一次：系统可能在后台把会话降级。
     func reactivate() {
@@ -357,7 +366,7 @@ final class AudioSessionController {
         let session = AVAudioSession.sharedInstance()
         guard session.secondaryAudioShouldBeSilencedHint || !sessionIsActive else { return }
         do {
-            try session.setCategory(.playback, mode: .default, options: [])
+            try session.setCategory(.playback, mode: .default, options: Self.categoryOptions)
             try session.setActive(true)
             sessionIsActive = true
             NSLog("[Folia] audio path rebuilt after system panel")
