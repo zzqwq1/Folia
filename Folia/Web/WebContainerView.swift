@@ -46,6 +46,17 @@ final class WebContainerView: UIView {
 
     /// 当前是否正在用包内离线副本。决定「重试」是回线上还是重新读本地文件。
     private var isShowingOfflineCopy = false
+
+    /// 回到前台时，本地副本上那份页面还是不是活的。
+    ///
+    /// 「切后台再回来只剩一只黑屏的壳、一点反应都没有」不是页面崩溃，是 WebContent 进程
+    /// 在后台被判死之后壳没收到回调。`rebuiltSinceLaunch` 只在**本次启动**生效：
+    /// 跑到第 N 天它早已为真，这一次就不能再进重建分支（那会一进后台就被判死），
+    /// 只能按「前台重新唤醒」这条独立的路：先原地重载一次，恢复不掉就换干净存储重建。
+    private var wakeReloadTried = false
+
+    /// 这次挂掉已经按「前台唤醒」处理过一轮，别再退到离线副本。
+    private var wakeRecoveryInFlight = false
     /// 离线副本正在往线上切、但还没确认完成。
     ///
     /// `decidePolicyFor` 只能表示「准备导航」，弱网下这次导航经常当场失败。
@@ -288,6 +299,7 @@ final class WebContainerView: UIView {
         consecutiveLoadFailures = 0
         stallRetries.removeAll()
         isShowingOfflineCopy = false
+        wakeReloadTried = false
         state.clearLoadFailure()
         state.leaveOfflineCopy()
 
@@ -314,6 +326,7 @@ final class WebContainerView: UIView {
         didReachFirstPaint = false
         // 用户主动要一次重试：保护位复位，允许这一轮再走一次进程自愈。
         rebuiltSinceLaunch = false
+        wakeReloadTried = false
         state.clearLoadFailure()
         // 离线副本上点「重试」的语义是「回线上再试一次」，而不是把本地文件重读一遍。
         // 所以这里先把离线标记清掉、失败计数归零，再走正常的线上加载。
@@ -327,6 +340,40 @@ final class WebContainerView: UIView {
                                 cachePolicy: .reloadIgnoringLocalCacheData,
                                 timeoutInterval: 30))
         scheduleProgressWatchdog()
+    }
+
+    /// 回到前台时页面已经死了（本地副本上看不到内容、或者原生的「还活着吗」探测没回来）。
+    ///
+    /// 这是「切后台再回来，还停在加载界面、点哪都没反应」的正面解法。
+    /// 之前这里只走 `rebuiltSinceLaunch` 那条路，而它一旦置位就不会在本次进程里复位：
+    /// 用户第二天回来时 `rebuiltSinceLaunch` 早就是真，前台一判定就进「退回离线副本」，
+    /// 于是每次进后台再回来都变成一次白屏加载 —— 看起来就是「一进软件就闪退」。
+    ///
+    /// 这条路的顺序：先在线上原地重载一次（线上站是缓存的，通常一两百毫秒就画回来），
+    /// 仍没画面才换干净存储重建。`wakeReloadTried` 保证一轮里只会走一次原地重载。
+    private func recoverAfterForegroundWake() {
+        CrashLog.note("==== foreground wake: page not alive ====")
+        // 页面已经没了，任何「用户按了暂停」的现场都跟着没了；这里清掉，
+        // 让重建后能按 `wantsAudible` 决定要不要续播。
+        userPaused = false
+        let resume = Self.wasAudibleInBackground && wantsAudible
+        if !wakeReloadTried && !isShowingOfflineCopy {
+            wakeReloadTried = true
+            wakeRecoveryInFlight = true
+            didReachFirstPaint = false
+            webView.load(URLRequest(url: Self.startURL,
+                                    cachePolicy: .reloadIgnoringLocalCacheData,
+                                    timeoutInterval: 30))
+            scheduleProgressWatchdog()
+            // 原地重载也唤不回来（进度看门狗会再判一次）：换干净存储重建。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) { [weak self] in
+                guard let self, !self.didReachFirstPaint else { return }
+                CrashLog.note("==== foreground wake: reload did not paint, rebuilding ====")
+                self.rebuildWebView(resumeAudio: resume)
+            }
+            return
+        }
+        rebuildWebView(resumeAudio: resume)
     }
 
     /// 回退到 App 包内的那份 `www/`。
@@ -351,6 +398,43 @@ final class WebContainerView: UIView {
         state.enterOfflineCopy()
         webView.loadFileURL(indexURL, allowingReadAccessTo: indexURL.deletingLastPathComponent())
         scheduleProgressWatchdog()
+    }
+
+    /// 回前台后确认页面还是活的。
+    ///
+    /// 后台里 WebContent 进程被系统收走时，`webViewWebContentProcessDidTerminate` 并不一定回调
+    /// （从后台被直接杀掉的那一类经常静默）。壳于是毫不知情：`wantsAudible` 还是真、
+    /// 界面还盖在 `OfflineNotice` 上，用户看到的却是「一进软件就在加载界面」。
+    /// 这里在前台主动问一句页面还在不在：3 秒内没有回答就走唤醒恢复。
+    private func verifyPageAliveAfterWake() {
+        // 正在加载（首屏还没到）时页面本来就没装好，别把它当成死掉；
+        // 已经在整屏提示「加载失败」的那条路走 `hardReload()`，不重复判定。
+        guard documentFinished, !state.showsBlockingNotice else { return }
+        // 缓冲期：冻结的进程被唤醒后要先跑几十毫秒 JS 才回答得上，紧贴着回调问会误判。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self, !self.didReachFirstPaint else { return }
+            self.probePageLiveness(thenRecover: true)
+        }
+    }
+
+    /// 问页面「还活着吗」：先一条最便宜的表达式，再确认 body 有子节点。
+    private func probePageLiveness(thenRecover recover: Bool) {
+        webView.evaluateJavaScript("1+1") { [weak self] result, error in
+            guard let self else { return }
+            if error != nil || result == nil {
+                CrashLog.note("==== wake probe failed: no response from page ====")
+                if recover { self.recoverAfterForegroundWake() }
+                return
+            }
+            // `1+1` 能答只说明 JS 引擎还在；页面剩下空壳时同样是「点了没反应」，
+            // 再确认一次挂载点是不是还在。
+            self.webView.evaluateJavaScript("document.body ? document.body.children.length : 0") { alive, _ in
+                guard let self else { return }
+                guard (alive as? NSNumber)?.intValue ?? 0 == 0 else { return }
+                CrashLog.note("==== wake probe: page is an empty shell ====")
+                if recover { self.recoverAfterForegroundWake() }
+            }
+        }
     }
 
     private var remoteObservation: Any?
@@ -387,6 +471,7 @@ final class WebContainerView: UIView {
             if self.state.showsBlockingNotice {
                 self.hardReload()
             }
+            self.verifyPageAliveAfterWake()
         }
         backgroundObservation = NotificationCenter.default.addObserver(
             forName: UIApplication.didEnterBackgroundNotification,
@@ -1783,6 +1868,10 @@ final class WebContainerView: UIView {
     /// WKWebView 不支持 Service Worker；网页版残留的注册调用只会抛错并在控制台刷屏。
     private static let shellBridgeScript = """
     (function(){
+      // 整段包一层 try：注入点在 document start，早于页面的任何脚本。
+      // 任何一句抛错都会打断后面所有补丁（错误上报、UA 判定、视频消息处理），
+      // 表现为「老机型进不去 / 播放不了」，而且页面上一个错都看不到。
+      try {
       document.documentElement.setAttribute('data-folia-shell', '1');
       window.__FOLIA_SHELL__ = 'ios';
       // 壳的实际版本（project.yml 的 MARKETING_VERSION），赞赏弹窗的「当前版本」用它，
@@ -2081,6 +2170,13 @@ final class WebContainerView: UIView {
           return p;
         };
       })();
+      } catch (e) {
+        // 兜底：壳标记先写下去，页面至少能按壳模式排版，不至于整页停在默认桌面上。
+        try {
+          window.__FOLIA_SHELL__ = 'ios';
+          window.__foliaBridgeError = String(e && (e.stack || e.message) || e);
+        } catch (e2) {}
+      }
     })();
     """
 }
@@ -2273,7 +2369,10 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         contentProcessRestarts = contentProcessRestarts.filter { now.timeIntervalSince($0) < 60 }
         // 离线副本是本地文件，导航失败说明包有问题，重试本地文件没有意义，
         // 直接交给提示层（`OfflineNotice`）。
-        guard !isShowingOfflineCopy else { return }
+        //
+        // 但回前台唤醒那一轮是例外：那时页面已经在后台被系统收走过，`file://` 读不到
+        // 几乎都是 Process Assertion 过期导致的，重载一次就能回来。
+        guard !isShowingOfflineCopy || wakeRecoveryInFlight else { return }
         // 回退判断必须排在下面的限流之前：`contentProcessRestarts` 是「进程级重启」的配额，
         // 而这里统计的是「这一轮连续几次加载失败」。若放在限流之后，第一次失败就占掉配额、
         // 第二次直接 return，后面的计数永远到不了阈值 —— 回退逻辑形同虚设。
@@ -2353,6 +2452,14 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         // 但重建要有一次性的保护：重建后新页面**立刻**又挂，说明问题不在存储，
         // 再重建一万次也只是黑屏循环。这种情况下退回包内离线副本，
         // 至少让用户进得去、听得见。
+        if wakeRecoveryInFlight {
+            // 这次挂掉本来就是「前台唤醒」那一轮在修，别把它判成「重建也救不了」。
+            wakeRecoveryInFlight = false
+            CrashLog.note("==== web content died during wake recovery, rebuilding once more ====")
+            stopKeepAliveTimer()
+            rebuildWebView(resumeAudio: shouldResume)
+            return
+        }
         if rebuiltSinceLaunch {
             stopKeepAliveTimer()
             CrashLog.note("==== web content died again after rebuild, falling back to offline copy ====")

@@ -16,7 +16,10 @@ struct ContentView: View {
             } else if state.isOfflineCopy {
                 // 已经回退到包内副本、页面本身可用：只留一条不挡操作的提示条。
                 OfflineBanner { state.reload() }
+                    .fixedSize()
                     .frame(maxHeight: .infinity, alignment: .top)
+                    .padding(.top, 8)
+                    .padding(.horizontal, 16)
             }
         }
         .statusBarHidden(false)
@@ -104,35 +107,40 @@ private struct OfflineNotice: View {
 /// 页面本身是可用的，所以不能像 `OfflineNotice` 那样铺满整屏把播放器挡住——
 /// 用户会以为 App 坏了。这里只在顶部留一条细窄的说明 + 「重新连接」，
 /// 点完由容器重新走一次线上加载，成功就自己消失。
-private struct OfflineBanner: View {
+///
+/// 用 `UIKit` 的按钮而不是 SwiftUI `Button`：这一条浮在 `WKWebView` 上面，
+/// 按钮区域之外没有任何可点的背景，SwiftUI 的命中测试拿不到落点，
+/// 用户点「重新连接」会像点在一块玻璃上——看起来就是「按钮坏了、App 闪退了」。
+/// 原生的 `UIButton` 走真实响应链，落点一定先到它手上。
+private struct OfflineBanner: UIViewRepresentable {
     let reconnect: () -> Void
 
-    var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "wifi.slash")
-                .font(.system(size: 13, weight: .medium))
-            Text("离线版本 · 功能可能不全")
-                .font(.caption)
-            Spacer(minLength: 8)
-            Button(action: reconnect) {
-                Text("重新连接")
-                    .font(.caption.weight(.semibold))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .background(Color.white.opacity(0.14), in: Capsule())
-            .contentShape(Rectangle())
-        }
-        .foregroundStyle(.white.opacity(0.9))
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .background(Color.black.opacity(0.55), in: Capsule())
-        .overlay(Capsule().stroke(Color.white.opacity(0.12), lineWidth: 0.5))
-        .padding(.top, 8)
-        .padding(.horizontal, 16)
-        // 只占顶部这一条，不参与下方的布局拉伸；页面其余部分照常可点。
-        .fixedSize(horizontal: false, vertical: true)
+    func makeUIView(context: Context) -> UIButton {
+        let button = UIButton(type: .system)
+        button.setTitle("离线版本 · 功能可能不全  ·  重新连接", for: .normal)
+        button.titleLabel?.font = .systemFont(ofSize: 12, weight: .semibold)
+        button.titleLabel?.numberOfLines = 1
+        button.setTitleColor(UIColor.white.withAlphaComponent(0.9), for: .normal)
+        button.backgroundColor = UIColor.black.withAlphaComponent(0.55)
+        button.layer.cornerRadius = 15
+        button.layer.borderWidth = 0.5
+        button.layer.borderColor = UIColor.white.withAlphaComponent(0.12).cgColor
+        button.contentEdgeInsets = UIEdgeInsets(top: 8, left: 14, bottom: 8, right: 14)
+        button.addTarget(context.coordinator,
+                         action: #selector(Coordinator.tap),
+                         for: .touchUpInside)
+        return button
+    }
+
+    func updateUIView(_ uiView: UIButton, context: Context) {
+        context.coordinator.reconnect = reconnect
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(reconnect: reconnect) }
+
+    final class Coordinator: NSObject {
+        var reconnect: () -> Void
+        init(reconnect: @escaping () -> Void) { self.reconnect = reconnect }
+        @objc func tap() { reconnect() }
     }
 }
