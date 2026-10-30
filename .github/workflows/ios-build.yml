@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      word:
+        description: "只是为了让每次手动触发都能出一次新构建（同一 commit 的重复 run 会被排队/去重）"
+        required: false
+        default: "rebuild"
 
 jobs:
   build:
@@ -96,6 +101,6 @@ jobs:
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Folia-Web-unsigned-ipa
+          name: Folia-Web-unsigned-ipa${{ github.event.inputs.word && format('-{0}', github.event.inputs.word) || '' }}
           path: build/Build/Products/Release-iphoneos/Folia-Web-unsigned.ipa
           if-no-files-found: error
