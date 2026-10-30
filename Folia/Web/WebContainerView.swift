@@ -163,7 +163,7 @@ final class WebContainerView: UIView {
         self.state = state
         super.init(frame: .zero)
         // 会话控制器回前台要判断「通路到底断没断」，只有容器能跨进程问页面的播放时钟。
-        state.container = self
+        AudioSessionController.shared.container = self
         setUp()
     }
 
