@@ -1453,24 +1453,18 @@ final class WebContainerView: UIView {
             if self.wantsAudible && !self.userPaused {
                 AudioSessionController.shared.ensureActive()
             }
-            // **如果 session 的 setActive 救不回来，就必须真的重建通路。**
+            // **不要无条件重建音频通路！**
             //
-            // `.mixWithOthers` 下被抖音抢走后，系统的「正在播放的应用」名额已经换人，
-            // `setActive(true)` 在不少系统版本上直接返回成功却没有任何声 ——
-            // 页面侧 `<audio>` 未暂停、时钟在走、AudioContext 是 running，
-            // 三层事实全对。所以「离开过 + 该响」这一拍就直接重建一次通路，
-            // 不等页面自己承认没声（它永远不会承认）。
-            // 静音用户（`wantsAudible` 为假）与亲手暂停的不受影响。
+            // 之前这里只要用户离开过App且还在播放，就调用rebuildAfterPreemption()，
+            // 也就是setCategory。这会重建音频通路，WebKit的媒体元素会被当场按停一次。
+            // 这就是为什么用户说"进入抖音后回来没声音"——我们自己把歌按停了！
+            //
+            // 正确做法：只做一次幂等的setActive，不重建category。
+            // 真正的通路重建交给探针：它会先检查，确认确实没声了才重建。
             if self.wasBackgroundedThisSession, self.wantsAudible, !self.userPaused {
-                CrashLog.note("==== session path rebuilt on foreground (left app while audible) ====")
-                AudioSessionController.shared.rebuildAfterPreemption()
+                self.leftAppWhileAudible = true
             }
-            // 回前台不改变意图：该响的继续响，轮询照旧。
-            //
-            // `stayedBackgroundedWhileAudible` 交给 `probeThenRecover` 消费：
-            // 它在那一拍里先看「该响却实际没在出声」，是才强制重建一次通路。
-            // 只是切出去看了一眼、回来还在正常放的，这一条不会动手 ——
-            // 这就是「来回切不打断」的保证。
+            // 回前台时立即触发一次探针，确认音频状态
             self.recoverAudioPath(reason: "foreground")
             self.driveBackgroundVideo()
             CrashLog.note("==== foreground resume done (audible=\(self.wantsAudible ? 1 : 0) paused=\(self.userPaused ? 1 : 0)) ====")
@@ -2170,35 +2164,30 @@ final class WebContainerView: UIView {
     /// AudioContext 不是 running。系统层面的 `secondaryAudioShouldBeSilencedHint`
     /// 不作为判据（`.mixWithOthers` 下它经常为真），见下面恢复段里的说明。
     private func probeThenRecover(reason: String) {
-        // **（0）离开过 App、仍该响、回来之后一次都没确认过：直接重建通路，不问页面。**
+        // **（0）离开过 App、仍该响：先检查播放时钟是不是在走，确认没声了才重建。**
         //
-        // 这是「播放期间进抖音、再回来没有声音」在日志里活到今天的那条路。
-        // 07-21-43Z 第 25-33 行是它的完整现场：
-        //   25 回前台 → 26 重建通路 → 27 `preempted verifying`
-        //   → 30 `audio still silent after preemption, rebuilding path`
-        //   → 32 `audio probe suspicious, waiting second sample (context=unknown)`
-        //   → 33 `audio path broken ... (pending-second-sample)`（4 秒后）
-        //   → 34 用户自己又点了一次播放（`intent audible`）才有声
-        // 也就是说：通路被抖音摘走之后，页面**每一层判据都是「健康」**
-        // （`<audio>` 未暂停、`currentTime` 在走、AudioContext 也报 running），
-        // 唯独系统那一层没声；壳只要问页面，就永远得不出「该动手」的结论。
+        // 之前这里只要leftAppWhileAudible是true，就立即重建音频通路，不问页面。
+        // 但setCategory会重建整条音频通路，WebKit的媒体元素会被当场按停一次。
+        // 这就是为什么用户说"进入抖音后回来没声音"——我们自己把歌按停了！
         //
-        // 串行锁是另一个坑：`rebuildAfterPreemption()` 之后那次 0.6 秒的复核
-        // 还挂在 `audioRecoveryInFlight` 里，回前台这一拍的 `recoverAudioPath`
-        // 只能记成 pending，等它跑完已经过去好几秒 —— 用户听到的是「回来要等很久才响」。
-        //
-        // 所以把这件事提到最前面：`leftAppWhileAudible` 为真就**当场**重建一次，
-        // 重建之后立刻补放，并把这个标记消费掉。它只在「离开过 App 且该响」那一轮
-        // 置位（见 `didEnterBackground` / `didBecomeActive`），
-        // 所以「切出去看一眼回来歌不断」的正常场景不受影响。
+        // 正确做法：先检查播放时钟是不是在走。
+        // - 如果时钟在走，说明歌还在正常播放，什么都不做
+        // - 如果时钟没走，才重建音频通路
         if leftAppWhileAudible {
             leftAppWhileAudible = false
             preemptedByOtherApp = false
             stayedBackgroundedWhileAudible = false
-            brokenProbeStreak = 0
-            CrashLog.note("==== audio path rebuilt on return from background (unverified) (\(reason)) ====")
-            AudioSessionController.shared.rebuildAfterPreemption()
-            recoverAudioPathPass(reason: "left-app", attempt: 0)
+            // 先检查播放时钟是不是在走
+            isPlaybackClockAdvancing { alive in
+                if alive {
+                    CrashLog.note("==== playback clock advancing after return, keep path (\(reason)) ====")
+                    self.finishAudioRecovery()
+                } else {
+                    CrashLog.note("==== playback clock frozen, rebuilding path (\(reason)) ====")
+                    AudioSessionController.shared.rebuildAfterPreemption()
+                    self.recoverAudioPathPass(reason: "left-app", attempt: 0)
+                }
+            }
             return
         }
 

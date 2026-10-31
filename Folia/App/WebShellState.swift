@@ -394,80 +394,16 @@ final class AudioSessionController {
             queue: .main
         ) { [weak self] _ in
             guard let self else { return }
-            // 回来时先看「音频通路是不是被别的 App 占着」。
+            // **简化回前台逻辑：只做一次幂等的setActive，不做其他操作。**
             //
-            // 这是「看完抖音回来，界面显示在播放、却一点声音都没有」的正面解法。
-            // 用户去看了个带声的视频，本 App 的会话被系统降级或收走；页面的播放器
-            // 状态仍是 playing，AudioContext 也还是 running，所以壳侧那套
-            // 「先探测再动手」的判据完全看不出问题。
-            //
-            // `.mixWithOthers` 下别家 App 出声时，`isOtherAudioPlaying` 会翻真；
-            // 只在这一刻把 `sessionIsActive` 置假，让下面那次幂等的 `setActive(true)`
-            // 真正跑一遍。它不重建 category，正在响的媒体不会被按停。
-            if self.isPlaying, AVAudioSession.sharedInstance().isOtherAudioPlaying {
-                self.sessionIsActive = false
-                // 记下「这一轮确实被别家 App 占过」。
-                //
-                // 只看分数：切到抖音 / 微信看视频再回来，`isOtherAudioPlaying` 在
-                // `didBecomeActive` 这一拍经常已经翻回 false（对方已经在被系统
-                // 淡出），于是 `sessionAlive` 判成真、`healIfSilenced` 又只认
-                // 系统面板，两路都不动手 —— 用户听到的就是「界面在播，没声音」。
-                self.preemptedByOtherApp = true
-            }
-            // **离开过 App 且用户仍要声音：先无条件 `setActive` 一次。**
-            //
-            // 下面三条分支全部以 `isPlaying` 为门，而它来自页面的播放状态上报：
-            // 手机背面朝上 / 锁屏时 WebKit 会真的把媒体元素按停，页面老老实实报
-            // `paused`，这个标志于是一直是假 —— 于是整条回前台的音频恢复一次都不跑，
-            // 用户听到的就是「进抖音再回来没声音」。
-            // 播放意图（`wantsAudible`）比这个上报可靠得多，它只在用户亲手暂停时才会清掉。
-            // `ensureActive()` 不碰 category，通路健康时是空操作。
+            // 之前这里做了太多操作，每次回前台都重建音频通路，
+            // 很容易把正在播放的歌按停，导致用户听到的就是「回来就没声音了」。
+            // 真正的通路重建交给容器的探针：它会先检查，确认确实没声了才会恢复。
             if self.isPlaying || self.wantsAudible || self.backgroundedWhilePlayingOK {
-                self.sessionIsActive = false
                 self.ensureActive()
             }
-            self.healIfSilenced()
-            self.recoverIfInactive()
-            // 真正的通路重建交给容器：它会先 `ensureActive` + 唤醒页面上下文，
-            // 隔 0.6 秒确认确实没声才走 `recoverAudioPathPass`。这里只补一次
-            // 幂等的 `setActive` —— 两处都 `setCategory` 等于把歌掐两次。
-            self.healIfPreempted()
-
-            // 同样的抢占，`isOtherAudioPlaying` 常常已经来不及反映。
-            //
-            // 用户切走的这一轮里，只要「进后台时该响」且「回来时不该静音」，通路就
-            // 可能已经被系统摘走；那个标志在切回来那一拍往往已经被对方淡出而翻回 false，
-            // `isPlaying` 也可能因为页面在后台收到过 pause 而早就变成 false。
-            // 两个判据都不成立时，这里补一次无条件重建 —— 代价只是切回来那一拍
-            // 丢一小节声音，比「界面在播、一点声都没有」强得多。
-            //
-            // 用户自己按了暂停的情况（`wantsAudible == false`）已经在这里被排除，
-            // 所以不会出现「我明明停了，换个 App 回来又自己响」。
-            if !self.preemptedByOtherApp,
-               self.backgroundedWhilePlayingOK,
-               self.wantsAudible {
-                // **重建之前先确认它真的已经没在出声。**
-                //
-                // 这里原本是无条件 `rebuildPathQuietly()`。可 `setCategory` 会重建整条
-                // 音频通路，WebKit 的媒体元素会被一并按停 —— 于是「切出去看一眼抖音、
-                // 回来歌其实一直响着」也会被这一下打断，用户听到的就是「回来就没声音了」。
-                // 注意这时 `preemptedByOtherApp` 常常是假：对方已经被系统淡出，
-                // `isOtherAudioPlaying` 翻回了 false，只有页面自己的播放时钟能说明真相。
-                self.backgroundedWhilePlayingOK = false
-                // **必须 `[weak self]`。** `AudioSessionController` 是单例，
-                // 闭包被它持有；这里若强引用 self，单例就会把整个容器（以及它
-                // 的 WKWebView）一起永久留住，`deinit` 与观察者注销全都跑不到。
-                self.audioPathVerify { [weak self] alive in
-                    guard let self else { return }
-                    guard !alive else {
-                        NSLog("[Folia] audio clock advancing after background, keep path")
-                        return
-                    }
-                    self.rebuildPathQuietly()
-                }
-            } else {
-                self.backgroundedWhilePlayingOK = false
-            }
+            self.backgroundedWhilePlayingOK = false
+            self.preemptedByOtherApp = false
         }
     }
 
