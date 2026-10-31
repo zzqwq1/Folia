@@ -485,6 +485,16 @@ final class WebContainerView: UIView {
         var landing: URL = lastKnown
             ?? landingHistory
             ?? Self.startURL
+        // **降级目标不能原地降落。**
+        //
+        // 日志 09-27-39Z：歌单路由刚顶死进程，降级逻辑把落脚点退回
+        // `https://app.folia-api.top/` —— 首页。而用户看到的「回到加载界面」
+        // 就是这一屏：首页自己也要重新拉一遍全部脚本和封面，内存再冲一次顶，
+        // 于是重建等于没重建。
+        //
+        // 改成退到**播放器**（`#player`）：那一屏复用已经解出来的音频引擎，
+        // 不渲染歌单的封面网格，正是用户想要的「歌还在放」。
+        // 只有连播放器都没得退（比如死在首页本身）才真的回首页。
         if let stable = Self.stableFallback(from: landing),
            Self.deathCount(for: landing) > 0 {
             CrashLog.note("==== landing \(landing.absoluteString) died before, open stable \(stable.absoluteString) ====")
@@ -1665,6 +1675,33 @@ final class WebContainerView: UIView {
             // 于是「该响却没响」的那些拍一格都不动。两种都不对。
             // 现在把「不知道」如实报上去，由调用方按页面自己的媒体事实判断
             // （见 `probeThenRecover` 里 `unknown` 那条分支）。
+            // **一个都没记到 → 再问一次页面自己的事实。**
+            //
+            // 线上站的播放引擎是纯 WebAudio，`document.querySelectorAll('audio')`
+            // 恒为空（我在产物里扫过 `bootstrap` / `drumHits` / `three` 三个包，
+            // `audioElem=0`）。于是：
+            //   - `resumeAudioContexts` 永远是 `unknown`
+            //   - `isMediaHealthy` 永远是 `idle`
+            //   - `isPlaybackClockAdvancing` 永远采样不到、报 `false`
+            // 三者合起来让恢复链每 2 秒判一次「断了」，`recoverAudioPathPass`
+            // 只做 `setCategory` + `setActive`，而真正缺的动作是「让页面自己接着播」。
+            // 日志 09-26-18Z 第 13-41 行整整 28 秒就是这个死循环，
+            // 直到第 42 行用户亲手点播放（`intent audible`）才有声。
+            //
+            // 现在把「页面没有任何媒体元素」这件事单独报成 `no-elements`，
+            // 由调用方直接走 `resumeAudio` 里那条 `__foliaMediaCommand.play` 通道。
+            // 页面的 MediaSession 若是 `playing`，说明它自认为在放 —— 那不是断流，
+            // 报 `media-playing` 交给调用方跳过重建，避免白白打断。
+            var media = document.querySelectorAll('audio,video');
+            var liveMedia = 0;
+            for (var m = 0; m < media.length; m += 1) {
+              if (media[m].src && !media[m].ended) { liveMedia += 1; }
+            }
+            if (liveMedia === 0 && list.length === 0) {
+              var ms = navigator.mediaSession;
+              var st = ms && ms.playbackState ? ms.playbackState : 'none';
+              return (st === 'playing') ? 'media-playing' : 'no-elements';
+            }
             if (live === 0) { return 'unknown'; }
             if (bad > 0) { return 'blocked'; }
             return 'running';
@@ -1929,6 +1966,18 @@ final class WebContainerView: UIView {
 
     /// 媒体元素没有在出声时的收尾：按 AudioContext 状态决定恢复还是重建。
     private func handleContextRecovery(contextState: String, reason: String) {
+        // **页面自认为在放（纯 WebAudio，没有媒体元素）：一格都不碰。**
+        //
+        // 这类页面的 `isMediaHealthy` 永远报 `idle`（DOM 里没有 `audio`），
+        // 若按「没在出声」处理，保活每 2 秒就会把它打断一次。
+        // 页面 MediaSession 报 `playing` 就是「引擎在跑」的事实，直接收工。
+        if contextState == "media-playing" {
+            CrashLog.note("==== audio engine running per mediaSession, skip rebuild (\(reason)) ====")
+            brokenProbeStreak = 0
+            leftAppWhileAudible = false
+            finishAudioRecovery()
+            return
+        }
         if contextState == "running" {
             // 上下文活着、时钟也没走：页面这一拍八成在换歌 / 重建播放器树，
             // 交给下一拍保活，别动手。
@@ -1948,17 +1997,20 @@ final class WebContainerView: UIView {
         brokenProbeStreak += 1
         guard brokenProbeStreak >= 2 else {
             CrashLog.note("==== audio probe suspicious, waiting second sample (context=\(contextState) reason=\(reason)) ====")
-            // **必须放掉串行锁，但保留「下一拍再来」的意愿。**
-            //
-            // 早先这里 `finishAudioRecovery()` 只是 `audioRecoveryInFlight = false`；
-            // 保活下一拍（2 秒后）会重新进来，于是看起来没问题。可只要这之间
-            // 有任何一次 `recoverAudioPath`（回前台、控制中心收起、pending）撞上，
-            // 它就会把 `brokenProbeStreak` 所在的这一轮当成「还在跑」而只记一个 pending，
-            // 第二拍永远落不了地 —— 日志 05-12-20 里
-            // `audio probe suspicious, waiting second sample (keepalive)` 出现了 7 次，
-            // `recoverAudioPathPass` 一次都没跑过，通路始终没重建，用户听到的一直是静音。
-            // 两拍之间隔一个完整周期（4 秒）再采第二次，不受中断影响。
             finishAudioRecovery()
+            // **纯 WebAudio 页面不用等第二拍。**
+            //
+            // 那两拍的作用是躲开「页面正在换歌 / seek / 交叉淡化」的瞬间，
+            // 而这个判断依赖媒体元素状态 —— 没有元素时它必然成立，
+            // 再等 4 秒只是让用户多听 4 秒静音
+            // （日志 09-26-18Z 第 13 行 `pending-second-sample` 之后第 28 行才动手）。
+            // 页面自己的 MediaSession 说在放、DOM 里却没有元素，这已经是确定事实，
+            // 当场让引擎补一次播放即可；`resume()` 幂等，重复调用无副作用。
+            if contextState == "no-elements" {
+                resumeAudio(reason: reason)
+                return
+            }
+            // 两拍之间隔一个完整周期（4 秒）再采第二次，不受中断影响。
             DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) { [weak self] in
                 guard let self, self.wantsAudible, !self.userPaused else { return }
                 self.recoverAudioPath(reason: "\(reason)-second-sample")
@@ -1967,6 +2019,18 @@ final class WebContainerView: UIView {
         }
         brokenProbeStreak = 0
         CrashLog.note("==== audio path broken (context=\(contextState) reason=\(reason)) ====")
+        // **纯 WebAudio 页面：不管上下文状态，直接让页面自己接着播。**
+        //
+        // 这一类页面（线上站就是）没有 `<audio>` 可 play，`recoverAudioPathPass`
+        // 里的 `setCategory` + `setActive` 只修系统那层通路，页面引擎还是停着的。
+        // 日志 09-26-18Z 第 13-41 行连续 28 秒都是
+        // `audio path broken (context=unknown ...)`，
+        // 每拍只重建会话、从没碰过播放引擎，直到用户手动点播放才响。
+        if contextState == "no-elements" {
+            resumeAudio(reason: reason)
+            finishAudioRecovery()
+            return
+        }
         recoverAudioPathPass(reason: reason, attempt: 0)
     }
 
@@ -2656,6 +2720,24 @@ final class WebContainerView: UIView {
         (function(){
           if (window.__foliaAudioKeeperInstalled) { return; }
           window.__foliaAudioKeeperInstalled = true;
+
+          // **降载开关：这个路由曾经把 WebProcess 顶死过。**
+          //
+          // 页面在启动时读不到它就会被按「正常页面」渲染，歌单几百张封面一起解码，
+          // 新进程几秒内又会被顶死（日志 09-27-39Z：启动 16 秒进歌单即死）。
+          // 这里在**所有页面脚本之前**按地址前缀装上，页面在壳模式下据此
+          // 把封面改按需加载、背景可视化降帧。
+          try {
+            var heavy = \(Self.memoryHeavyLiteral);
+            var here = location.href;
+            for (var hi = 0; hi < heavy.length; hi += 1) {
+              if (heavy[hi] && here.indexOf(heavy[hi]) === 0) {
+                window.__foliaLowMemory = true;
+                document.documentElement.setAttribute('data-folia-low-memory', '1');
+                break;
+              }
+            }
+          } catch (e) {}
 
           // 线上页的出声方式是 WebAudio：`<audio>` 只当解码源（`createMediaElementSource`），
           // 真正送到扬声器的是 `AudioBufferSourceNode`，接在 `AudioContext` 上。
@@ -4115,18 +4197,41 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         // 降级动作放在 `rebuildWebView` 的 `landing` 里统一做，
         // 不再有两条互相打架的路径。
         CrashLog.note("==== rebuild after process death (\(deadPageURL?.absoluteString ?? "-")) ====")
+        // **进歌单就把进程顶死：先减页面负载，再重建。**
+        //
+        // 日志 09-27-39Z：全新启动 → 16 秒后打开
+        // `#collection/online/netease/playlist/14400331811` → 死。歌单详情一次渲染
+        // 几百张封面，WebKit 的图片解码缓存直接把 WebProcess 内存顶爆；
+        // 重建出来的新进程只有一两张封面撑得住，用户一滑就再死一次 ——
+        // 这就是「进歌单闪退」永远修不掉的那一层。
+        //
+        // 这里不等用户操作，先把路由记成「重负载」：下一次 `audioKeeperScript`
+        // 注入时会给页面挂上 `window.__foliaLowMemory`，让它在接下来的歌单里
+        // 按需加载封面、暂停背景可视化。
+        if let dead = landingCandidate {
+            Self.markMemoryHeavy(dead)
+        }
         rebuildWebView(resumeAudio: resume)
     }
 
     /// 进程在同一个路由上反复被顶死时的退路：留在同一个页面，退到它不带哈希的那一屏。
     ///
     /// 举例：`https://app.folia-api.top/#collection/online/netease/playlist/14400331811`
-    /// → `https://app.folia-api.top/`。用户仍然在 Folia 里、登录态与播放队列都在，
-    /// 只是不会自动替他再打开一次那个会撑爆进程的歌单详情。
+    /// → `https://app.folia-api.top/#player`。用户仍然在 Folia 里、登录态与播放队列都在，
+    /// 只是不会自动替他再打开一次那个会撑爆进程的歌单详情，也不会被扔回首页的加载遮罩。
     /// 本来就已在首页（没有哈希可退）时返回 nil，交给重建流程处理。
     private static func stableFallback(from url: URL) -> URL? {
         guard trustedSiteURL(url) != nil else { return nil }
         guard let fragment = url.fragment, !fragment.isEmpty else { return nil }
+        // **先退播放器，再退首页。**
+        //
+        // 退首页等于「回到加载界面」—— 用户报的就是这个。首页本身要重新拉全部
+        // 脚本和首屏封面，内存曲线在重建后那几秒正是最紧的时候，很容易再被顶死。
+        // 播放器那一屏结构最轻，而且用户真正想要的是「歌继续放」。
+        // 只有当死掉的那一屏本来就是播放器时，才退到不带哈希的首页。
+        if !fragment.hasPrefix("player") {
+            return URL(string: "https://\(siteHost)/#player")
+        }
         var comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
         comps?.fragment = nil
         comps?.query = nil
@@ -4139,6 +4244,41 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
     /// 说明它随实例一起被换掉了 —— 追这个变量为什么不保留，不如**根本不依赖它**：
     /// 直接把死亡时刻按路由写进 `UserDefaults`，新实例读得到，进程重启也读得到。
     private static let routeDeathKey = "folia.shell.routeDeaths"
+
+    /// 「这个路由把进程顶死过」的跨启动标记。
+    ///
+    /// 与 `routeDeathKey` 的区别：那个只管 60 秒内的重建降级，过期就没意义了；
+    /// 这一份要活得更久 —— 用户下次再进同一个歌单，壳仍然应该按「重负载页面」
+    /// 对待（注入的降载开关见 `memoryHeavyLiteral`），否则一进去又会死，
+    /// 然后又是「闪退 → 加载界面」。
+    private static let memoryHeavyKey = "folia.shell.memoryHeavyRoutes"
+
+    static func markMemoryHeavy(_ url: URL) {
+        var set = Set(UserDefaults.standard.stringArray(forKey: memoryHeavyKey) ?? [])
+        set.insert(url.absoluteString)
+        UserDefaults.standard.set(Array(set), forKey: memoryHeavyKey)
+        CrashLog.note("==== memory heavy route remembered: \(url.absoluteString) ====")
+    }
+
+    static func isMemoryHeavy(_ url: URL) -> Bool {
+        let set = Set(UserDefaults.standard.stringArray(forKey: memoryHeavyKey) ?? [])
+        return set.contains(url.absoluteString)
+    }
+
+    /// 注入给页面的降载开关：`window.__foliaLowMemory`。
+    ///
+    /// 线上站已经在壳模式下读这个开关（UA 含 `FoliaApp` 时生效）：
+    /// 歌单封面按需加载、背景可视化降帧。壳这边只负责把「当前页面是不是
+    /// 顶死过进程的那种重页面」告诉它，具体怎么省内存由页面自己决定 ——
+    /// 壳不碰 DOM，避免和 React 抢节点。
+    ///
+    /// `audioKeeperScript` 在 `.atDocumentStart` 注入，那时 `location.href`
+    /// 已经是目标路由，所以这里只需要把地址表编进脚本，不必按导航逐次重装。
+    private static var memoryHeavyLiteral: String {
+        let list = UserDefaults.standard.stringArray(forKey: memoryHeavyKey) ?? []
+        let quoted = list.map { "\"\($0.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\""))\"" }
+        return "[" + quoted.joined(separator: ",") + "]"
+    }
 
     /// 记一次「这个地址把进程顶死了」。
     private static func noteRouteDeath(_ url: URL) {
