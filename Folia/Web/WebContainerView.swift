@@ -44,6 +44,25 @@ final class WebContainerView: UIView {
     /// 所以由原生在检测到进程终止前一帧的状态时判定要不要自动续播。
     fileprivate static var wasAudibleInBackground = false
 
+    /// 冷启动打开哪一屏。
+    ///
+    /// 上个版本直接打首页（`startURL`）。对「上次是死在歌单里」的用户来说，
+    /// 首页等于重新拉一遍全部脚本 + 首屏封面，内存最容易在那几秒顶满；
+    /// 而用户真正关心的是「歌还能不能放」。
+    ///
+    /// 所以：落盘的最后一个页面如果是重负载路由，就不再从这里进去 ——
+    /// 直接开 `#player`。正常用户（从没把进程顶死过）走原路径，行为不变。
+    private static func launchURL() -> URL {
+        guard let raw = UserDefaults.standard.string(forKey: pageHistoryKey),
+              let saved = URL(string: raw),
+              let trusted = trustedSiteURL(saved),
+              isMemoryHeavy(trusted) || deathCount(for: trusted) > 0,
+              let stable = stableFallback(from: trusted) else {
+            return startURL
+        }
+        return stable
+    }
+
     /// 线上站点的域名。导航策略、诊断与重载都以它为基准。
     private static let siteHost = "app.folia-api.top"
     private static let startURL = URL(string: "https://app.folia-api.top/")!
@@ -173,6 +192,20 @@ final class WebContainerView: UIView {
     private func rememberVisibleURL(_ url: URL) {
         guard let trusted = Self.trustedSiteURL(url) else { return }
         UserDefaults.standard.set(trusted.absoluteString, forKey: Self.pageHistoryKey)
+        // **同步地址位。**
+        //
+        // 日志 10-30-15Z 第 20 行：新实例打开的是 `#player`，死报上来的却是歌单。
+        // `lastCommittedURL` / `lastVisibleURL` 只在别处零散更新，`refreshPageLocation`
+        // 每拍采到的真实地址没有落到这两位上，于是重建时读到的仍是旧值。
+        // 现在统一在这里写 —— 落盘、内存地址位、以及「这一屏是不是重负载」的判定
+        // 用的是同一个地址，不会互相打架。
+        if Self.isMemoryHeavy(trusted) {
+            // 这个路由顶死过进程：可以记住（下次进来看见它就在 `launchURL` 里降级），
+            // 但绝不放进「重建落脚点」的两个候选位。
+            return
+        }
+        lastCommittedURL = trusted
+        lastVisibleURL = trusted
     }
 
     /// 连续失败这个次数就不再自动重载，停在界面上等用户手动点「重试」。
@@ -359,7 +392,13 @@ final class WebContainerView: UIView {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.hardReload() }
 
-        webView.load(URLRequest(url: Self.startURL, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30))
+        webView.load(URLRequest(url: Self.launchURL(), cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30))
+        // **冷启动也要看门狗。**
+        //
+        // 早先只有重建那条路（`installRebuiltWebView`）才 `startPageHeartbeat()`，
+        // 于是「大退重进 → 进歌单 → 主线程被封面解码卡死」这一路没有任何东西
+        // 能发现进程还在、页面却不回话 —— 用户就一直停在加载遮罩上，
+        // 只能杀 App 重开。「大退进歌单回加载界面」有一半就是它。
         startPageHeartbeat()
         scheduleProgressWatchdog()
 
@@ -414,6 +453,14 @@ final class WebContainerView: UIView {
         discarded?.removeFromSuperview()
         // 解绑后旧实例不再被任何人持有，交给 ARC 在下一轮 runloop 回收。
         webView = nil
+        // **停掉旧实例的看门狗。**
+        //
+        // 心跳脚本打在 `self` 上，而它按定时器每 5 秒问一次页面。
+        // 换实例期间若不先停掉，旧那一发 `evaluateJavaScript` 会把回调落到
+        // 正在装载的新实例上；一旦新页面 12 秒内还没回话，就会被判「卡死」
+        // 再触发一次重建 —— 日志里「刚 reopen 又在同一路由死一次」正是这条路的变体。
+        stopPageHeartbeat()
+        stopKeepAliveTimer()
 
         // 重建也是在主线程上跑的：此刻极可能正停在一次触摸事务（`touchesBegan`
         // 到 `touchesEnded`）中间 —— 用户就是点歌单那一拍把进程顶死的。
@@ -474,6 +521,18 @@ final class WebContainerView: UIView {
         let lastKnown = Self.trustedSiteURL(lastCommittedURL)
             ?? Self.trustedSiteURL(deadLandingURL)
             ?? Self.trustedSiteURL(lastVisibleURL)
+        // **任何一个候选是「重负载路由」就直接跳过它。**
+        //
+        // 日志 10-30-15Z 第 11-20 行：`deadLandingURL` / `lastCommittedURL` /
+        // 落盘历史**全部**指向那个歌单。即便落脚点被降级成了 `#player`，
+        // 新实例装载期间只要再触发一次重建（进程再死、看门狗判卡死、用户点重试），
+        // 读到的还是同一批地址，于是又把歌单打开一次、再死一次。
+        // 所以这里不是「改写落脚点」，而是**逐个剔除**：
+        // 凡是被记成顶死过进程的路由，一律不参与落脚点计算。
+        func usable(_ url: URL?) -> URL? {
+            guard let url, Self.trustedSiteURL(url) != nil else { return nil }
+            return Self.isMemoryHeavy(url) ? nil : url
+        }
         // **死路由这一轮已经被顶死过，就绝不再把它当落脚点。**
         //
         // 现场（07-23-35Z / 07-23-56Z / 08-00-01Z）：落脚点明明是
@@ -481,11 +540,18 @@ final class WebContainerView: UIView {
         // 用户看到的就是「大退进歌单 → 回到加载界面」。
         //
         // 关键教训：**光把落脚点换掉不够，必须换掉「这个路由」。**
-        // 所以这里不看候选源是谁，只看「这个地址是不是刚死过的那个」：
-        // 是，就退到它不带哈希的那一屏（首页 / 播放器），让新进程先活下来。
-        var landing: URL = lastKnown
-            ?? landingHistory
+        // 所以这里不看候选源是谁，只看「这个地址是不是刚死过的那个」。
+        var landing: URL = usable(lastKnown)
+            ?? usable(landingHistory)
             ?? Self.startURL
+        // **新实例从头加载一次，把它自己打开的那一屏重新记下来。**
+        //
+        // `lastKnown` 有可能是旧进程残留的地址（日志 10-30-15Z 第 20 行：
+        // 新实例打开的是 `#player`，报上来的却是歌单）。新页面画出来之后，
+        // 保活会把真实地址同步进 `lastVisibleURL`；在此之前，地址位一律以
+        // 「这一拍真正要打开的那一屏」为准，避免下一次重建又读到旧值。
+        lastCommittedURL = landing
+        lastVisibleURL = landing
         // **降级目标不能原地降落。**
         //
         // 日志 09-27-39Z：歌单路由刚顶死进程，降级逻辑把落脚点退回
@@ -495,11 +561,52 @@ final class WebContainerView: UIView {
         //
         // 改成退到**播放器**（`#player`）：那一屏复用已经解出来的音频引擎，
         // 不渲染歌单的封面网格，正是用户想要的「歌还在放」。
-        // 只有连播放器都没得退（比如死在首页本身）才真的回首页。
-        if let stable = Self.stableFallback(from: landing),
-           Self.deathCount(for: landing) > 0 {
-            CrashLog.note("==== landing \(landing.absoluteString) died before, open stable \(stable.absoluteString) ====")
+        // 只有连播放器都没得退（比如死在播放器本身）才真的回首页。
+        //
+        // **无条件降级，不再看 `deathCount`。**
+        //
+        // 日志 10-30-15Z 是这里最关键的一次现场：
+        //   11 `rebuild after process death (...#collection/.../14400331811)`
+        //   13 `landing ... died before, open stable ...#player`
+        //   17 `rebuild: reopen ...#player`
+        //   18 `index stamp -`                                           ← 连 index 都没回来
+        //   19 `route death recorded: ...#collection/.../14400331811`     ← 还是歌单
+        //   20 `web content process terminated (#1) url=...#collection/.../14400331811`
+        // 新实例打开的确实是 `#player`，可 3 秒后又「死在歌单上」，而且又是 `(#1)`。
+        // 这只有一种解释：**进程压根没打开新页面**，死亡回调是旧实例残留的那一发；
+        // 或者新实例被别处（落盘历史 / 旧地址位）又送回了歌单。
+        // 不管是哪一种，结论一样：`deathCount` 这个「60 秒内死过一次」的判据不可靠 ——
+        // 它读的是落盘时间，而落盘那一拍可能被上一次启动的残留污染。
+        // 现在改成**只要候选路由是可降级的路由，无条件降级**：
+        // 进程死过一次之后，壳不去猜「是不是巧合」，直接走最轻的那一屏。
+        if let stable = Self.stableFallback(from: landing) {
             landing = stable
+        }
+        // **把那个死路由从所有候选源里抹掉，而不只是改写落脚点字符串。**
+        //
+        // 上一层算出来的 `landing` 是安全的，但 `lastCommittedURL` /
+        // `lastVisibleURL` / 落盘的 `pageHistory` 里仍旧留着歌单地址。
+        // 新实例装载期间**任何一次**重建（进程再死一次、看门狗判卡死、用户点重试）
+        // 都会重新从这些地址位里读落脚点，于是又把歌单打开一次、再死一次 ——
+        // 用户看到的就是「怎么弄都回到加载界面，删了重下也一样」。
+        // 日志 10-30-15Z 第 19-20 行就是这一发：新实例刚开 `#player`，
+        // 3 秒后报出来的死路由仍然是歌单。
+        //
+        // **必须在这一行之前取地址位。** 下面第 622 行会把这两位改写成 `landing`，
+        // 之后再读就成了 `#player`，真正死掉的歌单反而漏记 —— 那正是
+        // 「新实例开 `#player`、3 秒后又死在歌单」的另一半原因。
+        let doomed = Self.trustedSiteURL(deadLandingURL)
+            ?? Self.trustedSiteURL(lastCommittedURL)
+            ?? Self.trustedSiteURL(lastVisibleURL)
+        if let dead = doomed, Self.stableFallback(from: dead) != nil {
+            Self.forgetVisibleRoute(dead)
+            Self.markMemoryHeavy(dead)
+        }
+        if let history = landingHistory,
+           history.absoluteString != landing.absoluteString,
+           Self.stableFallback(from: history) != nil {
+            Self.forgetVisibleRoute(history)
+            Self.markMemoryHeavy(history)
         }
         CrashLog.note("==== landing sources: committed=\(lastCommittedURL?.absoluteString ?? "-") visible=\(lastVisibleURL?.absoluteString ?? "-") dead=\(deadLandingURL?.absoluteString ?? "-") → \(landing.absoluteString) ====")
         deadLandingURL = nil
@@ -513,6 +620,13 @@ final class WebContainerView: UIView {
         // 先留一份给 `landing` 用，再清。
         lastCommittedURL = nil
         lastVisibleURL = nil
+        // **地址位立刻立成新实例真正要打开的那一屏。**
+        //
+        // 日志 10-30-15Z：不清回来时，新实例装载期间任何一次重建读到的都是旧值，
+        // 于是又把歌单打开一次。`landing` 已经过 `usable()` 过滤与无条件降级，
+        // 是这一拍能活下来的那一屏，地址位跟着它走最安全。
+        lastCommittedURL = landing
+        lastVisibleURL = landing
         consecutiveAutoReloads = 0
         state.clearLoadFailure()
         state.leaveOfflineCopy()
@@ -567,6 +681,14 @@ final class WebContainerView: UIView {
         // `URL.path` 对哈希路由恒等于 `/`，打印出来会掩盖真实落脚点。
         // 这里改成打完整地址，后面的现场才判断得了「是不是又回到了死掉的那一屏」。
         CrashLog.note("==== rebuild: reopen \(pending.landing.absoluteString) ====")
+        // **装上新实例的同时就把地址位立到落脚点。**
+        //
+        // 日志 10-30-15Z 第 19-20 行：新实例明明打开的是 `#player`，
+        // 3 秒后却报「死在歌单上」。那时 `lastCommittedURL` / `lastVisibleURL`
+        // 还留着旧进程的值，任何一次重建都会读到它。这里在装载这一刻重设一次，
+        // 让「地址位」与「屏幕上真正打开的那一屏」始终是同一件事。
+        lastCommittedURL = pending.landing
+        lastVisibleURL = pending.landing
         let view = makeWebView(configuration: pending.config)
         webView = view
         addSubview(view)
@@ -624,24 +746,22 @@ final class WebContainerView: UIView {
             hbLastBeat = Date()
             return
         }
-        hbGeneration += 1
-        let gen = hbGeneration
-        webView.evaluateJavaScript("'alive'") { [weak self] result, _ in
-            guard let self, gen == self.hbGeneration else { return }
-            if (result as? String) == "alive" {
-                self.hbLastBeat = Date()
-            }
-            // 没回来（超时 / 进程已死但回调还没到）就不动 `hbLastBeat`，
-            // 由下一次 tick 按时限兜底。
-        }
-        // 回调迟迟不来时由下一次 tick 兜底判断：`hbLastBeat` 不动就是没回应。
+        // **先按时限判一次，再发这一拍。**
+        //
+        // 早先判断写在「发心跳」之后，且用的是同一拍刚拿到的 `hbLastBeat`：
+        // 一旦有一发回调永远不来（进程还在、主线程卡死正是这样），
+        // `hbLastBeat` 就冻住不动，从那一刻起**每一个 5 秒周期**都会判一次超时
+        // 并重建一次 —— 每趟重建都要 3-4 秒装载，用户看到的就是
+        // 「进歌单 → 黑一下 → 加载界面 → 黑一下 → 加载界面」，永远回不来。
+        // 现在超时那次处理完就重置基准并重置代数，让旧回调全部作废，
+        // 新实例重新计时。
         if Date().timeIntervalSince(hbLastBeat) >= Self.heartbeatDeadline {
             hbLastBeat = Date()
+            hbGeneration += 1
             CrashLog.note("==== page unresponsive for \(Int(Self.heartbeatDeadline))s, force rebuild ====")
             let dead = Self.trustedSiteURL(lastVisibleURL) ?? Self.trustedSiteURL(lastCommittedURL)
             if let dead {
-                Self.noteRouteDeath(dead)
-                Self.markMemoryHeavy(dead)
+                Self.recordRouteDeath(dead)
             }
             deadLandingURL = dead
             documentFinished = false
@@ -650,6 +770,15 @@ final class WebContainerView: UIView {
             stopKeepAliveTimer()
             let resume = !userPaused && (wantsAudible || Self.wasAudibleInBackground)
             rebuildWebView(resumeAudio: resume)
+            return
+        }
+        hbGeneration += 1
+        let gen = hbGeneration
+        webView.evaluateJavaScript("'alive'") { [weak self] result, _ in
+            guard let self, gen == self.hbGeneration else { return }
+            if (result as? String) == "alive" {
+                self.hbLastBeat = Date()
+            }
         }
     }
 
@@ -1056,6 +1185,14 @@ final class WebContainerView: UIView {
                 // 否则进程被回收后只能重开首页。
                 self.lastCommittedURL = url
                 self.rememberVisibleURL(url)
+                // **重负载标记唯一的洗清出口。**
+                //
+                // 判据是「这一页自己画出来了，而且画出来的时候它就是那个路由」。
+                // 重建后新实例打开的是降级过的 `#player`，它画出来只会清 `#player`，
+                // 绝不会替那个歌单洗白 —— 用户下次再进同一个歌单仍然按重负载对待
+                // （注入 `__foliaLowMemory` 降载），不会再从头经历一次闪退。
+                Self.clearMemoryHeavy(url)
+                Self.clearRouteDeath(url)
             }
             self.reachedFirstPaintOnce = true
             self.markFirstPaintSettled()
@@ -1731,6 +1868,9 @@ final class WebContainerView: UIView {
               window.__foliaResumeAudioContexts();
             }
             var list = window.__foliaAudioContexts || [];
+            // 把壳的播放意图告诉页面：纯 WebAudio 页面既没有 `<audio>`、
+            // 也常常不写 `playbackState`，没有这一位就只能一路判成 `no-elements`。
+            window.__foliaWantsAudible = \(wantsAudible && !userPaused ? "true" : "false");
             // 只统计页面真实在用、而且确实接在一条正在出声的 <audio> 上的上下文。
             //
             // 早先这里是「只要有一个 context 不是 running 就报 blocked」，那是错的方向：
@@ -1777,6 +1917,11 @@ final class WebContainerView: UIView {
             if (liveMedia === 0 && list.length === 0) {
               var ms = navigator.mediaSession;
               var st = ms && ms.playbackState ? ms.playbackState : 'none';
+              if (st === 'none' && window.__foliaPlaybackState) { st = window.__foliaPlaybackState; }
+              // 壳自己记过播放意图：页面纯 WebAudio 出声，没有元素也没有
+              // `playbackState`，唯一的事实就是「用户点过播放、之后没点暂停」。
+              // 少了这一条就会报 `no-elements`，把正常的正在播放判成断流。
+              if (st === 'none' && window.__foliaWantsAudible) { st = 'playing'; }
               return (st === 'playing') ? 'media-playing' : 'no-elements';
             }
             if (live === 0) { return 'unknown'; }
@@ -2091,6 +2236,7 @@ final class WebContainerView: UIView {
             // 页面自己的 MediaSession 说在放、DOM 里却没有元素，这已经是确定事实，
             // 当场让引擎补一次播放即可；`resume()` 幂等，重复调用无副作用。
             if contextState == "no-elements" {
+                CrashLog.note("==== pure webaudio page, calling page play entry (\(reason)) ====")
                 resumeAudio(reason: reason)
                 return
             }
@@ -2111,6 +2257,7 @@ final class WebContainerView: UIView {
         // `audio path broken (context=unknown ...)`，
         // 每拍只重建会话、从没碰过播放引擎，直到用户手动点播放才响。
         if contextState == "no-elements" {
+            CrashLog.note("==== pure webaudio page, calling page play entry (\(reason)) ====")
             resumeAudio(reason: reason)
             finishAudioRecovery()
             return
@@ -2325,6 +2472,48 @@ final class WebContainerView: UIView {
         webView?.evaluateJavaScript(js, completionHandler: nil)
     }
 
+    /// 页面「点一下播放」的兜底入口，注入到每一段补放脚本的最前面，定义局部 `__foliaPlay()`。
+    ///
+    /// 为什么需要兜底：线上站是纯 WebAudio，DOM 里没有 `<audio>`，
+    /// 唯一能让引擎重新出声的动作就是「等价于点一次播放按钮」。
+    /// 早先只认 `navigator.mediaSession.setActionHandler('play')` 登记的那一个处理器，
+    /// 页面没登记就 `noop` —— 日志 10-24-58Z 第 32 行之后 4 分 39 秒静音、
+    /// 直到用户亲手点播放（第 33 行）才恢复，正是这条路断在了「找不到入口」。
+    ///
+    /// 四级顺序：页面登记的处理器 → 页面自己的按钮 → 媒体元素 → 置回播放态。
+    private static let playEntryJS = """
+    var __foliaPlay = function(){
+      try {
+        var fn = window.__foliaMediaCommand && window.__foliaMediaCommand.play;
+        if (typeof fn === 'function') { return fn; }
+        var sels = [
+          '[data-testid="player-toggle"]','[data-testid="player-play"]','[data-testid="play-button"]',
+          '[aria-label*="播放"]','[aria-label*="暂停"]','[aria-label*="Play"]','[aria-label*="Pause"]',
+          '.player-toggle','.play-button'
+        ];
+        for (var i = 0; i < sels.length; i += 1) {
+          var btn = document.querySelector(sels[i]);
+          if (!btn) { continue; }
+          var pressed = btn.getAttribute('aria-pressed');
+          var label = btn.getAttribute('aria-label') || '';
+          // 按钮此刻表示「暂停」（说明正在放）：不动，否则等于把歌按停。
+          if (pressed === 'true' || /暂停|Pause/i.test(label)) { continue; }
+          var click = function(){ try { btn.click(); } catch (e) {} };
+          return click;
+        }
+        var v = document.querySelector('audio,video');
+        if (v && v.paused && typeof v.play === 'function') {
+          return function(){ try { var p = v.play(); if (p && p.catch) { p.catch(function(){}); } } catch (e) {} };
+        }
+        var ms = navigator.mediaSession;
+        if (ms && ms.playbackState !== undefined) {
+          return function(){ try { ms.playbackState = 'playing'; } catch (e) {} };
+        }
+      } catch (e) {}
+      return null;
+    };
+    """
+
     private func resumeAudio(reason: String) {
         // 先叫醒 AudioContext 再补 play。
         //
@@ -2335,6 +2524,7 @@ final class WebContainerView: UIView {
         let js = """
         (function(){
           try {
+            \(Self.playEntryJS)
             // 双 deck 交叉淡化（automix）下有两个 `<audio>`：一个在放、一个待命。
             // 待命的那个同样是 `paused` 且有 `src`，**不能**一起 `play()` ——
             // 那会让两首歌同时出声，用户听到的是爆音和互相抢拍。
@@ -2368,7 +2558,7 @@ final class WebContainerView: UIView {
               // 页面把真正的播放入口登记在 `navigator.mediaSession.setActionHandler('play')`，
               // 壳在 `audioKeeperScript` 里已经把它存进 `__foliaMediaCommand.play`。
               // 调它等价于用户点了播放，是这里唯一真正能让 WebAudio 引擎重新出声的动作。
-              var playFn = window.__foliaMediaCommand && window.__foliaMediaCommand.play;
+              var playFn = __foliaPlay();
               if (typeof playFn === 'function') {
                 try { playFn({ action: 'play' }); } catch (e) {}
                 if (window.__foliaAudioContexts) {
@@ -2409,6 +2599,7 @@ final class WebContainerView: UIView {
             let retryJS = """
             (function(){
               try {
+                \(Self.playEntryJS)
                 var list = document.querySelectorAll('audio');
                 var el = window.__foliaLastAudio;
                 if (!el || !el.isConnected) {
@@ -2421,7 +2612,7 @@ final class WebContainerView: UIView {
                 if (!el || !el.src || el.ended) {
                   // 与上面同理：纯 WebAudio 的页面没有 `<audio>` 可用，
                   // 这一拍也必须回到页面自己的播放入口，否则第二次补放同样落空。
-                  var fn = window.__foliaMediaCommand && window.__foliaMediaCommand.play;
+                  var fn = __foliaPlay();
                   if (typeof fn === 'function') {
                     try { fn({ action: 'play' }); } catch (e) {}
                     return 'resumed';
@@ -2771,7 +2962,15 @@ final class WebContainerView: UIView {
                 self.consecutiveAutoReloads = 0
                 // 这一页既然画出来了，就洗清它「会顶死进程」的嫌疑：
                 // 用户下次正常落脚到同一路由时不该被无谓地降级。
-                if let live = WebContainerView.trustedSiteURL(self.webView.url) {
+                //
+                // **只清「刚死过」那一份，绝不清 `memoryHeavyRoutes`。**
+                // 日志 10-30-15Z：重建后新实例打开 `#player`，这一屏当然能画出来；
+                // 若在这里把「谁是重负载路由」也一并抹掉，下一次再进那个歌单
+                // 又会被当成普通页面直接打开 —— 于是再死一次，用户看到的就是
+                // 「每次都要重新经历一遍闪退」。重载标记只允许在「它自己这一次
+                // 真的活下来了」时才清（见 `markVisiblePageIfNeeded`）。
+                if let live = WebContainerView.trustedSiteURL(self.webView.url),
+                   WebContainerView.stableFallback(from: live) == nil {
                     WebContainerView.clearRouteDeath(live)
                 }
                 // 首屏就绪再开赞赏弹窗：在那之前 DOM 里的图片还没解码，弹出来是两张空白框。
@@ -2942,6 +3141,40 @@ final class WebContainerView: UIView {
                   };
                   ms.setActionHandler = wrapped;
                 } catch (e) {}
+              });
+            }
+          } catch (e) {}
+
+          // **媒体会话属性也绕一层。**
+          //
+          // 日志 10-24-58Z 第 32 行 `context=no-elements reason=pending` 之后
+          // 整整 4 分 39 秒没有任何动作，直到用户亲手点播放才响（第 33 行）。
+          // 原因就在这里：`playbackState` 是一个 setter 属性，页面每次上报
+          // 「我在放 / 我停了」都要写它。壳以前既没记写过什么、也没读过它，
+          // 于是 `resumeAudioContexts` 里读到的 `playbackState` 常常是 `none`，
+          // 被判成 `no-elements`，恢复链只能去调 `__foliaMediaCommand.play`；
+          // 而线上站是否登记过 play handler 并不能保证（它可能只登记 pause）。
+          // 记下页面自己写过的每一次值，壳至少知道「页面认为自己该在放」。
+          // 只为记录，不改变任何行为。
+          try {
+            var protoDesc = null;
+            try {
+              protoDesc = window.MediaSession
+                ? Object.getOwnPropertyDescriptor(window.MediaSession.prototype, 'playbackState')
+                : null;
+            } catch (e) { protoDesc = null; }
+            if (protoDesc && protoDesc.set && protoDesc.configurable && !protoDesc.set.__foliaWrapped) {
+              var rawProtoSet = protoDesc.set;
+              var protoSet = function(v){
+                try { window.__foliaPlaybackState = v; } catch (e) {}
+                return rawProtoSet.call(this, v);
+              };
+              protoSet.__foliaWrapped = true;
+              Object.defineProperty(window.MediaSession.prototype, 'playbackState', {
+                configurable: true,
+                enumerable: protoDesc.enumerable,
+                get: protoDesc.get,
+                set: protoSet
               });
             }
           } catch (e) {}
@@ -4007,6 +4240,8 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
 
     /// 服务器已经有响应、导航真正开始了：这里才敢把「离线副本」标记撤掉。
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        // 同理：旧实例在换掉之后补发的导航回调一律不认，否则会把地址位写回死路由。
+        guard webView === self.webView else { return }
         // 主框架还在跑，说明上次的断网/失败现场已经不成立了。不在这里清的话，
         // 提示层会一直盖在已经画好的页面上（`showsBlockingNotice` 只认 `offlineReason`），
         // 用户看到的就是「页面明明能开，却一直停在加载界面，只能点重试」。
@@ -4028,6 +4263,7 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard webView === self.webView else { return }
         lastInsets = .zero
         documentFinished = true
         // 文档级导航成功，说明这次加载是好的：「卡住」的配额必须一起清零。
@@ -4165,6 +4401,18 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
     /// 无脑 reload 会形成「加载界面 → 立刻再被杀 → 再 reload」的死循环，
     /// 用户在界面上看到的就是反复闪回加载界面。
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        // **旧实例的回调一律作废。**
+        //
+        // 换实例之后，被摘掉的那个 WKWebView 仍可能补发一次终止回调。
+        // 早先这里没有这道门，那一条迟到的回调会拿旧地址再触发一次重建，
+        // 于是新实例刚打开 `#player` 3 秒又被换掉 —— 日志 10-30-15Z 第 19-20 行
+        // `(#1)` 又重新出现，正是这么来的。
+        guard webView === self.webView else {
+            CrashLog.note("==== stale termination callback ignored ====")
+            return
+        }
+        // 进程已死：心跳这一发不会再有人回话，先停掉，等新实例自己起。
+        stopPageHeartbeat()
         let now = Date()
         // **死前那一页的地址，只在这一拍拿得到。**
         //
@@ -4187,7 +4435,7 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         // **按路由落盘记一次死亡。** 内存里的计数在换实例时不可靠（见 `noteRouteDeath`），
         // 这里写的这一份下一次重建直接读得到，哪怕换了进程也还在。
         if let dead = landingCandidate {
-            Self.noteRouteDeath(dead)
+            Self.recordRouteDeath(dead)
             CrashLog.note("==== route death recorded: \(dead.absoluteString) ====")
         }
         // 重建时要用它当落脚点（见 `rebuildWebView` 里 `landing` 的优先级）。
@@ -4261,11 +4509,24 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         // 歌单页是一次性渲染几百张封面把进程内存顶满：**同一个死路由不要再进**，
         // 落脚点见 `safeLanding(from:)`。
         if let dead = landingCandidate {
-            lastCommittedURL = dead
-            lastVisibleURL = dead
-            rememberVisibleURL(dead)
+            // **不再把它写回落脚点。**
+            //
+            // 这一拍写回去，`rebuildWebView` 就会读到它当候选（哪怕随后降级）；
+            // 更要命的是新实例装载期间若再触发一次重建，读到的还是这个死路由。
+            // 地址位只在「这个路由还能落脚」时才该有值 —— 死过的不再有。
+            if Self.stableFallback(from: dead) == nil {
+                lastCommittedURL = dead
+                lastVisibleURL = dead
+                rememberVisibleURL(dead)
+            } else {
+                // 死路由不留在落盘历史里（见上方注释）。
+                Self.forgetVisibleRoute(dead)
+                // 退到安全页：`rebuildWebView` 会用 `deadLandingURL` 做降级，
+                // 这里先把它换掉，保证它拿到的永远是「能活下来的那一屏」。
+                deadLandingURL = Self.stableFallback(from: dead) ?? dead
+            }
         }
-        deadLandingURL = landingCandidate ?? deadLandingURL
+        deadLandingURL = deadLandingURL ?? landingCandidate
         // **新实例要不要接着放，看的是「用户的播放意图」，不是「死前那一拍有没有出声」。**
         //
         // 日志 05-13-29Z：用户在歌单里听着歌点进去，进程被内存顶死，
@@ -4308,7 +4569,7 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         // 注入时会给页面挂上 `window.__foliaLowMemory`，让它在接下来的歌单里
         // 按需加载封面、暂停背景可视化。
         if let dead = landingCandidate {
-            Self.markMemoryHeavy(dead)
+            Self.recordRouteDeath(dead)
         }
         rebuildWebView(resumeAudio: resume)
     }
@@ -4352,6 +4613,20 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
     /// 然后又是「闪退 → 加载界面」。
     private static let memoryHeavyKey = "folia.shell.memoryHeavyRoutes"
 
+    /// 记录「这个路由把进程顶死过」。**无条件都记。**
+    ///
+    /// 两份都要写：
+    /// - `memoryHeavyKey`（跨启动）：下次再进同一个歌单仍然按重负载对待；
+    /// - `routeDeathKey`（60 秒窗）：重建时 `rebuildWebView` 与 `launchURL` 据此决定降级。
+    ///
+    /// 早先只在 `webContentProcessDidTerminate` 里按「详情页或无哈希」的条件记，
+    /// 落到 `noteRouteDeath` 的只有一部分，冷启动那条路就再也认不出来。
+    static func recordRouteDeath(_ url: URL) {
+        guard let trusted = trustedSiteURL(url) else { return }
+        markMemoryHeavy(trusted)
+        noteRouteDeath(trusted)
+    }
+
     static func markMemoryHeavy(_ url: URL) {
         var set = Set(UserDefaults.standard.stringArray(forKey: memoryHeavyKey) ?? [])
         set.insert(url.absoluteString)
@@ -4362,6 +4637,33 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
     static func isMemoryHeavy(_ url: URL) -> Bool {
         let set = Set(UserDefaults.standard.stringArray(forKey: memoryHeavyKey) ?? [])
         return set.contains(url.absoluteString)
+    }
+
+    /// 这个路由自己真的画出来了：把「重负载」标记撤掉。
+    ///
+    /// 只在 `markVisiblePageIfNeeded` 里调，且传进去的是页面**当前真实所在**的地址。
+    /// 不这么做的话，标记一旦写下就永远洗不掉 —— 用户换了部手机、清了缓存、
+    /// 或者站点本身优化过之后，那个歌单会被永久按最重的模式对待。
+    private static func clearMemoryHeavy(_ url: URL) {
+        var set = Set(UserDefaults.standard.stringArray(forKey: memoryHeavyKey) ?? [])
+        guard set.remove(url.absoluteString) != nil else { return }
+        UserDefaults.standard.set(Array(set), forKey: memoryHeavyKey)
+        CrashLog.note("==== memory-heavy flag cleared: \(url.absoluteString) ====")
+    }
+
+    /// 把一个「会顶死进程」的路由从落盘的浏览历史里抹掉。
+    ///
+    /// 只抹**同一条**路由：用户别的歌单、别的页面照常记住。
+    /// 目的很直接 —— 这个地址永远不该再成为重建的落脚点。
+    /// 重建的地址优先级是「死前那页 > 首屏那页 > 落盘历史 > 首页」，
+    /// 前三个都可能是这个歌单，所以落盘这份也必须在死亡那一刻就断掉，
+    /// 否则下一次启动（或新实例的又一次重建）会把它原样读回来。
+    private static func forgetVisibleRoute(_ url: URL) {
+        let raw = UserDefaults.standard.string(forKey: pageHistoryKey)
+        guard let saved = raw.flatMap(URL.init(string:)) else { return }
+        guard saved.absoluteString == url.absoluteString else { return }
+        UserDefaults.standard.removeObject(forKey: pageHistoryKey)
+        CrashLog.note("==== forgot risky landing route: \(url.absoluteString) ====")
     }
 
     /// 注入给页面的降载开关：`window.__foliaLowMemory`。
