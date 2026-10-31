@@ -5625,6 +5625,7 @@ extension WebContainerView {
             if (mirror === this && st && st.url === url && !st.ended) {
               send({ cmd: 'play' });
               setPlaying(true);
+              expect(true);
               return Promise.resolve();
             }
             startNative(this, url);
@@ -5636,6 +5637,7 @@ extension WebContainerView {
             if (st) st.intent = false;
             send({ cmd: 'pause' });
             setPlaying(false);
+            expect(false);
           };
 
           // 重写load函数：切换歌曲时正确释放原生播放器
@@ -5784,6 +5786,11 @@ extension WebContainerView {
 
             if (type === 'state' || type === 'time' || type === 'loaded') {
               var playing = e.playing === true;
+              // expect机制：命令发出后短时间内，忽略不符合预期的旧状态
+              if (st.expectUntil && Date.now() < st.expectUntil &&
+                  playing !== st.expectPlaying) {
+                return;
+              }
               var p = Number(e.position);
               if (Number.isFinite(p)) setPosition(p);
               if (playing !== st.playing) setPlaying(playing);
@@ -5791,6 +5798,63 @@ extension WebContainerView {
               if (playing) st.ended = false;
             }
           };
+
+          // —— visibilitychange处理 ——
+          var hiddenAt = 0;
+          function justHidden() {
+            return document.hidden && Date.now() - hiddenAt < 4000;
+          }
+
+          // 保持原生播放：进后台时确保原生继续播放
+          function keepNativePlaying(reason) {
+            if (!mirror || !st) return;
+            send({ cmd: 'play' });
+            if (!st.playing) setPlaying(true);
+            expect(true);
+          }
+
+          // expect机制：命令发出后900ms内忽略不符合预期的旧状态
+          function expect(playing) {
+            if (st) {
+              st.expectPlaying = playing;
+              st.expectUntil = Date.now() + 900;
+            }
+          }
+
+          document.addEventListener('visibilitychange', function () {
+            if (document.hidden) {
+              hiddenAt = Date.now();
+              // 进后台时挂起AudioContext
+              suspendContexts('进入后台');
+              // 多次确保原生继续播放
+              [300, 700, 1200, 2000].forEach(function (ms) {
+                setTimeout(function () {
+                  if (document.hidden) keepNativePlaying('进入后台 +' + ms + 'ms');
+                }, ms);
+              });
+            } else {
+              // 回到前台：查询状态，对齐进度
+              if (mirror) send({ cmd: 'status' });
+            }
+          });
+
+          // 等待原生通道出现（如果通道晚注册）
+          var waits = 0;
+          (function waitForNative() {
+            if (nativeHandler()) {
+              if (mirror) return;
+              // 通道出现后，如果有正在播放的audio，交给原生
+              var playing = Array.prototype.filter.call(
+                document.querySelectorAll('audio'),
+                function (el) { return !el.paused && eligible(el); }
+              );
+              if (playing.length === 1) {
+                startNative(playing[0], srcOf(playing[0]));
+              }
+              return;
+            }
+            if (++waits < 120) setTimeout(waitForNative, 500);
+          })();
 
           console.info('[Folia] Native player bridge installed');
         })();
