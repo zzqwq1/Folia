@@ -544,29 +544,23 @@ final class WebContainerView: UIView {
         var landing: URL = usable(lastKnown)
             ?? usable(landingHistory)
             ?? Self.startURL
-        // **候选全被剔除时，退到 `#player`，而不是首页。**
+        // **优先检查deadLandingURL：如果它是#player，直接用它。**
         //
-        // 日志 10-31-12-11-34Z / 12-11-43Z 第 14-17 行的现场：
-        //   landing sources: committed=/ visible=/ dead=/#player → /
-        //   rebuild: reopen https://app.folia-api.top/
-        // 用户在 `.../playlist/14400331811` 里，这个路由刚把进程顶死，
-        // `usable()` 把它剔除；`startURL` 没有 fragment，`stableFallback` 返回 nil，
-        // 于是落脚点成了首页 —— 用户看到的就是「回到加载界面」。
-        // 退到 `#player` 结构最轻，且正是用户想要的「歌还在放」。
-        if usable(lastKnown) == nil, usable(landingHistory) == nil {
+        // 问题场景：lastCommittedURL可能已经被污染成无hash首页（进程死亡时
+        // webView.url只剩域名），它不是memory heavy，所以usable返回非nil，
+        // 导致landing先被设为无hash首页。但deadLandingURL是我们在死亡回调里
+        // 专门设置的，应该更权威。
+        if let deadURL = Self.trustedSiteURL(deadLandingURL),
+           let fragment = deadURL.fragment,
+           fragment.hasPrefix("player") {
+            landing = deadURL
+        } else if usable(lastKnown) == nil, usable(landingHistory) == nil {
+            // 候选全被剔除时，退到`#player`，而不是首页。
             let died = Self.trustedSiteURL(deadLandingURL)
                 ?? Self.trustedSiteURL(lastCommittedURL)
                 ?? Self.trustedSiteURL(lastVisibleURL)
-            if let died {
-                // **如果已经是#player，直接用它，不要再调stableFallback。**
-                //
-                // stableFallback对player开头的fragment返回nil，导致landing
-                // 保持为无hash的startURL，用户看到的就是回到加载界面。
-                if let fragment = died.fragment, fragment.hasPrefix("player") {
-                    landing = died
-                } else if let stable = Self.stableFallback(from: died) {
-                    landing = stable
-                }
+            if let died, let stable = Self.stableFallback(from: died) {
+                landing = stable
             }
         }
         // **新实例从头加载一次，把它自己打开的那一屏重新记下来。**
@@ -1250,13 +1244,23 @@ final class WebContainerView: UIView {
             container.evaluateJavaScript(Self.firstPaintProbeScript) { [weak self, weak container] phase, _ in
                 guard let self, let container, container === self.webView else { return }
                 guard ((phase as? String) ?? "loading") != "loading" else { return }
-                // **重负载标记唯一的洗清出口。**
+                // **重负载标记加10秒稳定期，不立刻清除。**
                 //
-                // 判据是「这一页自己画出来了，而且画出来的时候它就是那个路由」。
-                // 重建后新实例打开的是降级过的 `#player`，它画出来只会清 `#player`，
-                // 绝不会替那个歌单洗白。用上面 JS 读到的 `trusted`（含 hash），
-                // 不能用 `container.url` —— 那个值在 SPA 路由下永远是 `/`。
-                Self.clearMemoryHeavy(trusted)
+                // 问题：页面刚画出来就清除flag，但页面可能在接下来几秒内就崩溃，
+                // 导致下次又被当成普通页面打开，再死一次。
+                // 现在延迟10秒，并且确认页面还在同一个路由才清除。
+                let paintedURL = trusted
+                DispatchQueue.main.asyncAfter(deadline: .now() + 10.0) { [weak self, weak container] in
+                    guard let self, let container, container === self.webView else { return }
+                    // 确认10秒后页面还在同一个路由，没有导航走
+                    container.evaluateJavaScript(
+                        "(function(){return String(location.href);})()"
+                    ) { [weak self] currentURL, _ in
+                        guard let self, let current = currentURL as? String,
+                              current == paintedURL.absoluteString else { return }
+                        Self.clearMemoryHeavy(paintedURL)
+                    }
+                }
                 Self.clearRouteDeath(trusted)
                 self.reachedFirstPaintOnce = true
                 self.markFirstPaintSettled()
@@ -1891,7 +1895,8 @@ final class WebContainerView: UIView {
             collectAudio(document, list);
             for (var i = 0; i < list.length; i += 1) {
               var el = list[i];
-              if (el.src && !el.ended) { return true; }
+              var elSrc = el.currentSrc || el.src;
+              if (elSrc && !el.ended) { return true; }
             }
             // 线上站没有 `<audio>`（纯 WebAudio）：按页面自报的播放事实判断，
             // 否则这一层在线上站恒为 false，「恢复过程抖出来的 pause」会被认成
@@ -2104,7 +2109,9 @@ final class WebContainerView: UIView {
             collectMedia(document, media);
             var liveMedia = 0;
             for (var m = 0; m < media.length; m += 1) {
-              if (media[m].src && !media[m].ended) { liveMedia += 1; }
+              // 用currentSrc || src，兼容用<source>子元素的情况
+              var mediaSrc = media[m].currentSrc || media[m].src;
+              if (mediaSrc && !media[m].ended) { liveMedia += 1; }
             }
             if (liveMedia === 0 && list.length === 0) {
               var ms = navigator.mediaSession;
@@ -2789,7 +2796,8 @@ final class WebContainerView: UIView {
         collectMedia(document, list);
         for (var i = 0; i < list.length; i += 1) {
           var el = list[i];
-          if (el.src && !el.ended && !el.paused) { return true; }
+          var elSrc = el.currentSrc || el.src;
+          if (elSrc && !el.ended && !el.paused) { return true; }
         }
         var st = 'none';
         try {
@@ -2916,12 +2924,14 @@ final class WebContainerView: UIView {
             collectAudio(document, list);
             var pick = window.__foliaLastAudio;
             var chosen = null;
-            if (pick && pick.src && !pick.ended && pick.paused && pick.isConnected) {
+            var pickSrc = pick ? (pick.currentSrc || pick.src) : null;
+            if (pick && pickSrc && !pick.ended && pick.paused && pick.isConnected) {
               chosen = pick;
             } else {
               for (var i = 0; i < list.length; i += 1) {
                 var el = list[i];
-                if (!el.paused || el.ended || !el.src) { continue; }
+                var elSrc = el.currentSrc || el.src;
+                if (!el.paused || el.ended || !elSrc) { continue; }
                 if (!chosen || (el.currentTime || 0) > (chosen.currentTime || 0)) { chosen = el; }
               }
             }
@@ -3741,7 +3751,8 @@ final class WebContainerView: UIView {
             var list = [];
             collectAudio(document, list);
             for (var i = 0; i < list.length; i += 1) {
-              if (!list[i].ended && list[i].src) { return list[i]; }
+              var itemSrc = list[i].currentSrc || list[i].src;
+              if (!list[i].ended && itemSrc) { return list[i]; }
             }
             return null;
           };
