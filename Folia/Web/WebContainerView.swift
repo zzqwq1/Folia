@@ -1742,6 +1742,20 @@ final class WebContainerView: UIView {
               var el = list[i];
               if (el.src && !el.ended) { return true; }
             }
+            // 线上站没有 `<audio>`（纯 WebAudio）：按页面自报的播放事实判断，
+            // 否则这一层在线上站恒为 false，「恢复过程抖出来的 pause」会被认成
+            // 用户亲手暂停，把恢复链整条锁死。
+            var st = 'none';
+            try {
+              var ms = navigator.mediaSession;
+              st = ms && ms.playbackState ? ms.playbackState : 'none';
+            } catch (e) {}
+            if (st === 'none' && window.__foliaPlaybackState) { st = window.__foliaPlaybackState; }
+            if (st === 'playing') { return true; }
+            var ctx = window.__foliaAudioContexts || [];
+            for (var c = 0; c < ctx.length; c += 1) {
+              if (ctx[c] && ctx[c].state === 'running') { return true; }
+            }
             return false;
           } catch (e) { return false; }
         })();
@@ -2318,10 +2332,32 @@ final class WebContainerView: UIView {
             window.__foliaClockEl = el;
             return 'sampled';
           }
+          // **没有 `<audio>` 不代表没在放。**
+          //
+          // 线上站的播放引擎是纯 WebAudio，`document.querySelectorAll('audio')`
+          // 恒为空（见 `resumeAudioContexts` 里同一段说明）。早先这里直接报
+          // `idle` → 调用方恒判「时钟没走」，于是回前台的每一处「时钟确认」出口
+          // 都白走一遍 `setCategory`，把正在响的媒体按停一次。
+          // 现在按页面自报的播放事实兜底：MediaSession 报 `playing`、或记到的
+          // AudioContext 里有 running 的，都算「时钟在走」。
+          var st = 'none';
+          try {
+            var ms = navigator.mediaSession;
+            st = ms && ms.playbackState ? ms.playbackState : 'none';
+          } catch (e) {}
+          if (st === 'none' && window.__foliaPlaybackState) { st = window.__foliaPlaybackState; }
+          if (st === 'playing') { return 'media-playing'; }
+          var ctx = window.__foliaAudioContexts || [];
+          for (var c = 0; c < ctx.length; c += 1) {
+            if (ctx[c] && ctx[c].state === 'running') { return 'context-running'; }
+          }
           return 'idle';
         })();
         """
         webView?.evaluateJavaScript(js) { [weak self] result, _ in
+            // 纯 WebAudio 页面：没有可采样的 `currentTime`，只能按页面自报的状态认定。
+            if (result as? String) == "media-playing" { completion(true); return }
+            if (result as? String) == "context-running" { completion(true); return }
             guard let self, (result as? String) == "sampled" else {
                 completion(false)
                 return
@@ -2479,6 +2515,32 @@ final class WebContainerView: UIView {
         webView?.evaluateJavaScript(js, completionHandler: nil)
     }
 
+    /// 页面元素（或页面登记的播放入口）**当前是不是正在响**；判断不了时返回 `null`。
+    ///
+    /// `playEntryJS` 的第三、四级出口会「不管当前状态直接放一下」：元素级要
+    /// `paused` 才返回，但它只取第一个媒体元素，双 deck 里可能挑到待命的那一个；
+    /// 第四级直接写 `playbackState = 'playing'` 更是无条件。恢复链反复调用时，
+    /// 这等于把正在响的歌又 play 一次、把状态位冒充成播放中。
+    /// 所以调用方在动手前先用这一句确认：`true` 就跳过，`null` 才按原逻辑兜底。
+    private static let playbackBusyJS = """
+    (function(){
+      try {
+        var list = document.querySelectorAll('audio,video');
+        for (var i = 0; i < list.length; i += 1) {
+          var el = list[i];
+          if (el.src && !el.ended && !el.paused) { return true; }
+        }
+        var st = 'none';
+        try {
+          var ms = navigator.mediaSession;
+          st = ms && ms.playbackState ? ms.playbackState : 'none';
+        } catch (e) {}
+        if (st === 'none' && window.__foliaPlaybackState) { st = window.__foliaPlaybackState; }
+        return st === 'playing' ? true : null;
+      } catch (e) { return null; }
+    })();
+    """
+
     /// 页面「点一下播放」的兜底入口，注入到每一段补放脚本的最前面，定义局部 `__foliaPlay()`。
     ///
     /// 为什么需要兜底：线上站是纯 WebAudio，DOM 里没有 `<audio>`，
@@ -2499,7 +2561,7 @@ final class WebContainerView: UIView {
         // 线上 bundle 已核实走的就是这一条（`mediaSessionPlayRef`）。
         var fn = window.__foliaMediaCommand && window.__foliaMediaCommand.play;
         if (typeof fn === 'function') {
-          return function(){ try { var r = fn({ action: 'play' }); if (r && r.catch) { r.catch(function(){}); } } catch (e) {} };
+          return function(){ try { var r = fn(); if (r && r.catch) { r.catch(function(){}); } } catch (e) {} };
         }
         // 二级：页面上真实存在的播放按钮。线上站没有 `player-toggle` 这类 testid，
         // 只能按 aria-label / 可访问名找，且必须在 aria-pressed=true（正在放）时跳过，
@@ -2522,12 +2584,15 @@ final class WebContainerView: UIView {
         if (v && v.paused && typeof v.play === 'function') {
           return function(){ try { var p = v.play(); if (p && p.catch) { p.catch(function(){}); } } catch (e) {} };
         }
-        // 四级：只改状态位，不动播放。它不会自己出声，但能让下一次探测
-        // 判成 media-playing 而不是 no-elements，避免恢复链被永久判死。
-        var ms = navigator.mediaSession;
-        if (ms && ms.playbackState !== undefined) {
-          return function(){ try { ms.playbackState = 'playing'; } catch (e) {} };
-        }
+        // 四级：**什么都不做。**
+        //
+        // 早先这里会写 `navigator.mediaSession.playbackState = 'playing'`，
+        // 以为「至少让下一次探测判成 media-playing，别把恢复链判死」。
+        // 但那是让**壳自己**伪造出「页面在放」的事实：紧接着新加的
+        // `isMediaHealthy` / `isPlaybackClockAdvancing` / `busy` 三道判据
+        // 都会读到这个伪造值，于是恢复链以为已经好了、彻底收工 ——
+        // 用户听到的就是「状态栏显示在放，实际一点声都没有」。
+        // 宁可如实报 `no-elements`，让保活继续补放。
       } catch (e) {}
       return null;
     };
@@ -2564,6 +2629,8 @@ final class WebContainerView: UIView {
         let js = """
         (function(){
           try {
+            var __busy = \(Self.playbackBusyJS);
+            if (__busy === true) { return 'busy'; }
             \(Self.playEntryJS)
             // 双 deck 交叉淡化（automix）下有两个 `<audio>`：一个在放、一个待命。
             // 待命的那个同样是 `paused` 且有 `src`，**不能**一起 `play()` ——
@@ -2636,13 +2703,18 @@ final class WebContainerView: UIView {
         // 进度条卡在同一处反复播放，怎么都过不去；大退重开后又从旧位置开始。
         // 声音与字幕的偏差在「保活补放」这一条路上本来就只有几百毫秒，
         // 交给页面自己的播放时钟推进即可，不需要原生插手。
-        // 上下文是异步起搏的，等一帧再补一次：
-        // 只在上一次没放成（元素仍被按停）时才动手，不会和上面那次叠着放。
+        // 上下文是异步起搏的，等一帧再补一次。
+        //
+        // 只在这一拍确实「没放成」时才动手：纯 WebAudio 页面没有 `<audio>` 可判，
+        // 只能看页面自报的 playbackState（`busy === true` 就收手）；
+        // 有元素时按元素是否仍被按停判断 —— 两处都不会和上面那次叠着放。
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
             guard let self, self.wantsAudible, !self.userPaused else { return }
             let retryJS = """
             (function(){
               try {
+                var __busy = \(Self.playbackBusyJS);
+                if (__busy === true) { return 'busy'; }
                 \(Self.playEntryJS)
                 var list = document.querySelectorAll('audio');
                 var el = window.__foliaLastAudio;
@@ -2658,7 +2730,7 @@ final class WebContainerView: UIView {
                   // 这一拍也必须回到页面自己的播放入口，否则第二次补放同样落空。
                   var fn = __foliaPlay();
                   if (typeof fn === 'function') {
-                    try { fn({ action: 'play' }); } catch (e) {}
+                    try { fn(); } catch (e) {}
                     return 'resumed';
                   }
                   return 'noop';
@@ -2704,6 +2776,9 @@ final class WebContainerView: UIView {
         let js = """
         (function(a){
           try {
+            // 先看页面是不是本来就在响：`playEntryJS` 的三、四级出口是无条件的，
+            // 恢复链每拍都调一次会把正在放的歌重新 play 一遍。
+            var __busy = \(Self.playbackBusyJS);
             \(Self.playEntryJS)
             var media = document.querySelector('audio,video');
             var cmd = window.__foliaMediaCommand || {};
@@ -2726,16 +2801,38 @@ final class WebContainerView: UIView {
               if (st === 'playing') {
                 if (typeof cmd.pause === 'function') { cmd.pause(); return; }
               } else {
+                if (__busy === true) { return; }
                 var play = __foliaPlay();
                 if (play) { play(); return; }
               }
             }
             if (a === 'play') {
+              if (__busy === true) { return; }
               var p = __foliaPlay();
               if (p) { p(); return; }
             }
             if (a === 'pause') {
-              if (media && media.pause) { media.pause(); return; }
+              // 页面没登记 `pause` 处理器时的兜底：把每个在放的媒体元素都按停，
+              // 再把状态位改成 `paused`。否则锁屏暂停在纯 WebAudio 页面完全空转。
+              var any = false;
+              var els = document.querySelectorAll('audio,video');
+              for (var i = 0; i < els.length; i += 1) {
+                if (!els[i].paused && typeof els[i].pause === 'function') {
+                  try { els[i].pause(); any = true; } catch (e) {}
+                }
+              }
+              try {
+                var msPause = navigator.mediaSession;
+                if (msPause) { msPause.playbackState = 'paused'; }
+              } catch (e) {}
+              if (!any && window.__foliaAudioContexts) {
+                for (var k = 0; k < window.__foliaAudioContexts.length; k += 1) {
+                  var ck = window.__foliaAudioContexts[k];
+                  if (ck && typeof ck.suspend === 'function' && ck.state === 'running') {
+                    try { ck.suspend(); } catch (e) {}
+                  }
+                }
+              }
               return;
             }
             // 上一首 / 下一首只能靠界面按钮：线上站没有暴露任何全局切歌接口。
