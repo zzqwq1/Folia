@@ -360,6 +360,7 @@ final class WebContainerView: UIView {
             .sink { [weak self] _ in self?.hardReload() }
 
         webView.load(URLRequest(url: Self.startURL, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 30))
+        startPageHeartbeat()
         scheduleProgressWatchdog()
 
         // 锁屏 / 耳机线控按钮 → 页面播放器。
@@ -575,7 +576,81 @@ final class WebContainerView: UIView {
         view.load(URLRequest(url: pending.landing,
                              cachePolicy: .useProtocolCachePolicy,
                              timeoutInterval: 30))
+        startPageHeartbeat()
         scheduleProgressWatchdog()
+    }
+
+    // MARK: - 页面主线程看门狗
+
+    /// 页面主线程卡死（不是进程被回收）的事件端口。
+    ///
+    /// 歌单页把 WebProcess 顶死有两种表现：
+    /// 1. 进程被系统回收 —— 有 `webViewWebContentProcessDidTerminate` 回调；
+    /// 2. **主线程自己卡死**（一次性解码几百张封面，同步布局几十秒）—— 进程还在，
+    ///    没有任何回调，壳这边看起来「页面活得好好的」。
+    ///
+    /// 日志 09-59-19Z 是第二种的变体：进程被回收了，但新页面在 `#player` 上
+    /// 迟迟不画、也不回调。两种情况壳都必须自己发现，不能等页面施舍一个事件。
+    private var hbGeneration = 0
+    private var hbLastBeat = Date()
+    private var pageHeartbeat: Timer?
+
+    /// 每 5 秒问页面一句「还活着吗」，连续 12 秒没有回音就按卡死处理。
+    ///
+    /// 时间窗取 12 秒：正常的一帧、一次路由切换、一次大列表渲染都在 1 秒内；
+    /// 连续三个周期都不回，说明主线程被同步任务占住了，再等也不会自己恢复。
+    private static let heartbeatInterval: TimeInterval = 5.0
+    private static let heartbeatDeadline: TimeInterval = 12.0
+
+    private func startPageHeartbeat() {
+        stopPageHeartbeat()
+        hbLastBeat = Date()
+        let timer = Timer(timeInterval: Self.heartbeatInterval, repeats: true) { [weak self] _ in
+            self?.pageHeartbeatTick()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        pageHeartbeat = timer
+    }
+
+    private func stopPageHeartbeat() {
+        pageHeartbeat?.invalidate()
+        pageHeartbeat = nil
+    }
+
+    private func pageHeartbeatTick() {
+        guard let webView else { return }
+        // 页面还没提交过任何文档（首屏加载中）时不计时：那时卡在网络上很正常。
+        guard lastCommittedURL != nil else {
+            hbLastBeat = Date()
+            return
+        }
+        hbGeneration += 1
+        let gen = hbGeneration
+        webView.evaluateJavaScript("'alive'") { [weak self] result, _ in
+            guard let self, gen == self.hbGeneration else { return }
+            if (result as? String) == "alive" {
+                self.hbLastBeat = Date()
+            }
+            // 没回来（超时 / 进程已死但回调还没到）就不动 `hbLastBeat`，
+            // 由下一次 tick 按时限兜底。
+        }
+        // 回调迟迟不来时由下一次 tick 兜底判断：`hbLastBeat` 不动就是没回应。
+        if Date().timeIntervalSince(hbLastBeat) >= Self.heartbeatDeadline {
+            hbLastBeat = Date()
+            CrashLog.note("==== page unresponsive for \(Int(Self.heartbeatDeadline))s, force rebuild ====")
+            let dead = Self.trustedSiteURL(lastVisibleURL) ?? Self.trustedSiteURL(lastCommittedURL)
+            if let dead {
+                Self.noteRouteDeath(dead)
+                Self.markMemoryHeavy(dead)
+            }
+            deadLandingURL = dead
+            documentFinished = false
+            didReachFirstPaint = false
+            hasEvaluatedFirstPaint = false
+            stopKeepAliveTimer()
+            let resume = !userPaused && (wantsAudible || Self.wasAudibleInBackground)
+            rebuildWebView(resumeAudio: resume)
+        }
     }
 
     /// 用户点「重试」时走这条路。
@@ -614,6 +689,7 @@ final class WebContainerView: UIView {
         webView.load(URLRequest(url: Self.startURL,
                                 cachePolicy: .reloadIgnoringLocalCacheData,
                                 timeoutInterval: 30))
+        startPageHeartbeat()
         scheduleProgressWatchdog()
     }
 
@@ -1064,6 +1140,7 @@ final class WebContainerView: UIView {
 
     deinit {
         stopKeepAliveTimer()
+        stopPageHeartbeat()
         // block 型观察者不会随 self 释放自动注销，留着会在下一次通知时回调到已释放对象上。
         let tokens: [Any?] = [remoteObservation, foregroundObservation, backgroundObservation, networkObservation, audioPathObservation]
         for token in tokens.compactMap({ $0 }) {
@@ -1971,10 +2048,17 @@ final class WebContainerView: UIView {
         // 这类页面的 `isMediaHealthy` 永远报 `idle`（DOM 里没有 `audio`），
         // 若按「没在出声」处理，保活每 2 秒就会把它打断一次。
         // 页面 MediaSession 报 `playing` 就是「引擎在跑」的事实，直接收工。
+        //
+        // 同时把「这次离开 App 没有留下出声证据」那一位清掉。
+        // 日志 09-57-58Z：第 46-47 行 `audio alive after preemption, skip rebuild`
+        // → `audio path healthy, skip rebuild` 已经确认引擎在跑，可下一拍保活
+        // 又带着这一位重来一遍，恢复链被反复唤醒、反复 `resume()`。
+        // 引擎自己健康的证据比「离开过」这一事实更新，以它为准。
         if contextState == "media-playing" {
             CrashLog.note("==== audio engine running per mediaSession, skip rebuild (\(reason)) ====")
             brokenProbeStreak = 0
             leftAppWhileAudible = false
+            preemptedByOtherApp = false
             finishAudioRecovery()
             return
         }
@@ -2115,6 +2199,14 @@ final class WebContainerView: UIView {
         if attempt == 0 {
             AudioSessionController.shared.activate()
         }
+        // **系统通路修好之后，页面引擎自己停着也不会出声。**
+        //
+        // 纯 WebAudio 页面（线上站）的恢复链以前到这里就结束了：只 `setCategory`
+        // + `setActive`，从不碰页面播放引擎。日志 09-57-58Z 第 43-50 行
+        // 反复 `preempted by another app, verifying` → `silent with running context`
+        // 就是这一层：系统通路全绿，页面却一直不响，直到用户手动点播放。
+        // 所以每一趟最后都让页面自己补一次播放入口（幂等，正在响时无副作用）。
+        resumeAudio(reason: reason)
         // 无论如何都叫醒一次页面上下文：`resume()` 是幂等的，
         // 而日志里 `contextOK=0` 之后恢复链一步都没往前走，就是从这少了一拍。
         revivePageAudio()
@@ -4184,6 +4276,7 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         // 它与进程死活无关，跨重建保留。
         let resume = !userPaused && (wantsAudible || Self.wasAudibleInBackground)
         stopKeepAliveTimer()
+        stopPageHeartbeat()
 
         // **同一路由连续顶死进程：不再重建，直接带哈希退到稳定页。**
         //
