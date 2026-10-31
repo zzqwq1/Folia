@@ -182,5 +182,153 @@
       })();
     </script>
     <div id="root"></div>
+  <!-- ========== 赞赏弹窗 开始 ========== -->
+<style>
+  #donate-mask{position:fixed;inset:0;display:none;align-items:center;justify-content:center;
+    background:rgba(0,0,0,.68);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);
+    z-index:2147482500;padding:20px}
+  #donate-mask.show{display:flex}
+  #donate-card{background:#fff;border-radius:18px;padding:20px 20px 16px;max-width:86vw;width:340px;
+    text-align:center;animation:dp .24s ease;box-shadow:0 18px 60px rgba(0,0,0,.45)}
+  #donate-card .donate-title{font-size:17px;font-weight:700;color:#1f1f1f;letter-spacing:.02em}
+  #donate-card img{width:min(62vw,240px);border-radius:10px;display:block;margin:0 auto 6px}
+  #donate-card .donate-version{display:flex;align-items:center;justify-content:center;gap:10px;
+    margin:0 0 14px;padding:8px 10px;background:#f6f7f9;border-radius:10px;font-size:12px;color:#666}
+  #donate-card .donate-version b{color:#1f1f1f;font-weight:700}
+  #donate-card #donate-get-latest{color:#ff4d6d;font-weight:600;text-decoration:none;cursor:pointer}
+  #donate-card #donate-get-latest[data-busy='1']{opacity:.55;pointer-events:none}
+  #donate-card .donate-row{display:flex;gap:14px;justify-content:center;margin-top:14px}
+  #donate-card .donate-col{flex:1;max-width:150px}
+  #donate-card .donate-col img{width:100%}
+  #donate-card .donate-col .q-label{font-size:12px;color:#555}
+  #donate-card p{margin:10px 0 0;font-size:13px;color:#666;line-height:1.5}
+  #donate-card p.hint{font-size:12px;color:#9a9a9a;margin-top:4px}
+  #donate-close{margin-top:14px;border:0;background:#f2f3f5;color:#333;font-size:14px;
+    padding:9px 34px;border-radius:999px;cursor:pointer}
+  @keyframes dp{from{transform:scale(.88);opacity:0}to{transform:scale(1);opacity:1}}
+</style>
+
+<div id="donate-mask">
+  <div id="donate-card">
+    <div class="donate-title">给 Ex 赞赏</div>
+    <div class="donate-version">
+      <span>当前版本 <b id="donate-version-num">2.1</b></span>
+      <span>·</span>
+      <span>最新版本 <b id="donate-latest-num">2.1</b></span>
+      <a id="donate-get-latest" href="javascript:void(0)">获取</a>
+    </div>
+    <div class="donate-row">
+      <div class="donate-col">
+        <img src="./appreciate-qr.jpg" alt="赞赏码">
+        <div class="q-label">赞赏码</div>
+      </div>
+      <div class="donate-col">
+        <img src="./qq-group-qr.png" alt="QQ 群二维码">
+        <div class="q-label">QQ 群：1131099078</div>
+      </div>
+    </div>
+    <p>如果 Folia 帮到你了，可以请我喝杯咖啡 ❤️</p>
+    <p class="hint">长按二维码可保存到相册</p>
+    <button id="donate-close">关闭</button>
+  </div>
+</div>
+
+<script>
+// 版本号唯一来源：下面的赞赏弹窗和更新公告脚本都读这两个值，避免多处版本号不一致。
+// FOLIA_VERSION = 本 App 当前版本；FOLIA_LATEST_VERSION = 最新可下载版本。
+var FOLIA_VERSION = '2.1';
+var FOLIA_LATEST_VERSION = '2.1';
+(function(){
+  try {
+    var p = new URLSearchParams(window.location.search);
+    if (p.get('obs') === '1' || window.location.pathname === '/obs' || p.get('splash') === '0') return;
+  } catch (e) {}
+  // iOS 原生壳（WKWebView）里不弹：这个弹窗是网页版的赞赏入口，装在 App 里只是开机挡一层。
+  if (/iPhone|iPad|iPod/i.test(navigator.userAgent || '')) return;
+
+  var mask = document.getElementById('donate-mask');
+  if (!mask) return;
+
+  // 用全局版本号回填，保证「当前版本」和「最新版本」显示的是同一处来源。
+  var verNum = document.getElementById('donate-version-num');
+  if (verNum && typeof FOLIA_VERSION === 'string' && FOLIA_VERSION) { verNum.textContent = FOLIA_VERSION; }
+  var latestNum = document.getElementById('donate-latest-num');
+  if (latestNum && typeof FOLIA_LATEST_VERSION === 'string' && FOLIA_LATEST_VERSION) { latestNum.textContent = FOLIA_LATEST_VERSION; }
+
+  var KEY = 'folia.donate.shown';
+  var shown = false;
+  try { shown = sessionStorage.getItem(KEY) === '1'; } catch (e) {}
+  if (!shown) {
+    setTimeout(function(){ mask.classList.add('show'); }, 1600);
+    try { sessionStorage.setItem(KEY, '1'); } catch (e) {}
+  }
+
+  var QUARK_URL = 'https://pan.quark.cn/s/934c480d5b9c';
+  var getLatestBtn = document.getElementById('donate-get-latest');
+  if (getLatestBtn) {
+    getLatestBtn.addEventListener('click', function(e){
+      e.preventDefault();
+      try { window.open(QUARK_URL, '_blank'); } catch(err) { location.href = QUARK_URL; }
+    });
+  }
+
+  document.getElementById('donate-close').addEventListener('click', function(){ mask.classList.remove('show'); });
+  mask.addEventListener('click', function(e){ if (e.target === mask) mask.classList.remove('show'); });
+})();
+</script>
+<!-- ========== 赞赏弹窗 结束 ========== -->
+<!-- ========== 版本更新公告（每个版本只弹一次） ========== -->
+<div id="update-mask" style="display:none;position:fixed;inset:0;z-index:2147483500;background:rgba(0,0,0,.62);backdrop-filter:blur(14px);align-items:center;justify-content:center;padding:20px">
+  <div style="width:100%;max-width:340px;background:#fff;border-radius:22px;padding:24px 22px 18px;box-shadow:0 24px 60px rgba(0,0,0,.35);text-align:center;color:#111">
+    <div style="font-size:17px;font-weight:700;letter-spacing:.2px">🎉 Folia 2.1 新版本</div>
+    <p style="margin:14px 0 0;font-size:14px;line-height:1.7;color:#333">最新 <b style="color:#ff4d6d">2.1</b> 版本已发布，请及时下载！</p>
+    <p style="margin:10px 0 0;font-size:12px;color:#999">点击下方按钮前往夸克网盘下载</p>
+    <div style="margin-top:18px;display:flex;gap:10px">
+      <button id="update-open-quark" style="flex:1;border:0;border-radius:999px;padding:11px 0;font-size:14px;font-weight:600;color:#fff;background:linear-gradient(135deg,#ff7e9d,#ff4d6d);cursor:pointer">立即更新</button>
+      <button id="update-close" style="flex:1;border:0;border-radius:999px;padding:11px 0;font-size:14px;font-weight:600;color:#444;background:#f2f3f5;cursor:pointer">我知道了</button>
+    </div>
+  </div>
+</div>
+<script>
+(function () {
+  var LATEST = (typeof FOLIA_LATEST_VERSION === 'string' && FOLIA_LATEST_VERSION) || '2.1';
+  var CUR = (typeof FOLIA_VERSION === 'string' && FOLIA_VERSION) || '2.1';
+  if (CUR === LATEST) return;
+
+  var KEY = 'folia.update.seen.' + LATEST;
+  try { if (localStorage.getItem(KEY)) return; } catch (e) {}
+
+  var mask = document.getElementById('update-mask');
+  if (!mask) return;
+
+  function show() { mask.style.display = 'flex'; }
+  function close() {
+    mask.style.display = 'none';
+    try { localStorage.setItem(KEY, '1'); } catch (e) {}
+  }
+
+  document.getElementById('update-close').addEventListener('click', close);
+  document.getElementById('update-open-quark')?.addEventListener('click', function(){
+    try { window.open('https://pan.quark.cn/s/934c480d5b9c', '_blank'); }
+    catch(err) { location.href = 'https://pan.quark.cn/s/934c480d5b9c'; }
+    close();
+  });
+  mask.addEventListener('click', function (e) { if (e.target === mask) close(); });
+
+  var waited = 0;
+  var timer = setInterval(function () {
+    waited += 400;
+    var donate = document.getElementById('donate-mask');
+    var donateOpen = donate && donate.classList.contains('show');
+    if (!donateOpen) {
+      clearInterval(timer);
+      setTimeout(show, 400);
+    } else if (waited > 30000) {
+      clearInterval(timer);
+    }
+  }, 400);
+})();
+</script>
+<!-- ========== 版本更新公告 结束 ========== -->
   </body>
 </html>
