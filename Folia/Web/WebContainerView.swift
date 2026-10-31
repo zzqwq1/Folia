@@ -5473,6 +5473,47 @@ extension WebContainerView {
           var silent = false;
           var tick = null;
 
+          // —— 处理网页的AudioContext ——
+          // 原生播放时挂起AudioContext，避免进后台时系统把网页音频会话挂起，
+          // 导致Folia收到暂停事件、进而把原生播放器也停了。
+          var contexts = [];
+          ['AudioContext', 'webkitAudioContext'].forEach(function (name) {
+            var C = window[name];
+            if (typeof C !== 'function' || C.__foliaWrapped) return;
+            var Wrapped = function () {
+              var ctx = new (Function.prototype.bind.apply(C, [null].concat(Array.prototype.slice.call(arguments))))();
+              contexts.push(ctx);
+              if (mirror) suspendContexts('新建时');
+              return ctx;
+            };
+            Wrapped.prototype = C.prototype;
+            Object.getOwnPropertyNames(C).forEach(function (k) {
+              if (!(k in Wrapped)) { try { Wrapped[k] = C[k]; } catch (e) {} }
+            });
+            Wrapped.__foliaWrapped = true;
+            window[name] = Wrapped;
+          });
+          var origResume = window.AudioContext && AudioContext.prototype.resume;
+          if (origResume) {
+            AudioContext.prototype.resume = function () {
+              // 原生在放：网页引擎保持挂起，不让恢复
+              if (mirror && contexts.indexOf(this) >= 0) return Promise.resolve();
+              return origResume.apply(this, arguments);
+            };
+          }
+          function suspendContexts(reason) {
+            contexts.forEach(function (ctx) {
+              if (ctx.state === 'running') { try { ctx.suspend(); } catch (e) {} }
+            });
+          }
+          function resumeContexts() {
+            contexts.forEach(function (ctx) {
+              if (ctx.state !== 'closed' && origResume) {
+                try { origResume.call(ctx); } catch (e) {}
+              }
+            });
+          }
+
           function srcOf(el) {
             return D.src.get.call(el) || el.currentSrc || '';
           }
@@ -5535,6 +5576,8 @@ extension WebContainerView {
             mirror = null;
             st = null;
             realMute(el, !!state.mutedIntent);
+            // 恢复网页的AudioContext
+            resumeContexts();
             if (restore) { try { D.currentTime.set.call(el, pos); } catch (e) {} }
             return { el: el, pos: pos, playing: state.playing };
           }
@@ -5562,6 +5605,8 @@ extension WebContainerView {
               volumeIntent: volumeIntent
             };
             realMute(el, true);
+            // 挂起网页的AudioContext，避免进后台时系统干扰
+            suspendContexts('交给原生');
             send({
               cmd: 'load',
               url: url,
