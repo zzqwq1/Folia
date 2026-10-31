@@ -471,8 +471,8 @@ final class WebContainerView: UIView {
         // `markVisiblePageIfNeeded` 在 SPA 路由切换时补记），所以它最能代表
         // 「用户正在看的那一页」。日志里 `rebuild: reopen /` 就是它缺位的结果。
         let lastKnown = Self.trustedSiteURL(lastCommittedURL)
-            ?? Self.trustedSiteURL(lastVisibleURL)
             ?? Self.trustedSiteURL(deadLandingURL)
+            ?? Self.trustedSiteURL(lastVisibleURL)
         // **死路由这一轮已经被顶死过，就绝不再把它当落脚点。**
         //
         // 现场（07-23-35Z / 07-23-56Z / 08-00-01Z）：落脚点明明是
@@ -904,6 +904,23 @@ final class WebContainerView: UIView {
     /// 已经只剩域名。所以「用户正在看哪一页」只能靠每隔一会儿问一次页面补上。
     private func refreshPageLocation() {
         guard let container = webView else { return }
+        // **每一拍先把「主框架现在停在哪」记下来。**
+        //
+        // 下面那段 JS 要求 `body` 已经有子节点才肯记地址，可它恰恰在最需要的时候失效：
+        // 进程被顶死前的那几秒、以及死掉那一拍，JS 要么打不回来、要么 `body` 已经空。
+        // 日志 08-00-01Z / 08-01-45Z 里，「死前那一页」明明就是
+        // `#collection/online/netease/playlist/14400331811`，`landing sources`
+        // 里却一个地址都没有，最后落到 `/`。哈希路由不会触发 `didCommit`，这一路要是不记，
+        // 就没有别的地方记得到。只在页面**已经画出来之后**才采，避免把首屏的
+        // `startURL` 当成用户所在页面。
+        if reachedFirstPaintOnce, let live = Self.trustedSiteURL(container.url) {
+            if live != lastVisibleURL {
+                CrashLog.note("==== page location synced \(live.absoluteString) ====")
+            }
+            lastVisibleURL = live
+            lastCommittedURL = live
+            rememberVisibleURL(live)
+        }
         // 回调里除了地址，还要求页面**已经画出来**（`firstPaintProbeScript` 不返回 loading）。
         //
         // 日志 05-13-29Z 的现场：这一次启动首屏从没被采到，随后进程被顶死，
@@ -3976,14 +3993,26 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         // 还没被写过（首屏都没确认完就进了歌单）。这里立刻抓一份，
         // 后面重开时用它把用户送回原路由，而不是首页加载遮罩。
         let deadPageURL = Self.trustedSiteURL(webView.url)
+        // **兜底：页面自己报的地址。**
+        //
+        // `webView.url` 在这一拍经常已经只剩域名（日志 08-00-01Z 第 5 行就是
+        // `url=https://app.folia-api.top/#collection/...` 拿到了，但更早的现场里它是
+        // `about:blank` / 只剩 `/`）。`lastVisibleURL` 由保活每 2 秒采一次，
+        // 是「用户在哪儿」最可靠的那一份，两者取更具体的那个当落脚点。
+        let lastSeen = Self.trustedSiteURL(lastVisibleURL) ?? Self.trustedSiteURL(lastCommittedURL)
+        if Self.trustedSiteURL(webView.url) == nil, let lastSeen {
+            CrashLog.note("==== death url missing, using last seen \(lastSeen.absoluteString) ====")
+        }
+        let landingCandidate = Self.trustedSiteURL(webView.url) ?? lastSeen
         // **按路由落盘记一次死亡。** 内存里的计数在换实例时不可靠（见 `noteRouteDeath`），
         // 这里写的这一份下一次重建直接读得到，哪怕换了进程也还在。
-        if let dead = deadPageURL {
+        if let dead = landingCandidate {
             Self.noteRouteDeath(dead)
             CrashLog.note("==== route death recorded: \(dead.absoluteString) ====")
         }
         // 重建时要用它当落脚点（见 `rebuildWebView` 里 `landing` 的优先级）。
-        deadLandingURL = deadPageURL
+        // 用带兜底的 `landingCandidate`：`webView.url` 为空时它是保活采到的那一份。
+        deadLandingURL = landingCandidate
         // **进程没了，页面就没了。** 先把「文档已经加载完」这一类标记全部复位，
         // 再走任何判活/重载分支。
         //
@@ -4051,12 +4080,12 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         // 写进两个地址位供 `rebuildWebView` 取用；然后无条件换实例（或直接重开）。
         // 歌单页是一次性渲染几百张封面把进程内存顶满：**同一个死路由不要再进**，
         // 落脚点见 `safeLanding(from:)`。
-        if let dead = deadPageURL {
+        if let dead = landingCandidate {
             lastCommittedURL = dead
             lastVisibleURL = dead
             rememberVisibleURL(dead)
         }
-        deadLandingURL = deadPageURL ?? deadLandingURL
+        deadLandingURL = landingCandidate ?? deadLandingURL
         // **新实例要不要接着放，看的是「用户的播放意图」，不是「死前那一拍有没有出声」。**
         //
         // 日志 05-13-29Z：用户在歌单里听着歌点进去，进程被内存顶死，
