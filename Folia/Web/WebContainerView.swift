@@ -544,6 +544,23 @@ final class WebContainerView: UIView {
         var landing: URL = usable(lastKnown)
             ?? usable(landingHistory)
             ?? Self.startURL
+        // **候选全被剔除时，退到 `#player`，而不是首页。**
+        //
+        // 日志 10-31-12-11-34Z / 12-11-43Z 第 14-17 行的现场：
+        //   landing sources: committed=/ visible=/ dead=/#player → /
+        //   rebuild: reopen https://app.folia-api.top/
+        // 用户在 `.../playlist/14400331811` 里，这个路由刚把进程顶死，
+        // `usable()` 把它剔除；`startURL` 没有 fragment，`stableFallback` 返回 nil，
+        // 于是落脚点成了首页 —— 用户看到的就是「回到加载界面」。
+        // 退到 `#player` 结构最轻，且正是用户想要的「歌还在放」。
+        if usable(lastKnown) == nil, usable(landingHistory) == nil {
+            let died = Self.trustedSiteURL(deadLandingURL)
+                ?? Self.trustedSiteURL(lastCommittedURL)
+                ?? Self.trustedSiteURL(lastVisibleURL)
+            if let died, let stable = Self.stableFallback(from: died) {
+                landing = stable
+            }
+        }
         // **新实例从头加载一次，把它自己打开的那一屏重新记下来。**
         //
         // `lastKnown` 有可能是旧进程残留的地址（日志 10-30-15Z 第 20 行：
@@ -1152,13 +1169,21 @@ final class WebContainerView: UIView {
         // 里却一个地址都没有，最后落到 `/`。哈希路由不会触发 `didCommit`，这一路要是不记，
         // 就没有别的地方记得到。只在页面**已经画出来之后**才采，避免把首屏的
         // `startURL` 当成用户所在页面。
-        if reachedFirstPaintOnce, let live = Self.trustedSiteURL(container.url) {
-            if live != lastVisibleURL {
-                CrashLog.note("==== page location synced \(live.absoluteString) ====")
-            }
+        //
+        // **这个值不可信，绝不能用来覆盖地址位。**
+        //
+        // `WKWebView.url` 在 SPA 哈希路由切换之后仍然只返回不带 hash 的 `/`
+        // （pushState / hashchange 都不产生新的导航），所以这里读到的是一个
+        // 「丢了路由的残值」。日志 10-31-12-10-33Z 第 41 行刚同步过
+        // `.../playlist/14400331811`，第 47/48 行同一份运行里重建出来的
+        // `landing sources` 却全是 `/` —— 就是被这一拍覆盖回去的。
+        // 唯一保留的用途：页面从没记到过任何地址时，至少有个站内地址可用。
+        if reachedFirstPaintOnce,
+           lastVisibleURL == nil,
+           let live = Self.trustedSiteURL(container.url) {
+            CrashLog.note("==== page location seeded \(live.absoluteString) ====")
             lastVisibleURL = live
             lastCommittedURL = live
-            rememberVisibleURL(live)
         }
         // 回调里除了地址，还要求页面**已经画出来**（`firstPaintProbeScript` 不返回 loading）。
         //
@@ -1186,6 +1211,14 @@ final class WebContainerView: UIView {
             container.evaluateJavaScript(Self.firstPaintProbeScript) { [weak self, weak container] phase, _ in
                 guard let self, let container, container === self.webView else { return }
                 guard ((phase as? String) ?? "loading") != "loading" else { return }
+                // **重负载标记唯一的洗清出口。**
+                //
+                // 判据是「这一页自己画出来了，而且画出来的时候它就是那个路由」。
+                // 重建后新实例打开的是降级过的 `#player`，它画出来只会清 `#player`，
+                // 绝不会替那个歌单洗白。用上面 JS 读到的 `trusted`（含 hash），
+                // 不能用 `container.url` —— 那个值在 SPA 路由下永远是 `/`。
+                Self.clearMemoryHeavy(trusted)
+                Self.clearRouteDeath(trusted)
                 self.reachedFirstPaintOnce = true
                 self.markFirstPaintSettled()
             }
@@ -1202,21 +1235,11 @@ final class WebContainerView: UIView {
             guard let self, let container, container === self.webView else { return }
             let phase = (result as? String) ?? "loading"
             guard phase != "loading" else { return }
-            if let url = Self.trustedSiteURL(container.url) {
+            // 只负责「首屏已交付」这一位；真实地址由 `refreshPageLocation` 的 JS
+            // （读 `location.href`）负责 —— `container.url` 在 SPA 路由下不含 hash。
+            if self.lastVisibleURL == nil, let url = Self.trustedSiteURL(container.url) {
                 self.lastVisibleURL = url
-                // SPA 路由（歌单、歌词页）只改 `location`，不会有新的 `didFinish`，
-                // 所以「用户当前真正在看的那一页」只能在这里补记一次，
-                // 否则进程被回收后只能重开首页。
                 self.lastCommittedURL = url
-                self.rememberVisibleURL(url)
-                // **重负载标记唯一的洗清出口。**
-                //
-                // 判据是「这一页自己画出来了，而且画出来的时候它就是那个路由」。
-                // 重建后新实例打开的是降级过的 `#player`，它画出来只会清 `#player`，
-                // 绝不会替那个歌单洗白 —— 用户下次再进同一个歌单仍然按重负载对待
-                // （注入 `__foliaLowMemory` 降载），不会再从头经历一次闪退。
-                Self.clearMemoryHeavy(url)
-                Self.clearRouteDeath(url)
             }
             self.reachedFirstPaintOnce = true
             self.markFirstPaintSettled()
@@ -2326,14 +2349,24 @@ final class WebContainerView: UIView {
             // 页面自己的 MediaSession 说在放、DOM 里却没有元素，这已经是确定事实，
             // 当场让引擎补一次播放即可；`resume()` 幂等，重复调用无副作用。
             if contextState == "no-elements" {
-                CrashLog.note("==== pure webaudio page, calling page play entry (\(reason)) ====")
+                CrashLog.note("==== pure webaudio page, rebuilding path + page play entry (\(reason)) ====")
                 // **这里也要把计数归零。**
                 //
                 // 上面刚加了 1，若不归零，这个 1 会一直留到下一次真正的断流探测 ——
                 // 那时它只需再 +1 就到 2，于是「连续两拍才动手」的防抖被整段跳过，
                 // 单次瞬时抖动就会被判成断流、白重建一次通路（把正在响的歌按停一拍）。
                 brokenProbeStreak = 0
-                resumeAudio(reason: reason)
+                // **只调页面播放入口是不够的。**
+                //
+                // 日志 10-31-12-10-33Z 第 27-45 行：八拍全是 `no-elements` +
+                // `calling page play entry`，一次 `audio resumed` 都没有；紧接着
+                // 第 46 行页面自己的 `play()` 抛 `AbortError`。说明被抖音之类 App
+                // 摘走系统通路之后，光让页面重新 `play()` 起不来 ——
+                // 缺的那一层在系统侧。`recoverAudioPathPass` 会先
+                // `activate()` 补 `setActive`，再调同一个页面入口，两件事一次做完；
+                // 入口是幂等的，正在响的歌不会被按停。
+                AudioSessionController.shared.ensureActive()
+                recoverAudioPathPass(reason: reason, attempt: 0)
                 return
             }
             // 两拍之间隔一个完整周期（4 秒）再采第二次，不受中断影响。
@@ -2353,9 +2386,9 @@ final class WebContainerView: UIView {
         // `audio path broken (context=unknown ...)`，
         // 每拍只重建会话、从没碰过播放引擎，直到用户手动点播放才响。
         if contextState == "no-elements" {
-            CrashLog.note("==== pure webaudio page, calling page play entry (\(reason)) ====")
-            resumeAudio(reason: reason)
-            finishAudioRecovery()
+            CrashLog.note("==== pure webaudio page, rebuilding path + page play entry (\(reason)) ====")
+            AudioSessionController.shared.ensureActive()
+            recoverAudioPathPass(reason: reason, attempt: 0)
             return
         }
         recoverAudioPathPass(reason: reason, attempt: 0)
@@ -2696,6 +2729,7 @@ final class WebContainerView: UIView {
         // 6 秒 = 三拍保活。真正「点一次就恢复」的场景第一拍就生效；
         // 只有连续三拍都没恢复才再试，那时的确需要重试。
         if let last = lastResumeAttempt, Date().timeIntervalSince(last) < 6 {
+            CrashLog.note("==== page play entry throttled (\(reason)) ====")
             return
         }
         lastResumeAttempt = Date()
@@ -2759,20 +2793,26 @@ final class WebContainerView: UIView {
                     }
                   }
                 }
-                return 'resumed';
+                return 'resumed-entry';
               }
               return 'noop';
             }
             window.__foliaLastAudio = chosen;
             var p = chosen.play();
             if (p && p.catch) { p.catch(function(){}); }
-            return 'resumed';
+            return 'resumed-element';
           } catch (e) { return 'error'; }
         })();
         """
         webView?.evaluateJavaScript(js) { result, _ in
-            guard let flag = result as? String, flag == "resumed" else { return }
-            CrashLog.note("==== audio resumed (\(reason)) ====")
+            // **四种结果都要进日志。**
+            //
+            // 日志 10-31-12-10-33Z 第 27-45 行连续八拍只有
+            // `pure webaudio page, calling page play entry`，一条结果都没有 ——
+            // 分不清是「被节流吃掉」「没有入口」还是「入口调了但没出声」。
+            // 没有这一位，这条恢复链是黑盒。
+            let flag = (result as? String) ?? "no-result"
+            CrashLog.note("==== audio page play entry (\(reason)) result=\(flag) ====")
         }
         // 补放时**不再把 position 往回调**。
         //
@@ -2825,7 +2865,10 @@ final class WebContainerView: UIView {
             // 早先这里是「不健康才再 play 一次」，而 `isMediaHealthy` 看的是
             // `!el.paused` —— 被系统按停、页面还没重报的那一拍它会判「健康」，
             // 于是第二次补放从来不发，歌就一直停着。
-            self.webView?.evaluateJavaScript(retryJS, completionHandler: nil)
+            self.webView?.evaluateJavaScript(retryJS) { result, _ in
+                let flag = (result as? String) ?? "no-result"
+                CrashLog.note("==== audio page play retry (\(reason)) result=\(flag) ====")
+            }
         }
     }
 
