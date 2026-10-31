@@ -130,3 +130,14 @@ jobs:
           name: Folia-Web-unsigned-ipa
           path: build/Build/Products/Release-iphoneos/Folia-Web-unsigned.ipa
           if-no-files-found: error
+
+      - name: Publish IPA to branch
+        run: |
+          cp build/Build/Products/Release-iphoneos/Folia-Web-unsigned.ipa "$GITHUB_WORKSPACE/Folia-Web-unsigned.ipa"
+          cd "$GITHUB_WORKSPACE"
+          git checkout --orphan ipa-tmp
+          git rm -rq --cached . || true
+          git add -f Folia-Web-unsigned.ipa
+          git -c user.name=ci-bot -c user.email=ci-bot@users.noreply.github.com \
+            commit -q -m "ipa: ${GITHUB_SHA}"
+          git push -q -f origin ipa-tmp:ipa
