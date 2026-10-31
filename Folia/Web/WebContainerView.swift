@@ -288,7 +288,7 @@ final class WebContainerView: UIView {
         // 等 `didFinish` 再注入就已经听不到了 —— 原生收不到 `intent-play`，
         // 后台就不知道该把页面那条 `<audio>` 放回去，表现就是「后台一点声都没有」。
         userContent.addUserScript(WKUserScript(
-            source: Self.audioKeeperScript,
+            source: Self.audioKeeperScript(),
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
@@ -2716,7 +2716,13 @@ final class WebContainerView: UIView {
     /// 或者 WebKit 的内容进程被系统短暂挂起。所以这里做两件事：
     /// 1. 记录页面的播放意图（`play()` / `pause()` 被调用即上报），意图在原生这边保存；
     /// 2. 后台每两秒确认一次会话有效，并把「该响但被按停」的媒体放回去。
-    private static let audioKeeperScript = """
+    /// 保活脚本。因为要把「重负载路由表」插进脚本正文，只能按需拼装 ——
+    /// 存成 `static let` 的话初始化器里引用 `Self` 会被 Swift 拒绝（covariant Self）。
+    private static func audioKeeperScript() -> String {
+        audioKeeperBody.replacingOccurrences(of: "__FOLIA_HEAVY_ROUTES__", with: memoryHeavyLiteral())
+    }
+
+    private static let audioKeeperBody = """
         (function(){
           if (window.__foliaAudioKeeperInstalled) { return; }
           window.__foliaAudioKeeperInstalled = true;
@@ -2728,7 +2734,7 @@ final class WebContainerView: UIView {
           // 这里在**所有页面脚本之前**按地址前缀装上，页面在壳模式下据此
           // 把封面改按需加载、背景可视化降帧。
           try {
-            var heavy = \(Self.memoryHeavyLiteral);
+            var heavy = __FOLIA_HEAVY_ROUTES__;
             var here = location.href;
             for (var hi = 0; hi < heavy.length; hi += 1) {
               if (heavy[hi] && here.indexOf(heavy[hi]) === 0) {
@@ -3036,7 +3042,7 @@ final class WebContainerView: UIView {
 
     /// 功能入口：脚本在 `didFinish` 后再补注入一次，兜住「文档开始时注入被页面重置」的情况。
     private func ensureAudioKeeper() {
-        webView?.evaluateJavaScript(Self.audioKeeperScript, completionHandler: nil)
+        webView?.evaluateJavaScript(Self.audioKeeperScript(), completionHandler: nil)
     }
 
     /// 网易云扫码登录的兜底。
@@ -4249,7 +4255,7 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
     ///
     /// 与 `routeDeathKey` 的区别：那个只管 60 秒内的重建降级，过期就没意义了；
     /// 这一份要活得更久 —— 用户下次再进同一个歌单，壳仍然应该按「重负载页面」
-    /// 对待（注入的降载开关见 `memoryHeavyLiteral`），否则一进去又会死，
+    /// 对待（注入的降载开关见 `memoryHeavyLiteral()`），否则一进去又会死，
     /// 然后又是「闪退 → 加载界面」。
     private static let memoryHeavyKey = "folia.shell.memoryHeavyRoutes"
 
@@ -4267,14 +4273,13 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
 
     /// 注入给页面的降载开关：`window.__foliaLowMemory`。
     ///
-    /// 线上站已经在壳模式下读这个开关（UA 含 `FoliaApp` 时生效）：
-    /// 歌单封面按需加载、背景可视化降帧。壳这边只负责把「当前页面是不是
+    /// 线上站在壳模式下调低了背景可视化的开销；壳这边只负责把「当前页是不是
     /// 顶死过进程的那种重页面」告诉它，具体怎么省内存由页面自己决定 ——
     /// 壳不碰 DOM，避免和 React 抢节点。
     ///
     /// `audioKeeperScript` 在 `.atDocumentStart` 注入，那时 `location.href`
     /// 已经是目标路由，所以这里只需要把地址表编进脚本，不必按导航逐次重装。
-    private static var memoryHeavyLiteral: String {
+    private static func memoryHeavyLiteral() -> String {
         let list = UserDefaults.standard.stringArray(forKey: memoryHeavyKey) ?? []
         let quoted = list.map { "\"\($0.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\""))\"" }
         return "[" + quoted.joined(separator: ",") + "]"
