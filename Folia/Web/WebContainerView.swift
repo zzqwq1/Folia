@@ -1,4 +1,4 @@
-import UIKit
+﻿import UIKit
 import SwiftUI
 import WebKit
 import Combine
@@ -1081,7 +1081,7 @@ final class WebContainerView: UIView {
             // 静音用户（`wantsAudible` 为假）与亲手暂停的不受影响。
             if self.wasBackgroundedThisSession, self.wantsAudible, !self.userPaused {
                 CrashLog.note("==== session path rebuilt on foreground (left app while audible) ====")
-                self.state.rebuildAfterPreemption()
+                AudioSessionController.shared.rebuildAfterPreemption()
             }
             // 回前台不改变意图：该响的继续响，轮询照旧。
             //
@@ -1672,7 +1672,7 @@ final class WebContainerView: UIView {
             // `healIfPreempted()` 于是什么都不做；而这里补完 `setActive` 之后
             // 页面侧的 `playing` 标记又是旧的，判定为「还在响」，整条重建一次都没跑。
             // 现在两边都按同一份播放意图执行，不会再互相抵消。
-            self.state.recoverIfPreempted()
+            AudioSessionController.shared.recoverIfPreempted()
             // **只试一次快速修复，没声就真的重建。**
             //
             // 日志 05-12-20：这里两边的 `setActive` 都成功，`preemptedByOtherApp`
@@ -1688,7 +1688,7 @@ final class WebContainerView: UIView {
                 self.isMediaHealthy { healthy in
                     guard healthy else {
                         CrashLog.note("==== audio still silent after preemption, rebuilding path (\(reason)) ====")
-                        self.state.rebuildAfterPreemption()
+                        AudioSessionController.shared.rebuildAfterPreemption()
                         self.recoverAudioPathPass(reason: "preempted", attempt: 0)
                         return
                     }
@@ -1701,7 +1701,7 @@ final class WebContainerView: UIView {
                     self.isPlaybackClockAdvancing { advancing in
                         guard advancing else {
                             CrashLog.note("==== audio clock stuck after preemption, rebuilding path (\(reason)) ====")
-                            self.state.rebuildAfterPreemption()
+                            AudioSessionController.shared.rebuildAfterPreemption()
                             self.recoverAudioPathPass(reason: "preempted-stuck", attempt: 0)
                             return
                         }
@@ -1738,7 +1738,7 @@ final class WebContainerView: UIView {
             // 「正在播放的应用」之后，只有重新声明一次 category 才能要回来。
             // `recoverIfPreempted()` 只在真的失败时才 `setCategory`，
             // 通了的那一拍一格都不动，所以「切出去看一眼回来歌不断」仍然成立。
-            state.recoverIfPreempted()
+            AudioSessionController.shared.recoverIfPreempted()
             // 会话可能在这一拍被重新声明：让页面跟着把上下文叫醒。
             revivePageAudio()
             isMediaHealthy { [weak self] healthy in
