@@ -659,6 +659,10 @@ final class WebContainerView: UIView {
         if previousWantsAudible {
             DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
                 guard let self else { return }
+                // **用户在这 3 秒里亲手按了暂停就不要再补放。**
+                // 早先这个块只看 `previousWantsAudible`（3 秒前的快照），
+                // 用户按下暂停后它照样把歌放起来 —— 「点了暂停自己又响」。
+                guard self.wantsAudible, !self.userPaused else { return }
                 self.forceResumeAudio(reason: "rebuild-after-crash")
             }
         }
@@ -679,9 +683,15 @@ final class WebContainerView: UIView {
     /// 在新一轮 runloop 里把重建后的实例装上并打开 `landing`。
     private func installRebuiltWebView() {
         guard let pending = pendingRebuild else { return }
-        pendingRebuild = nil
         // 这一拍里又发生过一次重建（`webView` 已经被别人装上了）：让位。
+        //
+        // **必须先判空再清 `pendingRebuild`。** 早先顺序是反的：先 `nil` 再
+        // `guard webView == nil`，让位那一次把整份重建参数扔掉了 —— 而这一拍
+        // `webView` 非空只说明「有实例」，不说明「这个实例装过页面」
+        // （`hardReload` 那条路会建实例，但装载请求在另一个延迟块里）。
+        // 结果就是既没装载、也没人再来装载，用户对着空白壳等。
         guard webView == nil else { return }
+        pendingRebuild = nil
         // **落脚点必须带哈希路由。** 日志 07-23-35Z 第 13 行、07-23-56Z 第 14/24/34 行
         // 全是 `rebuild: reopen /` —— 地址位里明明是
         // `#collection/online/netease/playlist/14400331811`，落到的却是首页：
@@ -874,8 +884,15 @@ final class WebContainerView: UIView {
             // 页面上本来就有内容（曾被判死只是探测失败）：给足时间让这份文档
             // 自己画回来，别在 8 秒后无脑重建 —— 重建会把用户手上的歌单整页丢掉。
             let hadContent = reachedFirstPaintOnce
+            // 八秒后若已经换过实例（这期间进程挂了、重建过一次），这次兜底必须作废：
+            // 新实例可能正好好地在打开落脚点，再重建一次就是无缘无故把页面换掉。
+            let armed = ObjectIdentifier(container)
             DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) { [weak self] in
                 guard let self, !self.didReachFirstPaint else { return }
+                guard let current = self.webView, ObjectIdentifier(current) == armed else {
+                    CrashLog.note("==== foreground wake 8s fallback dropped (webview replaced) ====")
+                    return
+                }
                 // 原来就有内容的页面，允许它在更长时间里自己画回来，绝不重建。
                 guard !hadContent else {
                     CrashLog.note("==== foreground wake: page had content, keep waiting (no rebuild) ====")
@@ -1598,7 +1615,10 @@ final class WebContainerView: UIView {
     /// 例外：切到别的 App / 回桌面时，页面会先收到一次 `pause` 再失去可见性。
     /// 那一拍 `applicationState` 仍是 `.active`，若按「用户收手」处理，
     /// 轮询就停了，回到 App 里发现歌没了 —— 所以这里补一条 `visibilityState` 判断。
-    fileprivate func markPausedIntent() {
+    /// - Parameter reason: 非 nil 表示这条暂停是**原生自己发起的**（锁屏 / 耳机 /
+    ///   控制中心的远程命令），不需要再问页面二次确认 —— 用户明确按了按钮，
+    ///   页面自报的 `intent-pause` 只是回执。页面自发上报时传 nil，走原来的确认链。
+    fileprivate func markPausedIntent(reason: String? = nil) {
         guard UIApplication.shared.applicationState == .active else { return }
         // 刚进后台、正被别家 App 抢占的那一拍：页面收到的 pause 是系统掐的，不是用户收手。
         //
@@ -1616,8 +1636,12 @@ final class WebContainerView: UIView {
         // 且离开过 App，就不该把 `userPaused` 置真 —— 一旦置真，
         // `recoverAudioPath` 顶层守卫会拦掉整条恢复链，用户听到的就是「一点声都没有」。
         if preemptedByOtherApp || wasBackgroundedThisSession {
-            CrashLog.note("==== pause ignored (preempted / just back from background) ====")
-            return
+            // 例外：原生自己发起的暂停（锁屏 / 耳机）不受这一条约束 ——
+            // 那是用户在锁屏上明确按的，不是抖音摘通路抖出来的 pause。
+            if reason == nil {
+                CrashLog.note("==== pause ignored (preempted / just back from background) ====")
+                return
+            }
         }
         // **刚重建过通路（2 秒内）：这条 pause 是 `setCategory` 按停媒体元素造成的。**
         //
@@ -1626,7 +1650,26 @@ final class WebContainerView: UIView {
         // 而它出现时 `audioRecoveryInFlight` 可能已经被收尾放掉，
         // 0.35 秒的确认于是把它当用户收手，`wantsAudible` 永久为假。
         if let rebuiltAt = pathRebuiltAt, Date().timeIntervalSince(rebuiltAt) < 2 {
-            CrashLog.note("==== pause ignored (right after audio path rebuild) ====")
+            // 远程命令同理：锁屏上按的暂停，哪怕恰好落在通路重建的 2 秒窗里也算数。
+            if reason == nil {
+                CrashLog.note("==== pause ignored (right after audio path rebuild) ====")
+                return
+            }
+        }
+        // 原生自己发起的暂停：用户明确按了按钮，直接认账。
+        //
+        // 早先这条路径只改 `wantsAudible`，`userPaused` 从不置真 —— 于是
+        // 「锁屏暂停 → 进程被系统回收 → 重建」时 `resume` 判成真，歌自己又响。
+        if reason != nil {
+            userPaused = true
+            stopKeepAliveTimer()
+            wantsAudible = false
+            preemptedByOtherApp = false
+            leftAppWhileAudible = false
+            stayedBackgroundedWhileAudible = false
+            Self.wasAudibleInBackground = false
+            state.notePlaybackStopped()
+            CrashLog.note("==== paused by user (\(reason ?? "")) ====")
             return
         }
         // 先记账，等页面把「我到底是不是真的停了」报回来再决定，见 `confirmPausedIntent()`。
@@ -1733,6 +1776,8 @@ final class WebContainerView: UIView {
                     self.preemptedByOtherApp = false
                     // 用户亲手停了：这一轮「离开过 App」的欠账也随之作废。
                     self.leftAppWhileAudible = false
+                    // 会话层那本「离开期间在放」的账也一并结掉，否则回前台还会白重建通路。
+                    self.state.notePlaybackStopped()
                     // **这里刻意不清 `wasBackgroundedThisSession`。**
                     //
                     // 保留它的原因：之后若再从别的 App 回来，`probeThenRecover` 里
@@ -2282,6 +2327,12 @@ final class WebContainerView: UIView {
             // 当场让引擎补一次播放即可；`resume()` 幂等，重复调用无副作用。
             if contextState == "no-elements" {
                 CrashLog.note("==== pure webaudio page, calling page play entry (\(reason)) ====")
+                // **这里也要把计数归零。**
+                //
+                // 上面刚加了 1，若不归零，这个 1 会一直留到下一次真正的断流探测 ——
+                // 那时它只需再 +1 就到 2，于是「连续两拍才动手」的防抖被整段跳过，
+                // 单次瞬时抖动就会被判成断流、白重建一次通路（把正在响的歌按停一拍）。
+                brokenProbeStreak = 0
                 resumeAudio(reason: reason)
                 return
             }
@@ -2475,6 +2526,10 @@ final class WebContainerView: UIView {
     ///
     /// 单次探测会因为页面换页 / seek / 交叉淡化的瞬间抖动而误报，
     /// 误报的代价是「亲手把正在放歌按停一次」，用户听到的就是无端卡顿。
+    ///
+    /// **每一次「收工」都要把它归零。** 任何一条提前 return 的分支漏掉归零，
+    /// 这个 1 就会一直留到下一次探测：那时只需再 +1 就到 2，
+    /// 防抖被整段跳过，单次瞬时抖动就会被判成断流、白重建一次通路。
     private var brokenProbeStreak = 0
 
     /// 进入后台的时刻。用来区分「进程被系统正常回收」与「进程真的崩了」。
@@ -2775,6 +2830,13 @@ final class WebContainerView: UIView {
     }
 
     /// 远程命令要先更新意图，再转发给页面：否则线控按了暂停，保活轮询会把它又放回去。
+    ///
+    /// **线控 / 耳机的暂停必须走 `markPausedIntent(reason:)`，不能只改 `wantsAudible`。**
+    /// 早先这里只写 `wantsAudible = false` + 停轮询，`userPaused` 一直为假、
+    /// `WebContainerView.wasAudibleInBackground` 也还是真：
+    /// 用户在锁屏按了暂停 → 进程随后被系统回收 → `webViewWebContentProcessDidTerminate`
+    /// 里 `resume = !userPaused && (wantsAudible || wasAudibleInBackground)` 判成真，
+    /// 新实例一装好就把歌放起来 —— 用户看到的就是「我明明暂停了，重进 App 自己又响」。
     private func handleRemoteCommand(_ action: String) {
         switch action {
         case "play", "toggle":
@@ -2782,12 +2844,10 @@ final class WebContainerView: UIView {
                 markAudibleIntent()
             } else {
                 // toggle 在「正在响」时表示暂停。
-                wantsAudible = false
-                stopKeepAliveTimer()
+                markPausedIntent(reason: "remote-toggle")
             }
         case "pause":
-            wantsAudible = false
-            stopKeepAliveTimer()
+            markPausedIntent(reason: "remote-pause")
         default:
             // 切歌不改变意图。
             break
@@ -3055,8 +3115,15 @@ final class WebContainerView: UIView {
         }
         stallRetries.append(now)
         CrashLog.note("==== stall retry #\(stallRetries.count) ====")
+        // 一秒后若已经换了新实例（进程被顶死 → 重建），这次「卡死重载」必须作废：
+        // 新实例正在打开落脚点，被这里再打一次 `startURL` 就等于又回到首页。
+        let armed = ObjectIdentifier(webView as AnyObject)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
             guard let self else { return }
+            guard let current = self.webView, ObjectIdentifier(current as AnyObject) == armed else {
+                CrashLog.note("==== stall retry dropped (webview replaced) ====")
+                return
+            }
             self.didReachFirstPaint = false
             // 重试**必须绕开缓存**。
             //
@@ -4568,7 +4635,17 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         //
         // 但回前台唤醒那一轮是例外：那时页面已经在后台被系统收走过，`file://` 读不到
         // 几乎都是 Process Assertion 过期导致的，重载一次就能回来。
-        guard !isShowingOfflineCopy || wakeRecoveryInFlight else { return }
+        //
+        // **这个例外必须在第一次失败时就消费掉。** 它代表的只是「唤醒那一轮」这个
+        // 瞬时窗口；早先没人清它，`wakeReloadTried` 一旦置真它就永久为真，
+        // 于是离线副本上的每一次导航失败都会继续走下面的 2 秒自动重载 ——
+        // 用户看到离线页反复刷回加载界面。消费掉之后，离线副本的失败
+        // 交回给提示层（`OfflineNotice`），不再自动重试。
+        if wakeRecoveryInFlight {
+            wakeRecoveryInFlight = false
+        } else if isShowingOfflineCopy {
+            return
+        }
         // 回退判断必须排在下面的限流之前：`contentProcessRestarts` 是「进程级重启」的配额，
         // 而这里统计的是「这一轮连续几次加载失败」。若放在限流之后，第一次失败就占掉配额、
         // 第二次直接 return，后面的计数永远到不了阈值 —— 回退逻辑形同虚设。
@@ -4580,8 +4657,17 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         }
         guard contentProcessRestarts.count < 2 else { return }
         contentProcessRestarts.append(now)
+        // 记下这一拍装的是哪个实例：两秒后若已经换成新实例，这次重载必须作废。
+        //
+        // 否则「进程刚被顶死 → 重建装好了新实例」与「两秒前的失败重载块」会叠在一起：
+        // 新实例刚打开落脚点就被改写成首页，用户看到的就是回到加载界面。
+        let armed = ObjectIdentifier(webView as AnyObject)
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             guard let self else { return }
+            guard let current = self.webView, ObjectIdentifier(current as AnyObject) == armed else {
+                CrashLog.note("==== failed-nav retry dropped (webview replaced) ====")
+                return
+            }
             // 这两秒里页面自己回来了（或本来就没死）：不能再整页重载回首页。
             //
             // 弱网下一次子资源失败也会走到这里，而用户手上那份 SPA 页面还是活的。
@@ -4981,6 +5067,9 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        // 旧实例迟到的回调一律作废：重建之后它仍可能补发一次 `didStart`，
+        // 那会把新实例的首屏状态置假、还可能清掉 `pendingOnlineHandoff`。
+        guard webView === self.webView else { return }
         documentFinished = false
         hasEvaluatedFirstPaint = false
         // 每次导航重新判定：上一轮没确认成功的手递手状态不能遗留到下一次。

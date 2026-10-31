@@ -319,10 +319,18 @@ final class AudioSessionController {
             info[MPNowPlayingInfoPropertyPlaybackRate] = 1.0
             info[MPNowPlayingInfoPropertyIsLiveStream] = false
             MPNowPlayingInfoCenter.default().nowPlayingInfo = info
-        } else if var info = MPNowPlayingInfoCenter.default().nowPlayingInfo {
+        } else {
+            // **结束后台任务不能挂在 Now Playing 上。**
+            //
+            // 早先是 `else if var info = ...nowPlayingInfo { endBackgroundTask() ... }`：
+            // 页面从未写过 Now Playing 时这个值就是 nil，走不到 `endBackgroundTask` ——
+            // 任务一直占着，而 `beginBackgroundTask` 有 `guard backgroundTask == .invalid`，
+            // 之后每次播放都申请不到新任务，后台 JS 定时器（进度、自动切歌）提前冻结。
             endBackgroundTask()
-            info[MPNowPlayingInfoPropertyPlaybackRate] = 0.0
-            MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+            if var info = MPNowPlayingInfoCenter.default().nowPlayingInfo {
+                info[MPNowPlayingInfoPropertyPlaybackRate] = 0.0
+                MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+            }
         }
     }
 
@@ -500,6 +508,16 @@ final class AudioSessionController {
     /// 回前台判断「通路到底断没断」必须去问页面自己的播放时钟，而唯一能跨进程执行
     /// JS 的地方在容器里。弱引用：容器持有 `state`，反向持有会成环。
     weak var container: WebContainerView?
+
+    /// **清掉「离开期间一直在放」的记账。**
+    ///
+    /// `backgroundedAndPlaying` 只置真、全文件没有置假点：用户暂停之后它仍为真，
+    /// `rebuildPathQuietly` / `healIfSilenced` / `recoverIfInactive` 的守卫因此长期成立，
+    /// 每次回前台都会白重建一次通路（`setCategory` 会把正在响的媒体按停一次）。
+    func notePlaybackStopped() {
+        backgroundedAndPlaying = false
+        backgroundedWhilePlayingOK = false
+    }
 
     private func rebuildPathQuietly() {
         // **不再用 `isPlaying` 当门。**
