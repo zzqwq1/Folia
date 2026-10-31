@@ -3130,7 +3130,7 @@ final class WebContainerView: UIView {
     /// 「没能启动起来」，于是壳自己把一次好端端的加载重载掉 —— 用户看到的就是
     /// 「启动着启动着又回到加载界面」。这里放宽到 30 秒，并且看门狗只做提示，
     /// 不再主动打断正在进行的加载。
-    private static let stallTimeout: TimeInterval = 30
+    private static let stallTimeout: TimeInterval = 60
 
     /// 首屏是否已经就绪（React 挂上、加载遮罩淡出）。
     private var didReachFirstPaint = false
@@ -3264,6 +3264,18 @@ final class WebContainerView: UIView {
                     CrashLog.note("==== first paint late, keep loading (no reload) ====")
                     self.state.noteStalled(detail: detail)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
+                        self?.reportStallIfNeeded()
+                    }
+                    return
+                }
+                // **如果网络是通的且页面还在加载，再等一会儿。**
+                //
+                // 从用户反馈的截图看：readyState=interactive、online=1、scripts=4，
+                // 说明页面还在加载脚本，React还没挂载。这时候重载等于把已下载的
+                // 脚本全部丢掉，弱网下永远进不去。
+                if detail.contains("online=1") && detail.contains("readyState=interactive") {
+                    CrashLog.note("==== page still loading (interactive, online), keep waiting ====")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
                         self?.reportStallIfNeeded()
                     }
                     return
