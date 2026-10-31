@@ -202,18 +202,38 @@ final class AudioSessionController {
     /// 关键约束：**播放中不要调这里**。`setCategory` 会让系统重建音频通路，
     /// WebKit 的媒体元素会被一并按停 —— 表现就是「从后台切回来音乐突然暂停」。
     /// 播放期间只需要 `setActive(true)`（见 `reactivate()`）。
+    ///
+    /// 「开一次机只设一次 category」是刻意的：`setCategory` 是**进程级**设置，
+    /// 只要进程活着就一直有效，系统收回的只是 active 资格。
+    /// 真实日志里「进抖音再回来没声音」的现场正是这条被当成恢复手段反复调用 ——
+    /// 每调一次就把正在响的媒体按停一次，页面随即上报暂停，恢复链自己被自己打断。
+    ///
+    /// 唯一需要真正重设的场合是**被别家 App 抢占之后**：系统会把我们从
+    /// 「正在播放的应用」里摘出去，`setActive(true)` 改不回来，只有重新声明 category
+    /// 才能要回后台播放资格。那两条由 `rebuildPathQuietly()` / `healIfPreempted()` 负责，
+    /// 它们只在对路的那一拍触发一次，不会进入保活循环。
     func activate() {
-        let session = AVAudioSession.sharedInstance()
+        configureCategoryIfNeeded()
+        ensureActive()
+    }
+
+    /// 只在第一次真正声明 category。
+    private func configureCategoryIfNeeded() {
+        guard !categoryConfigured else { return }
         do {
-            try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
-            try session.setActive(true)
-            sessionIsActive = true
+            try AVAudioSession.sharedInstance().setCategory(.playback,
+                                                            mode: .default,
+                                                            options: Self.categoryOptions)
+            categoryConfigured = true
+            NSLog("[Folia] audio category configured (playback + mixWithOthers)")
         } catch {
-            sessionIsActive = false
             // 失败不影响网页功能，只是切后台可能被系统暂停。
             NSLog("[Folia] audio session setup failed: \(error.localizedDescription)")
         }
     }
+
+    /// 本进程是否已经把 category 设成「后台播放 + 混音」。
+    private var categoryConfigured = false
 
     /// 只在会话没被激活时补一次 `setActive` —— 幂等、**不重建 category**。
     ///
@@ -394,16 +414,15 @@ final class AudioSessionController {
             // 用户听到的就是「进抖音再回来没声音」。
             // 播放意图（`wantsAudible`）比这个上报可靠得多，它只在用户亲手暂停时才会清掉。
             // `ensureActive()` 不碰 category，通路健康时是空操作。
-            if self.isPlaying || self.wantsAudible {
+            if self.isPlaying || self.wantsAudible || self.backgroundedWhilePlayingOK {
                 self.sessionIsActive = false
                 self.ensureActive()
             }
             self.healIfSilenced()
             self.recoverIfInactive()
-            // 被别家 App 抢占过：**重建一次 category**，再让页面侧把上下文与媒体重新唤醒。
-            //
-            // 这一类抢占丢的是 `setCategory` 那一层（系统把本 App 从「正在播放的
-            // 应用」里摘出去），`setActive(true)` 不重建通路，改不回来。
+            // 真正的通路重建交给容器：它会先 `ensureActive` + 唤醒页面上下文，
+            // 隔 0.6 秒确认确实没声才走 `recoverAudioPathPass`。这里只补一次
+            // 幂等的 `setActive` —— 两处都 `setCategory` 等于把歌掐两次。
             self.healIfPreempted()
 
             // 同样的抢占，`isOtherAudioPlaying` 常常已经来不及反映。
@@ -495,6 +514,8 @@ final class AudioSessionController {
         } catch {
             NSLog("[Folia] audio path rebuild after background failed: \(error.localizedDescription)")
             sessionIsActive = false
+            // 这次没成：允许下一次回前台再声明一次 category。
+            categoryConfigured = false
         }
         NotificationCenter.default.post(name: .foliaAudioPathRebuilt, object: nil)
     }
@@ -515,22 +536,71 @@ final class AudioSessionController {
     private func healIfPreempted() {
         guard preemptedByOtherApp else { return }
         preemptedByOtherApp = false
+        healIfPreemptedNow()
+    }
+
+    /// 真正执行「被抢占后的修复」，返回是否动过音频状态。
+    ///
+    /// 拆出来的原因：`didBecomeActive` 那一拍 `isOtherAudioPlaying` 经常已经翻回 false，
+    /// `preemptedByOtherApp` 根本没置位，可通路确实被摘走了。容器侧会另发一次
+    /// `recoverIfPreempted()` 兜底，两条路都必须能真正执行，所以这里不能只看标志位。
+    @discardableResult
+    func recoverIfPreempted() -> Bool {
+        guard isPlaying || backgroundedAndPlaying || wantsAudible else { return false }
+        return healIfPreemptedNow()
+    }
+
+    /// 被别家 App 抢占、且页面确认已经没在出声之后：真正把通路要回来。
+    ///
+    /// 与 `healIfPreemptedNow()` 的分工：那一条只补幂等的 `setActive`，
+    /// 因为无法确认媒体是否还在响，`setCategory` 有可能把好端端的歌掐断。
+    /// 这一条只在容器**已经用页面时钟确认没在出声**之后调用 ——
+    /// 这时不重建就一定一直静音，重建没有额外损失。
+    ///
+    /// 日志 05-12-20 的现场：容器打了
+    /// `audio path preempted by another app, rebuilding path (pending)`，
+    /// 可两边的 `setActive` 都成功、`preemptedByOtherApp` 又各自用完即清，
+    /// 真正 `setCategory` 的重建一次都没跑过，用户听到的一直是静音。
+    @discardableResult
+    func rebuildAfterPreemption() -> Bool {
+        guard isPlaying || backgroundedAndPlaying || wantsAudible else { return false }
+        rebuildPathQuietly()
+        return true
+    }
+
+    @discardableResult
+    private func healIfPreemptedNow() -> Bool {
         // 判据同上：只看 `isPlaying` 会漏掉「被别的 App 按停过、页面已上报 paused」的情形。
-        guard isPlaying || backgroundedAndPlaying || wantsAudible else { return }
+        guard isPlaying || backgroundedAndPlaying || wantsAudible else { return false }
+        // **这里不再 `setCategory`，只补一次幂等的 `setActive`。**
+        //
+        // 用户报的「从抖音回来没声音」，现场其实是：页面 `<audio>` 仍报 playing、
+        // 播放时钟也在走，只是系统那一层通路被对方拿走过。`setCategory` 会重建
+        // 整条通路，WebKit 的媒体元素会被按停一次 —— 对一条只是在等通行权的
+        // 通路做这件事，就是亲手把歌掐断，而且掐完还未必能补回来。
+        // 真正需要重建通路的判断留给容器：它会先 `ensureActive` + 唤醒上下文，
+        // 隔 0.6 秒确认页面确实没声，才走 `recoverAudioPathPass`。
+        // 两处都做就等于双重重建，日志里紧跟 `rebuild (pending)` 的
+        // `paused by user (confirmed)` 就是这么来的。
         let session = AVAudioSession.sharedInstance()
         do {
-            try session.setCategory(.playback, mode: .default, options: Self.categoryOptions)
             try session.setActive(true)
             sessionIsActive = true
-            NSLog("[Folia] audio path rebuilt after other-app preemption")
+            NSLog("[Folia] session re-activated after other-app preemption")
         } catch {
-            NSLog("[Folia] audio path rebuild after preemption failed: \(error.localizedDescription)")
+            NSLog("[Folia] session re-activate after preemption failed: \(error.localizedDescription)")
             sessionIsActive = false
+            // 真的连 setActive 都失败，说明 category 也被系统摘掉了：
+            // 这一拍才允许重新声明一次。
+            categoryConfigured = false
+            rebuildPathQuietly()
+            return true
         }
         // 页面侧跟上：AudioContext 多半停在 interrupted，媒体元素也被按停过。
         // 恢复动作仍然只有 WebContainerView 那一份串行通道（见 `probeThenRecover`），
         // 这里只发信号，不自己补 `play`，避免两路抢同一个 deck。
         NotificationCenter.default.post(name: .foliaAudioPathRebuilt, object: nil)
+        return true
     }
 
     /// 状态栏/控制中心盖住本 App 时记一笔，仅在「该响」时。
@@ -576,6 +646,7 @@ final class AudioSessionController {
         } catch {
             NSLog("[Folia] audio path rebuild failed: \(error.localizedDescription)")
             sessionIsActive = false
+            categoryConfigured = false
         }
         // 页面那边此时仍是「在播」状态：重建通路后 AudioContext 可能停在 interrupted，
         // 需要页面自己再唤醒一次。
@@ -609,6 +680,10 @@ final class AudioSessionController {
             NSLog("[Folia] session re-activated after becoming active")
         } catch {
             NSLog("[Folia] session re-activate failed: \(error.localizedDescription)")
+            // 重新激活失败通常意味着 category 本身已经被系统摘掉了：
+            // 清掉一次性标志，让下一次回前台能重新声明一次。
+            sessionIsActive = false
+            categoryConfigured = false
         }
     }
 
