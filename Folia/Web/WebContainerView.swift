@@ -2117,12 +2117,12 @@ final class WebContainerView: UIView {
               // 代表「页面最后一次认为自己处于什么状态」。
               if (st === 'none' && window.__foliaPlaybackState) { st = window.__foliaPlaybackState; }
               // **只有页面真的报过 `playing` 才算健康。**
-              //
-              // 这里绝不能用壳的 `__foliaWantsAudible` 兜底成 `playing`：
-              // 那是「用户想听」，不是「页面在放」。用意图冒充事实，
-              // 会让所有「该响却没响」的情况都判成 `media-playing`，
-              // 恢复链被永久跳过 —— 正是 10-24-58Z 那 4 分 39 秒静音的成因。
-              return (st === 'playing') ? 'media-playing' : 'no-elements';
+              if (st === 'playing') { return 'media-playing'; }
+              // 如果__foliaLastAudio是null，说明还没开始播放过，不要触发恢复
+              if (!window.__foliaLastAudio) {
+                return 'no-last-audio';
+              }
+              return 'no-elements';
             }
             if (live === 0) { return 'unknown'; }
             if (bad > 0) { return 'blocked'; }
@@ -2414,48 +2414,22 @@ final class WebContainerView: UIView {
             finishAudioRecovery()
             return
         }
+        // 还没开始播放过，不要反复尝试恢复
+        if contextState == "no-last-audio" {
+            CrashLog.note("==== no last audio yet, skip recovery (\(reason)) ====")
+            brokenProbeStreak = 0
+            finishAudioRecovery()
+            return
+        }
         // 连续两次判「断」才真去重建。
         //
         // 保活轮询是 2 秒一拍，而 `evaluateJavaScript` 与 `AudioContext.state`
         // 都有一拍延迟：页面正在换页 / 正在 seek / 正在交叉淡化时，
         // 单次探测很容易抓到「media 暂时还没进 playing」的瞬间。
-        // 早先这里一次为假就 `setCategory` + `setActive`，那是**自己动手把
-        // 好端端的歌按停**：用户听着就是「没碰它，突然停一下又接着放」，
-        // 一卡一顿。现在要求连续两拍都断才动手，误判窗口扩大到 4 秒，
-        // 真正的断流（进程挂起、会话被夺）照样能在 4 秒内被发现。
         brokenProbeStreak += 1
         guard brokenProbeStreak >= 2 else {
             CrashLog.note("==== audio probe suspicious, waiting second sample (context=\(contextState) reason=\(reason)) ====")
             finishAudioRecovery()
-            // **纯 WebAudio 页面不用等第二拍。**
-            //
-            // 那两拍的作用是躲开「页面正在换歌 / seek / 交叉淡化」的瞬间，
-            // 而这个判断依赖媒体元素状态 —— 没有元素时它必然成立，
-            // 再等 4 秒只是让用户多听 4 秒静音
-            // （日志 09-26-18Z 第 13 行 `pending-second-sample` 之后第 28 行才动手）。
-            // 页面自己的 MediaSession 说在放、DOM 里却没有元素，这已经是确定事实，
-            // 当场让引擎补一次播放即可；`resume()` 幂等，重复调用无副作用。
-            if contextState == "no-elements" {
-                CrashLog.note("==== pure webaudio page, rebuilding path + page play entry (\(reason)) ====")
-                // **这里也要把计数归零。**
-                //
-                // 上面刚加了 1，若不归零，这个 1 会一直留到下一次真正的断流探测 ——
-                // 那时它只需再 +1 就到 2，于是「连续两拍才动手」的防抖被整段跳过，
-                // 单次瞬时抖动就会被判成断流、白重建一次通路（把正在响的歌按停一拍）。
-                brokenProbeStreak = 0
-                // **只调页面播放入口是不够的。**
-                //
-                // 日志 10-31-12-10-33Z 第 27-45 行：八拍全是 `no-elements` +
-                // `calling page play entry`，一次 `audio resumed` 都没有；紧接着
-                // 第 46 行页面自己的 `play()` 抛 `AbortError`。说明被抖音之类 App
-                // 摘走系统通路之后，光让页面重新 `play()` 起不来 ——
-                // 缺的那一层在系统侧。`recoverAudioPathPass` 会先
-                // `activate()` 补 `setActive`，再调同一个页面入口，两件事一次做完；
-                // 入口是幂等的，正在响的歌不会被按停。
-                AudioSessionController.shared.ensureActive()
-                recoverAudioPathPass(reason: reason, attempt: 0)
-                return
-            }
             // 两拍之间隔一个完整周期（4 秒）再采第二次，不受中断影响。
             DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) { [weak self] in
                 guard let self, self.wantsAudible, !self.userPaused else { return }
