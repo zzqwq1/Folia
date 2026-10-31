@@ -2089,29 +2089,25 @@ final class WebContainerView: UIView {
             // 由调用方直接走 `resumeAudio` 里那条 `__foliaMediaCommand.play` 通道。
             // 页面的 MediaSession 若是 `playing`，说明它自认为在放 —— 那不是断流，
             // 报 `media-playing` 交给调用方跳过重建，避免白白打断。
-            // **递归查找所有媒体元素，包括Shadow DOM里的。**
+            // **优先用__foliaLastAudio，避免每次都遍历整个DOM树。**
             //
-            // 原先只用document.querySelectorAll，找不到Shadow DOM里的元素，
-            // 导致页面明明有audio元素却被误判成no-elements。
-            function collectMedia(root, out) {
+            // 之前每次探针都递归遍历整个DOM+Shadow DOM，页面复杂时会卡死12秒。
+            // 现在优先用keeper里记录的最后一个audio元素，又快又准。
+            var liveMedia = 0;
+            var last = window.__foliaLastAudio;
+            if (last) {
+              var lastSrc = last.currentSrc || last.src;
+              if (lastSrc && !last.ended) { liveMedia += 1; }
+            }
+            // 只有last无效时才做一次轻量查找（不递归Shadow DOM，太慢）
+            if (liveMedia === 0) {
               try {
-                var nodes = root.querySelectorAll('audio,video');
-                for (var n = 0; n < nodes.length; n += 1) { out.push(nodes[n]); }
-                var all = root.querySelectorAll('*');
-                for (var i = 0; i < all.length; i += 1) {
-                  if (all[i].shadowRoot) {
-                    collectMedia(all[i].shadowRoot, out);
-                  }
+                var nodes = document.querySelectorAll('audio,video');
+                for (var i = 0; i < nodes.length; i += 1) {
+                  var src = nodes[i].currentSrc || nodes[i].src;
+                  if (src && !nodes[i].ended) { liveMedia += 1; break; }
                 }
               } catch (e) {}
-            }
-            var media = [];
-            collectMedia(document, media);
-            var liveMedia = 0;
-            for (var m = 0; m < media.length; m += 1) {
-              // 用currentSrc || src，兼容用<source>子元素的情况
-              var mediaSrc = media[m].currentSrc || media[m].src;
-              if (mediaSrc && !media[m].ended) { liveMedia += 1; }
             }
             if (liveMedia === 0 && list.length === 0) {
               var ms = navigator.mediaSession;
