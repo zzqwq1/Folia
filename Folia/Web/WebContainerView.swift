@@ -1244,20 +1244,23 @@ final class WebContainerView: UIView {
             container.evaluateJavaScript(Self.firstPaintProbeScript) { [weak self, weak container] phase, _ in
                 guard let self, let container, container === self.webView else { return }
                 guard ((phase as? String) ?? "loading") != "loading" else { return }
-                // **重负载标记加10秒稳定期，不立刻清除。**
+                // **重负载标记加长稳定期，不轻易清除。**
                 //
-                // 问题：页面刚画出来就清除flag，但页面可能在接下来几秒内就崩溃，
-                // 导致下次又被当成普通页面打开，再死一次。
-                // 现在延迟10秒，并且确认页面还在同一个路由才清除。
+                // 问题：歌单页面内存大，即使刚打开时没崩溃，播放一段时间后也可能
+                // 因为内存累积而崩溃。如果刚打开10秒就清除标记，下次再打开又会崩溃。
+                // 现在延迟60秒，并且确认页面还在同一个路由才清除。
+                // 优先保证不闪退，用户要正确率优先。
                 let paintedURL = trusted
-                DispatchQueue.main.asyncAfter(deadline: .now() + 10.0) { [weak self, weak container] in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 60.0) { [weak self, weak container] in
                     guard let self, let container, container === self.webView else { return }
-                    // 确认10秒后页面还在同一个路由，没有导航走
+                    // 确认60秒后页面还在同一个路由，没有导航走，也没有崩溃
                     container.evaluateJavaScript(
                         "(function(){return String(location.href);})()"
                     ) { [weak self] currentURL, _ in
                         guard let self, let current = currentURL as? String,
                               current == paintedURL.absoluteString else { return }
+                        // 60秒后还在这个路由，说明这个机型能扛住，才清除标记
+                        CrashLog.note("==== route stable for 60s, clearing memory-heavy flag: \(paintedURL.absoluteString) ====")
                         Self.clearMemoryHeavy(paintedURL)
                     }
                 }
@@ -2164,30 +2167,26 @@ final class WebContainerView: UIView {
     /// AudioContext 不是 running。系统层面的 `secondaryAudioShouldBeSilencedHint`
     /// 不作为判据（`.mixWithOthers` 下它经常为真），见下面恢复段里的说明。
     private func probeThenRecover(reason: String) {
-        // **（0）离开过 App、仍该响：先检查播放时钟是不是在走，确认没声了才重建。**
+        // **（0）离开过 App、仍该响：直接重建音频通路，不问页面。**
         //
-        // 之前这里只要leftAppWhileAudible是true，就立即重建音频通路，不问页面。
-        // 但setCategory会重建整条音频通路，WebKit的媒体元素会被当场按停一次。
-        // 这就是为什么用户说"进入抖音后回来没声音"——我们自己把歌按停了！
+        // 这是"进入抖音后回来没声音"的正确解法。
+        // 纯WebAudio页面有个致命问题：currentTime在走，但系统音频通路被收走了，
+        // 实际没有声音。页面侧的三项事实（<audio>未暂停、currentTime在推进、
+        // AudioContext是running）全部为真，靠探测永远发现不了——
+        // 丢的是它们下面那一层系统通路。
         //
-        // 正确做法：先检查播放时钟是不是在走。
-        // - 如果时钟在走，说明歌还在正常播放，什么都不做
-        // - 如果时钟没走，才重建音频通路
+        // 所以只要"离开过App + 该响"，就重建一次会话：
+        // setCategory会让WebKit把媒体元素按停一瞬间，
+        // 但重建之后立即跟一次resumeAudio，用户只会听到短暂的停顿，然后继续播放。
+        // 优先保证正确率，不追求不打断。
         if leftAppWhileAudible {
             leftAppWhileAudible = false
             preemptedByOtherApp = false
             stayedBackgroundedWhileAudible = false
-            // 先检查播放时钟是不是在走
-            isPlaybackClockAdvancing { alive in
-                if alive {
-                    CrashLog.note("==== playback clock advancing after return, keep path (\(reason)) ====")
-                    self.finishAudioRecovery()
-                } else {
-                    CrashLog.note("==== playback clock frozen, rebuilding path (\(reason)) ====")
-                    AudioSessionController.shared.rebuildAfterPreemption()
-                    self.recoverAudioPathPass(reason: "left-app", attempt: 0)
-                }
-            }
+            brokenProbeStreak = 0
+            CrashLog.note("==== audio path rebuilt on return from background (\(reason)) ====")
+            AudioSessionController.shared.rebuildAfterPreemption()
+            recoverAudioPathPass(reason: "left-app", attempt: 0)
             return
         }
 
