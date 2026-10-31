@@ -557,8 +557,16 @@ final class WebContainerView: UIView {
             let died = Self.trustedSiteURL(deadLandingURL)
                 ?? Self.trustedSiteURL(lastCommittedURL)
                 ?? Self.trustedSiteURL(lastVisibleURL)
-            if let died, let stable = Self.stableFallback(from: died) {
-                landing = stable
+            if let died {
+                // **如果已经是#player，直接用它，不要再调stableFallback。**
+                //
+                // stableFallback对player开头的fragment返回nil，导致landing
+                // 保持为无hash的startURL，用户看到的就是回到加载界面。
+                if let fragment = died.fragment, fragment.hasPrefix("player") {
+                    landing = died
+                } else if let stable = Self.stableFallback(from: died) {
+                    landing = stable
+                }
             }
         }
         // **新实例从头加载一次，把它自己打开的那一屏重新记下来。**
@@ -1552,13 +1560,27 @@ final class WebContainerView: UIView {
         let js = """
         (function(){
           try {
-            var list = document.querySelectorAll('audio');
+            // **递归查找Shadow DOM里的audio元素。**
+            function collectAudio(root, out) {
+              try {
+                var nodes = root.querySelectorAll('audio');
+                for (var n = 0; n < nodes.length; n += 1) { out.push(nodes[n]); }
+                var all = root.querySelectorAll('*');
+                for (var i = 0; i < all.length; i += 1) {
+                  if (all[i].shadowRoot) {
+                    collectAudio(all[i].shadowRoot, out);
+                  }
+                }
+              } catch (e) {}
+            }
+            var list = [];
+            collectAudio(document, list);
             for (var i = 0; i < list.length; i += 1) {
               var el = list[i];
               if (!el.src || el.paused) { continue; }
               // 记下「进后台前真正在出声的那一个 deck」。
               // 双 deck 交叉淡化时另一个 deck 也是 paused + 有 src，
-              // 回前台补放若拿不到这个指针，就会挑错元素（爆音 / 无声）。
+              // 回前台补活若拿不到这个指针，就会挑错元素（爆音 / 无声）。
               window.__foliaLastAudio = el;
               // 进后台前把还活着的元素直接放一次：系统随后按停它时，
               // 保活那一拍就知道刚才是在唱的，也就知道该不该放回去。
@@ -1852,7 +1874,21 @@ final class WebContainerView: UIView {
         let js = """
         (function(){
           try {
-            var list = document.querySelectorAll('audio');
+            // **递归查找Shadow DOM里的audio元素。**
+            function collectAudio(root, out) {
+              try {
+                var nodes = root.querySelectorAll('audio');
+                for (var n = 0; n < nodes.length; n += 1) { out.push(nodes[n]); }
+                var all = root.querySelectorAll('*');
+                for (var i = 0; i < all.length; i += 1) {
+                  if (all[i].shadowRoot) {
+                    collectAudio(all[i].shadowRoot, out);
+                  }
+                }
+              } catch (e) {}
+            }
+            var list = [];
+            collectAudio(document, list);
             for (var i = 0; i < list.length; i += 1) {
               var el = list[i];
               if (el.src && !el.ended) { return true; }
@@ -2048,7 +2084,24 @@ final class WebContainerView: UIView {
             // 由调用方直接走 `resumeAudio` 里那条 `__foliaMediaCommand.play` 通道。
             // 页面的 MediaSession 若是 `playing`，说明它自认为在放 —— 那不是断流，
             // 报 `media-playing` 交给调用方跳过重建，避免白白打断。
-            var media = document.querySelectorAll('audio,video');
+            // **递归查找所有媒体元素，包括Shadow DOM里的。**
+            //
+            // 原先只用document.querySelectorAll，找不到Shadow DOM里的元素，
+            // 导致页面明明有audio元素却被误判成no-elements。
+            function collectMedia(root, out) {
+              try {
+                var nodes = root.querySelectorAll('audio,video');
+                for (var n = 0; n < nodes.length; n += 1) { out.push(nodes[n]); }
+                var all = root.querySelectorAll('*');
+                for (var i = 0; i < all.length; i += 1) {
+                  if (all[i].shadowRoot) {
+                    collectMedia(all[i].shadowRoot, out);
+                  }
+                }
+              } catch (e) {}
+            }
+            var media = [];
+            collectMedia(document, media);
             var liveMedia = 0;
             for (var m = 0; m < media.length; m += 1) {
               if (media[m].src && !media[m].ended) { liveMedia += 1; }
@@ -2433,7 +2486,21 @@ final class WebContainerView: UIView {
         let js = """
         (function(){
           try {
-            var list = document.querySelectorAll('audio,video');
+            // **递归查找Shadow DOM里的媒体元素。**
+            function collectMedia(root, out) {
+              try {
+                var nodes = root.querySelectorAll('audio,video');
+                for (var n = 0; n < nodes.length; n += 1) { out.push(nodes[n]); }
+                var all = root.querySelectorAll('*');
+                for (var i = 0; i < all.length; i += 1) {
+                  if (all[i].shadowRoot) {
+                    collectMedia(all[i].shadowRoot, out);
+                  }
+                }
+              } catch (e) {}
+            }
+            var list = [];
+            collectMedia(document, list);
             for (var i = 0; i < list.length; i += 1) {
               var el = list[i];
               if (!el.src || el.ended) { continue; }
@@ -2463,7 +2530,21 @@ final class WebContainerView: UIView {
     private func isPlaybackClockAdvancing(_ completion: @escaping (Bool) -> Void) {
         let js = """
         (function(){
-          var list = document.querySelectorAll('audio');
+          // **递归查找Shadow DOM里的audio元素。**
+          function collectAudio(root, out) {
+            try {
+              var nodes = root.querySelectorAll('audio');
+              for (var n = 0; n < nodes.length; n += 1) { out.push(nodes[n]); }
+              var all = root.querySelectorAll('*');
+              for (var i = 0; i < all.length; i += 1) {
+                if (all[i].shadowRoot) {
+                  collectAudio(all[i].shadowRoot, out);
+                }
+              }
+            } catch (e) {}
+          }
+          var list = [];
+          collectAudio(document, list);
           for (var i = 0; i < list.length; i += 1) {
             var el = list[i];
             if (!el.src || el.ended || el.paused) { continue; }
@@ -2528,26 +2609,17 @@ final class WebContainerView: UIView {
         if attempt == 0 {
             AudioSessionController.shared.activate()
         }
-        
-        // **系统通路刚重建完，立刻调页面play()会抛AbortError。**
+        // **系统通路修好之后，页面引擎自己停着也不会出声。**
         //
-        // 日志里 `JS PLAY AUDIO AbortError` 就是这个原因：系统音频通路重建
-        // 需要一点时间稳定，页面的play()在通路还没完全就绪时被系统中断。
-        // 延迟150ms再叫醒页面，让系统通路先稳定下来。
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-            guard let self else { return }
-            // **系统通路修好之后，页面引擎自己停着也不会出声。**
-            //
-            // 纯 WebAudio 页面（线上站）的恢复链以前到这里就结束了：只 `setCategory`
-            // + `setActive`，从不碰页面播放引擎。日志 09-57-58Z 第 43-50 行
-            // 反复 `preempted by another app, verifying` → `silent with running context`
-            // 就是这一层：系统通路全绿，页面却一直不响，直到用户手动点播放。
-            // 所以每一趟最后都让页面自己补一次播放入口（幂等，正在响时无副作用）。
-            self.resumeAudio(reason: reason)
-            // 无论如何都叫醒一次页面上下文：`resume()` 是幂等的，
-            // 而日志里 `contextOK=0` 之后恢复链一步都没往前走，就是从这少了一拍。
-            self.revivePageAudio()
-        }
+        // 纯 WebAudio 页面（线上站）的恢复链以前到这里就结束了：只 `setCategory`
+        // + `setActive`，从不碰页面播放引擎。日志 09-57-58Z 第 43-50 行
+        // 反复 `preempted by another app, verifying` → `silent with running context`
+        // 就是这一层：系统通路全绿，页面却一直不响，直到用户手动点播放。
+        // 所以每一趟最后都让页面自己补一次播放入口（幂等，正在响时无副作用）。
+        resumeAudio(reason: reason)
+        // 无论如何都叫醒一次页面上下文：`resume()` 是幂等的，
+        // 而日志里 `contextOK=0` 之后恢复链一步都没往前走，就是从这少了一拍。
+        revivePageAudio()
 
         // 等一帧再问上下文状态：`resume()` 是异步的，紧接着问必然是旧的。
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
@@ -2700,7 +2772,21 @@ final class WebContainerView: UIView {
     private static let playbackBusyJS = """
     (function(){
       try {
-        var list = document.querySelectorAll('audio,video');
+        // **递归查找Shadow DOM里的媒体元素。**
+        function collectMedia(root, out) {
+          try {
+            var nodes = root.querySelectorAll('audio,video');
+            for (var n = 0; n < nodes.length; n += 1) { out.push(nodes[n]); }
+            var all = root.querySelectorAll('*');
+            for (var i = 0; i < all.length; i += 1) {
+              if (all[i].shadowRoot) {
+                collectMedia(all[i].shadowRoot, out);
+              }
+            }
+          } catch (e) {}
+        }
+        var list = [];
+        collectMedia(document, list);
         for (var i = 0; i < list.length; i += 1) {
           var el = list[i];
           if (el.src && !el.ended && !el.paused) { return true; }
@@ -2813,7 +2899,21 @@ final class WebContainerView: UIView {
             // 那会让两首歌同时出声，用户听到的是爆音和互相抢拍。
             // 所以只认「刚才确实在出声的那一个」：优先用进后台前记下的元素，
             // 其次挑 `currentTime > 0` 的那个（待命 deck 还停在 0）。
-            var list = document.querySelectorAll('audio');
+            // **递归查找Shadow DOM里的audio元素。**
+            function collectAudio(root, out) {
+              try {
+                var nodes = root.querySelectorAll('audio');
+                for (var n = 0; n < nodes.length; n += 1) { out.push(nodes[n]); }
+                var all = root.querySelectorAll('*');
+                for (var i = 0; i < all.length; i += 1) {
+                  if (all[i].shadowRoot) {
+                    collectAudio(all[i].shadowRoot, out);
+                  }
+                }
+              } catch (e) {}
+            }
+            var list = [];
+            collectAudio(document, list);
             var pick = window.__foliaLastAudio;
             var chosen = null;
             if (pick && pick.src && !pick.ended && pick.paused && pick.isConnected) {
@@ -2898,7 +2998,21 @@ final class WebContainerView: UIView {
                 var __busy = \(Self.playbackBusyJS);
                 if (__busy === true) { return 'busy'; }
                 \(Self.playEntryJS)
-                var list = document.querySelectorAll('audio');
+                // **递归查找Shadow DOM里的audio元素。**
+                function collectAudio(root, out) {
+                  try {
+                    var nodes = root.querySelectorAll('audio');
+                    for (var n = 0; n < nodes.length; n += 1) { out.push(nodes[n]); }
+                    var all = root.querySelectorAll('*');
+                    for (var i = 0; i < all.length; i += 1) {
+                      if (all[i].shadowRoot) {
+                        collectAudio(all[i].shadowRoot, out);
+                      }
+                    }
+                  } catch (e) {}
+                }
+                var list = [];
+                collectAudio(document, list);
                 var el = window.__foliaLastAudio;
                 if (!el || !el.isConnected) {
                   for (var i = 0; i < list.length; i += 1) {
@@ -2970,7 +3084,22 @@ final class WebContainerView: UIView {
             // 恢复链每拍都调一次会把正在放的歌重新 play 一遍。
             var __busy = \(Self.playbackBusyJS);
             \(Self.playEntryJS)
-            var media = document.querySelector('audio,video');
+            // **递归查找Shadow DOM里的媒体元素。**
+            function collectMedia(root, out) {
+              try {
+                var nodes = root.querySelectorAll('audio,video');
+                for (var n = 0; n < nodes.length; n += 1) { out.push(nodes[n]); }
+                var all = root.querySelectorAll('*');
+                for (var i = 0; i < all.length; i += 1) {
+                  if (all[i].shadowRoot) {
+                    collectMedia(all[i].shadowRoot, out);
+                  }
+                }
+              } catch (e) {}
+            }
+            var allMedia = [];
+            collectMedia(document, allMedia);
+            var media = allMedia[0] || null;
             var cmd = window.__foliaMediaCommand || {};
             // 页面自己通过 setActionHandler 登记的处理器，走的是 React 状态机，
             // 切歌后 UI、队列、歌词都会同步。线上站只登记了这四个动作。
@@ -3004,11 +3133,11 @@ final class WebContainerView: UIView {
             if (a === 'pause') {
               // 页面没登记 `pause` 处理器时的兜底：把每个在放的媒体元素都按停，
               // 再把状态位改成 `paused`。否则锁屏暂停在纯 WebAudio 页面完全空转。
+              // 直接用前面收集好的allMedia（包含Shadow DOM里的元素）。
               var any = false;
-              var els = document.querySelectorAll('audio,video');
-              for (var i = 0; i < els.length; i += 1) {
-                if (!els[i].paused && typeof els[i].pause === 'function') {
-                  try { els[i].pause(); any = true; } catch (e) {}
+              for (var i = 0; i < allMedia.length; i += 1) {
+                if (!allMedia[i].paused && typeof allMedia[i].pause === 'function') {
+                  try { allMedia[i].pause(); any = true; } catch (e) {}
                 }
               }
               try {
@@ -3596,7 +3725,21 @@ final class WebContainerView: UIView {
           // 同时把「哪首、放到哪、多长」报给原生：壳靠它知道后台该从哪一秒接着放，
           // 以及被打断后续播的是不是同一首。
           var currentAudio = function(){
-            var list = document.querySelectorAll('audio');
+            // **递归查找Shadow DOM里的audio元素。**
+            function collectAudio(root, out) {
+              try {
+                var nodes = root.querySelectorAll('audio');
+                for (var n = 0; n < nodes.length; n += 1) { out.push(nodes[n]); }
+                var all = root.querySelectorAll('*');
+                for (var i = 0; i < all.length; i += 1) {
+                  if (all[i].shadowRoot) {
+                    collectAudio(all[i].shadowRoot, out);
+                  }
+                }
+              } catch (e) {}
+            }
+            var list = [];
+            collectAudio(document, list);
             for (var i = 0; i < list.length; i += 1) {
               if (!list[i].ended && list[i].src) { return list[i]; }
             }
