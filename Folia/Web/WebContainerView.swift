@@ -1668,7 +1668,7 @@ final class WebContainerView: UIView {
             leftAppWhileAudible = false
             stayedBackgroundedWhileAudible = false
             Self.wasAudibleInBackground = false
-            state.notePlaybackStopped()
+            AudioSessionController.shared.notePlaybackStopped()
             CrashLog.note("==== paused by user (\(reason ?? "")) ====")
             return
         }
@@ -1777,7 +1777,7 @@ final class WebContainerView: UIView {
                     // 用户亲手停了：这一轮「离开过 App」的欠账也随之作废。
                     self.leftAppWhileAudible = false
                     // 会话层那本「离开期间在放」的账也一并结掉，否则回前台还会白重建通路。
-                    self.state.notePlaybackStopped()
+                    AudioSessionController.shared.notePlaybackStopped()
                     // **这里刻意不清 `wasBackgroundedThisSession`。**
                     //
                     // 保留它的原因：之后若再从别的 App 回来，`probeThenRecover` 里
