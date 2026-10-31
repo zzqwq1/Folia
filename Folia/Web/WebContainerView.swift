@@ -325,6 +325,12 @@ final class WebContainerView: UIView {
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
+        // 注入原生播放器桥脚本
+        userContent.addUserScript(WKUserScript(
+            source: Self.nativePlayerBridgeScript(),
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
         userContent.add(AudioStateRelay(), name: "foliaAudioState")
         userContent.add(JSLogRelay(), name: "foliaJSLog")
         let qr = QRFallbackRelay()
@@ -333,6 +339,9 @@ final class WebContainerView: UIView {
         let intentRelay = AudioIntentRelay()
         intentRelay.container = self
         userContent.add(intentRelay, name: "foliaAudioIntent")
+        // 注册原生播放器桥
+        NativePlayer.shared.webView = nil
+        userContent.add(NativePlayer.shared, name: "foliaPlayer")
         config.userContentController = userContent
         return config
     }
@@ -384,6 +393,8 @@ final class WebContainerView: UIView {
         webView = makeWebView(configuration: config)
         // 两个回传通道都要拿到 webView：一个往页面塞本地画的二维码，一个做播放意图。
         qrRelay?.webView = webView
+        // 原生播放器也要拿到webView，用于回调JS
+        NativePlayer.shared.webView = webView
 
         addSubview(webView)
 
@@ -731,6 +742,8 @@ final class WebContainerView: UIView {
         // 新实例的 message handler 需要重新挂上（`makeConfiguration` 里已经建了新的
         // `WKUserContentController`，但二维码回传那条要拿到新的 webView 引用）。
         qrRelay?.webView = view
+        // 原生播放器也要更新webView引用
+        NativePlayer.shared.webView = view
         view.load(URLRequest(url: pending.landing,
                              cachePolicy: .useProtocolCachePolicy,
                              timeoutInterval: 30))
@@ -5417,3 +5430,288 @@ private final class QRFallbackRelay: NSObject, WKScriptMessageHandler {
         }
     }
 }
+
+// MARK: - 原生播放器桥JS
+
+extension WebContainerView {
+    /// 原生播放器桥脚本。
+    ///
+    /// 参考Folia汽水版本的ios-native-audio.js：拦截HTMLMediaElement的play()，
+    /// 把音频地址交给原生AVPlayer播放，网页里的audio元素静音暂停。
+    /// 这样进后台、切App都不会影响声音。
+    static func nativePlayerBridgeScript() -> String {
+        return """
+        (function () {
+          if (window.__foliaNativePlayerBridgeInstalled) return;
+          window.__foliaNativePlayerBridgeInstalled = true;
+
+          function nativeHandler() {
+            return window.webkit && window.webkit.messageHandlers &&
+                   window.webkit.messageHandlers.foliaPlayer;
+          }
+          if (!nativeHandler()) return;
+
+          var proto = HTMLMediaElement.prototype;
+          var origPlay = proto.play;
+          var origPause = proto.pause;
+          var D = {
+            currentTime: Object.getOwnPropertyDescriptor(proto, 'currentTime'),
+            paused: Object.getOwnPropertyDescriptor(proto, 'paused'),
+            duration: Object.getOwnPropertyDescriptor(proto, 'duration'),
+            ended: Object.getOwnPropertyDescriptor(proto, 'ended'),
+            volume: Object.getOwnPropertyDescriptor(proto, 'volume'),
+            muted: Object.getOwnPropertyDescriptor(proto, 'muted'),
+            src: Object.getOwnPropertyDescriptor(proto, 'src')
+          };
+
+          var session = 'folia-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+          var generation = 0;
+          var mirror = null;
+          var st = null;
+          var silent = false;
+          var tick = null;
+
+          function srcOf(el) {
+            return D.src.get.call(el) || el.currentSrc || '';
+          }
+
+          function eligible(el) {
+            return el instanceof HTMLAudioElement && /^https?:/i.test(srcOf(el));
+          }
+
+          function send(msg) {
+            msg.generation = generation;
+            msg.session = session;
+            var h = nativeHandler();
+            if (h) { try { h.postMessage(msg); } catch (e) {} }
+          }
+
+          function fire(el, type) {
+            try { el.dispatchEvent(new Event(type)); } catch (e) {}
+          }
+
+          function position() {
+            if (!st) return 0;
+            var p = st.position;
+            if (st.playing) p += (Date.now() - st.at) / 1000;
+            if (st.duration > 0) p = Math.min(p, st.duration);
+            return Math.max(0, p);
+          }
+
+          function setPosition(p) {
+            st.position = p;
+            st.at = Date.now();
+          }
+
+          function realMute(el, on) {
+            silent = true;
+            try { D.muted.set.call(el, on); } finally { silent = false; }
+          }
+
+          function setPlaying(playing) {
+            if (!st || st.playing === playing) return;
+            setPosition(position());
+            st.playing = playing;
+            if (playing) {
+              fire(mirror, 'play');
+              fire(mirror, 'playing');
+            } else {
+              fire(mirror, 'pause');
+            }
+          }
+
+          function startTick() {
+            if (tick) return;
+            tick = setInterval(function () {
+              if (mirror && st && st.playing) fire(mirror, 'timeupdate');
+            }, 250);
+          }
+
+          function release(restore) {
+            if (!mirror) return null;
+            var el = mirror, pos = position(), state = st;
+            mirror = null;
+            st = null;
+            realMute(el, !!state.mutedIntent);
+            if (restore) { try { D.currentTime.set.call(el, pos); } catch (e) {} }
+            return { el: el, pos: pos, playing: state.playing };
+          }
+
+          function startNative(el, url) {
+            if (mirror && mirror !== el) {
+              var old = release(false);
+              if (old && old.playing) fire(old.el, 'pause');
+            }
+            var startAt = 0;
+            try { startAt = D.currentTime.get.call(el) || 0; } catch (e) {}
+            try { origPause.call(el); } catch (e) {}
+            var mutedIntent = mirror === el && st ? st.mutedIntent : D.muted.get.call(el);
+            var volumeIntent = mirror === el && st ? st.volumeIntent : D.volume.get.call(el);
+            generation += 1;
+            mirror = el;
+            st = {
+              url: url,
+              playing: true,
+              position: startAt,
+              at: Date.now(),
+              duration: NaN,
+              ended: false,
+              mutedIntent: mutedIntent,
+              volumeIntent: volumeIntent
+            };
+            realMute(el, true);
+            send({
+              cmd: 'load',
+              url: url,
+              position: startAt,
+              autoplay: true,
+              volume: volumeIntent,
+              muted: mutedIntent
+            });
+            fire(el, 'play');
+            startTick();
+          }
+
+          proto.play = function () {
+            if (!eligible(this)) return origPlay.apply(this, arguments);
+            var url = srcOf(this);
+            if (mirror === this && st && st.url === url && !st.ended) {
+              send({ cmd: 'play' });
+              setPlaying(true);
+              return Promise.resolve();
+            }
+            startNative(this, url);
+            return Promise.resolve();
+          };
+
+          proto.pause = function () {
+            if (mirror !== this || silent) return origPause.apply(this, arguments);
+            if (st) st.intent = false;
+            send({ cmd: 'pause' });
+            setPlaying(false);
+          };
+
+          Object.defineProperty(proto, 'paused', {
+            configurable: true,
+            enumerable: D.paused.enumerable,
+            get: function () {
+              return mirror === this && st ? !st.playing : D.paused.get.call(this);
+            }
+          });
+
+          Object.defineProperty(proto, 'ended', {
+            configurable: true,
+            enumerable: D.ended.enumerable,
+            get: function () {
+              return mirror === this && st ? st.ended : D.ended.get.call(this);
+            }
+          });
+
+          Object.defineProperty(proto, 'duration', {
+            configurable: true,
+            enumerable: D.duration.enumerable,
+            get: function () {
+              return mirror === this && st && st.duration > 0 ? st.duration : D.duration.get.call(this);
+            }
+          });
+
+          Object.defineProperty(proto, 'currentTime', {
+            configurable: true,
+            enumerable: D.currentTime.enumerable,
+            get: function () {
+              return mirror === this && st ? position() : D.currentTime.get.call(this);
+            },
+            set: function (v) {
+              if (mirror !== this || !st) {
+                D.currentTime.set.call(this, v);
+                return;
+              }
+              var t = Math.max(0, Number(v) || 0);
+              setPosition(t);
+              st.ended = false;
+              send({ cmd: 'seek', position: t });
+              fire(this, 'seeking');
+              fire(this, 'timeupdate');
+              fire(this, 'seeked');
+            }
+          });
+
+          Object.defineProperty(proto, 'volume', {
+            configurable: true,
+            enumerable: D.volume.enumerable,
+            get: function () {
+              return mirror === this && st ? st.volumeIntent : D.volume.get.call(this);
+            },
+            set: function (v) {
+              if (mirror !== this || !st) {
+                D.volume.set.call(this, v);
+                return;
+              }
+              st.volumeIntent = Math.max(0, Math.min(1, Number(v) || 0));
+              send({ cmd: 'volume', volume: st.mutedIntent ? 0 : st.volumeIntent });
+              fire(this, 'volumechange');
+            }
+          });
+
+          Object.defineProperty(proto, 'muted', {
+            configurable: true,
+            enumerable: D.muted.enumerable,
+            get: function () {
+              return mirror === this && st && !silent ? st.mutedIntent : D.muted.get.call(this);
+            },
+            set: function (v) {
+              if (silent || mirror !== this || !st) {
+                D.muted.set.call(this, v);
+                return;
+              }
+              st.mutedIntent = !!v;
+              send({ cmd: 'muted', muted: st.mutedIntent });
+              fire(this, 'volumechange');
+            }
+          });
+
+          // 原生回调
+          window.__foliaNativePlayerEvent = function (e) {
+            e = e || {};
+            if (!mirror || !st) return;
+            if (e.session && String(e.session) !== session) return;
+            var type = String(e.type || '');
+
+            if (Number.isFinite(Number(e.duration)) && Number(e.duration) > 0 &&
+                Number(e.duration) !== st.duration) {
+              st.duration = Number(e.duration);
+              fire(mirror, 'durationchange');
+              fire(mirror, 'loadedmetadata');
+            }
+
+            if (type === 'error') {
+              var r = release(true);
+              if (r) origPlay.call(r.el).catch(function () {});
+              return;
+            }
+
+            if (type === 'ended') {
+              setPosition(st.duration > 0 ? st.duration : position());
+              st.playing = false;
+              st.ended = true;
+              fire(mirror, 'timeupdate');
+              fire(mirror, 'ended');
+              return;
+            }
+
+            if (type === 'state' || type === 'time' || type === 'loaded') {
+              var playing = e.playing === true;
+              var p = Number(e.position);
+              if (Number.isFinite(p)) setPosition(p);
+              if (playing !== st.playing) setPlaying(playing);
+              if (type === 'time') fire(mirror, 'timeupdate');
+              if (playing) st.ended = false;
+            }
+          };
+
+          console.info('[Folia] Native player bridge installed');
+        })();
+        """
+    }
+}
+
