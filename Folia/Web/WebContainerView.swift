@@ -1208,6 +1208,37 @@ final class WebContainerView: UIView {
             self.lastCommittedURL = trusted
             self.lastVisibleURL = trusted
             self.rememberVisibleURL(trusted)
+            
+            // **每次路由变化时，检查是否是重负载路由，及时设置低内存模式。**
+            //
+            // 原先 `__foliaLowMemory` 只在 `audioKeeperScript` 注入时检查一次，
+            // 那是页面刚加载时的路由。用户从首页导航到歌单时，路由变了，
+            // 但低内存标志没有更新 —— 等歌单渲染到一半内存爆了才闪退。
+            // 现在每次 refreshPageLocation 都检查一遍，及时切换模式。
+            let heavyRoutes = Self.memoryHeavyLiteral()
+            let lowMemoryJS = """
+            (function(){
+              try {
+                var heavy = \(heavyRoutes);
+                var here = location.href;
+                var isHeavy = false;
+                for (var hi = 0; hi < heavy.length; hi += 1) {
+                  if (heavy[hi] && here.indexOf(heavy[hi]) === 0) {
+                    isHeavy = true;
+                    break;
+                  }
+                }
+                window.__foliaLowMemory = isHeavy;
+                if (isHeavy) {
+                  document.documentElement.setAttribute('data-folia-low-memory', '1');
+                } else {
+                  document.documentElement.removeAttribute('data-folia-low-memory');
+                }
+              } catch (e) {}
+            })();
+            """
+            container.evaluateJavaScript(lowMemoryJS, completionHandler: nil)
+            
             container.evaluateJavaScript(Self.firstPaintProbeScript) { [weak self, weak container] phase, _ in
                 guard let self, let container, container === self.webView else { return }
                 guard ((phase as? String) ?? "loading") != "loading" else { return }
@@ -2497,17 +2528,26 @@ final class WebContainerView: UIView {
         if attempt == 0 {
             AudioSessionController.shared.activate()
         }
-        // **系统通路修好之后，页面引擎自己停着也不会出声。**
+        
+        // **系统通路刚重建完，立刻调页面play()会抛AbortError。**
         //
-        // 纯 WebAudio 页面（线上站）的恢复链以前到这里就结束了：只 `setCategory`
-        // + `setActive`，从不碰页面播放引擎。日志 09-57-58Z 第 43-50 行
-        // 反复 `preempted by another app, verifying` → `silent with running context`
-        // 就是这一层：系统通路全绿，页面却一直不响，直到用户手动点播放。
-        // 所以每一趟最后都让页面自己补一次播放入口（幂等，正在响时无副作用）。
-        resumeAudio(reason: reason)
-        // 无论如何都叫醒一次页面上下文：`resume()` 是幂等的，
-        // 而日志里 `contextOK=0` 之后恢复链一步都没往前走，就是从这少了一拍。
-        revivePageAudio()
+        // 日志里 `JS PLAY AUDIO AbortError` 就是这个原因：系统音频通路重建
+        // 需要一点时间稳定，页面的play()在通路还没完全就绪时被系统中断。
+        // 延迟150ms再叫醒页面，让系统通路先稳定下来。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self else { return }
+            // **系统通路修好之后，页面引擎自己停着也不会出声。**
+            //
+            // 纯 WebAudio 页面（线上站）的恢复链以前到这里就结束了：只 `setCategory`
+            // + `setActive`，从不碰页面播放引擎。日志 09-57-58Z 第 43-50 行
+            // 反复 `preempted by another app, verifying` → `silent with running context`
+            // 就是这一层：系统通路全绿，页面却一直不响，直到用户手动点播放。
+            // 所以每一趟最后都让页面自己补一次播放入口（幂等，正在响时无副作用）。
+            self.resumeAudio(reason: reason)
+            // 无论如何都叫醒一次页面上下文：`resume()` 是幂等的，
+            // 而日志里 `contextOK=0` 之后恢复链一步都没往前走，就是从这少了一拍。
+            self.revivePageAudio()
+        }
 
         // 等一帧再问上下文状态：`resume()` 是异步的，紧接着问必然是旧的。
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
@@ -2604,9 +2644,32 @@ final class WebContainerView: UIView {
         // 都白跑一次重建 —— 表现就是「刚回来那一下卡顿、画面闪、偶尔进程还不够内存」。
         // 现在只做两件没有副作用的事：`resume()` 已知的 AudioContext，
         // 以及让页面自己上报一次当前状态（`__foliaAudioKeeper.report()` 只是读 DOM）。
+        let heavyRoutes = Self.memoryHeavyLiteral()
         let js = """
         (function(){
           try {
+            // **每次都检查当前路由是否是重负载路由，及时设置低内存模式。**
+            //
+            // 原先 `__foliaLowMemory` 只在 `audioKeeperScript` 注入时检查一次，
+            // 那是页面刚加载时的路由。用户从首页导航到歌单时，路由变了，
+            // 但低内存标志没有更新 —— 等歌单渲染到一半内存爆了才闪退。
+            // 现在每次 revivePageAudio 都重新检查一遍，及时切换模式。
+            try {
+              var heavy = \(heavyRoutes);
+              var here = location.href;
+              var isHeavy = false;
+              for (var hi = 0; hi < heavy.length; hi += 1) {
+                if (heavy[hi] && here.indexOf(heavy[hi]) === 0) {
+                  isHeavy = true;
+                  break;
+                }
+              }
+              window.__foliaLowMemory = isHeavy;
+              if (isHeavy) {
+                document.documentElement.setAttribute('data-folia-low-memory', '1');
+              }
+            } catch (e) {}
+            
             if (typeof window.__foliaResumeAudioContexts === 'function') {
               window.__foliaResumeAudioContexts();
             }
