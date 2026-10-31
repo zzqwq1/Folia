@@ -317,17 +317,15 @@ final class WebContainerView: UIView {
             injectionTime: .atDocumentStart,
             forMainFrameOnly: false
         ))
-        // 保活与播放意图上报必须在**页面脚本之前**装好：`play` 事件是 UI 手势那一拍同步发出的，
-        // 等 `didFinish` 再注入就已经听不到了 —— 原生收不到 `intent-play`，
-        // 后台就不知道该把页面那条 `<audio>` 放回去，表现就是「后台一点声都没有」。
+        // 先注入原生播放器桥，确保它拿到的是真正的原始play
         userContent.addUserScript(WKUserScript(
-            source: Self.audioKeeperScript(),
+            source: Self.nativePlayerBridgeScript(),
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
-        // 注入原生播放器桥脚本
+        // 再注入audioKeeperScript（它的play包装会在原生播放器的外层，但不影响原生接管）
         userContent.addUserScript(WKUserScript(
-            source: Self.nativePlayerBridgeScript(),
+            source: Self.audioKeeperScript(),
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
@@ -1941,6 +1939,8 @@ final class WebContainerView: UIView {
     private var audioPathRebuiltObservation: Any?
 
     private func startKeepAliveTimer() {
+        // 用原生播放器后，不需要保活定时器，避免反复触发恢复逻辑干扰原生播放器
+        return
         guard keepAliveTimer == nil else { return }
         // 2 秒一拍，而不是 4 秒。
         //
@@ -2162,6 +2162,8 @@ final class WebContainerView: UIView {
     ///   而不是固定 sleep 一段时间——那段时间正是「没声音」的窗口；
     /// - 上下文始终起不来就有限次重试，不无限循环。
     func recoverAudioPath(reason: String) {
+        // 用原生播放器后，不需要网页音频恢复逻辑，避免干扰原生播放器
+        return
         guard wantsAudible, !userPaused else { return }
 
         // 正在恢复中：只记一个待办，等当前这遍结束后补做一次。
@@ -5589,6 +5591,42 @@ extension WebContainerView {
             if (st) st.intent = false;
             send({ cmd: 'pause' });
             setPlaying(false);
+          };
+
+          // 重写load函数：切换歌曲时正确释放原生播放器
+          var origLoad = proto.load;
+          proto.load = function () {
+            if (mirror === this) {
+              send({ cmd: 'pause' });
+              release(false);
+            }
+            return origLoad.apply(this, arguments);
+          };
+
+          // 重写src属性setter：src变化时释放原生播放器
+          Object.defineProperty(proto, 'src', {
+            configurable: true,
+            enumerable: D.src.enumerable,
+            get: D.src.get,
+            set: function (v) {
+              D.src.set.call(this, v);
+              if (mirror === this && st && D.src.get.call(this) !== st.url) {
+                send({ cmd: 'pause' });
+                release(false);
+              }
+            }
+          });
+
+          // 重写setAttribute：通过setAttribute设置src时也要处理
+          var origSetAttribute = Element.prototype.setAttribute;
+          Element.prototype.setAttribute = function (name, value) {
+            var result = origSetAttribute.apply(this, arguments);
+            if (this === mirror && String(name).toLowerCase() === 'src' &&
+                st && D.src.get.call(this) !== st.url) {
+              send({ cmd: 'pause' });
+              release(false);
+            }
+            return result;
           };
 
           Object.defineProperty(proto, 'paused', {
