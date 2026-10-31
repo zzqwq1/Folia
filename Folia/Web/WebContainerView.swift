@@ -2637,7 +2637,8 @@ final class WebContainerView: UIView {
                 // 用户听到的就是「回来要等两秒才响」。上下文查不到就直接补放，
                 // 真有问题由下一拍保活的媒体探测接手。
                 if state != "blocked" {
-                    self.resumeAudio(reason: reason)
+                    // 前面已经调用过resumeAudio了，这里不要再调用第二次
+                    // 150ms内两次play()会导致第一次的Promise被abort
                     self.finishAudioRecovery()
                 } else if attempt >= 3 {
                     // 上下文始终起不来，也不能就此收工。
@@ -4517,6 +4518,15 @@ final class WebContainerView: UIView {
         if (typeof originalPlay !== 'function') { return; }
         HTMLMediaElement.prototype.play = function(){
           var self = this;
+          // **记录所有调用过play()的元素，即使它不在DOM树里。**
+          // 纯WebAudio页面的audio元素只存在于JS闭包里，不在DOM里，
+          // 所以querySelectorAll和document上的事件监听都收不到它。
+          // 在这里直接记录，探针就能找到它了。
+          try {
+            if (self.tagName === 'AUDIO') {
+              window.__foliaLastAudio = self;
+            }
+          } catch (e) {}
           var p = originalPlay.apply(self, arguments);
           if (p && typeof p.catch === 'function') {
             p.catch(function(err){
