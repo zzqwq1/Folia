@@ -1544,6 +1544,8 @@ final class WebContainerView: UIView {
         wantsAudible = true
         userPaused = false
         pendingPauseCheck = false
+        // 用户亲手点播放：清掉补放节流，保证下一次自动兜底立刻生效。
+        lastResumeAttempt = nil
         // 用户亲手开始放：之前那次「被别的 App 抢占」的账已经无关，别再重复重建通路。
         preemptedByOtherApp = false
         // 同理：用户亲手点播放，就是「这一轮离开过 App」的欠账已经不再需要壳去兜底。
@@ -1917,11 +1919,16 @@ final class WebContainerView: UIView {
             if (liveMedia === 0 && list.length === 0) {
               var ms = navigator.mediaSession;
               var st = ms && ms.playbackState ? ms.playbackState : 'none';
+              // 页面自己的上报优先。`__foliaPlaybackState` 是 keeper 从
+              // `MediaSession.prototype.playbackState` 的 setter 上记下来的，
+              // 代表「页面最后一次认为自己处于什么状态」。
               if (st === 'none' && window.__foliaPlaybackState) { st = window.__foliaPlaybackState; }
-              // 壳自己记过播放意图：页面纯 WebAudio 出声，没有元素也没有
-              // `playbackState`，唯一的事实就是「用户点过播放、之后没点暂停」。
-              // 少了这一条就会报 `no-elements`，把正常的正在播放判成断流。
-              if (st === 'none' && window.__foliaWantsAudible) { st = 'playing'; }
+              // **只有页面真的报过 `playing` 才算健康。**
+              //
+              // 这里绝不能用壳的 `__foliaWantsAudible` 兜底成 `playing`：
+              // 那是「用户想听」，不是「页面在放」。用意图冒充事实，
+              // 会让所有「该响却没响」的情况都判成 `media-playing`，
+              // 恢复链被永久跳过 —— 正是 10-24-58Z 那 4 分 39 秒静音的成因。
               return (st === 'playing') ? 'media-playing' : 'no-elements';
             }
             if (live === 0) { return 'unknown'; }
@@ -2481,30 +2488,42 @@ final class WebContainerView: UIView {
     /// 直到用户亲手点播放（第 33 行）才恢复，正是这条路断在了「找不到入口」。
     ///
     /// 四级顺序：页面登记的处理器 → 页面自己的按钮 → 媒体元素 → 置回播放态。
+    ///
+    /// **顺序不能反**：线上站的播放按钮是 React 受控组件，`click()` 在
+    /// 播放器树被重建后会点到旧节点上静默失效；而 mediaSession 的 `play`
+    /// 处理器内部走的是 `mediaSessionPlayRef.current()`，始终指向当前播放器。
     private static let playEntryJS = """
     var __foliaPlay = function(){
       try {
+        // 一级：页面通过 setActionHandler('play') 登记的真实入口。
+        // 线上 bundle 已核实走的就是这一条（`mediaSessionPlayRef`）。
         var fn = window.__foliaMediaCommand && window.__foliaMediaCommand.play;
-        if (typeof fn === 'function') { return fn; }
-        var sels = [
-          '[data-testid="player-toggle"]','[data-testid="player-play"]','[data-testid="play-button"]',
-          '[aria-label*="播放"]','[aria-label*="暂停"]','[aria-label*="Play"]','[aria-label*="Pause"]',
-          '.player-toggle','.play-button'
-        ];
-        for (var i = 0; i < sels.length; i += 1) {
-          var btn = document.querySelector(sels[i]);
-          if (!btn) { continue; }
-          var pressed = btn.getAttribute('aria-pressed');
-          var label = btn.getAttribute('aria-label') || '';
-          // 按钮此刻表示「暂停」（说明正在放）：不动，否则等于把歌按停。
-          if (pressed === 'true' || /暂停|Pause/i.test(label)) { continue; }
-          var click = function(){ try { btn.click(); } catch (e) {} };
-          return click;
+        if (typeof fn === 'function') {
+          return function(){ try { var r = fn({ action: 'play' }); if (r && r.catch) { r.catch(function(){}); } } catch (e) {} };
         }
+        // 二级：页面上真实存在的播放按钮。线上站没有 `player-toggle` 这类 testid，
+        // 只能按 aria-label / 可访问名找，且必须在 aria-pressed=true（正在放）时跳过，
+        // 否则等于把正在响的歌按停。
+        var btn = null;
+        var nodes = document.querySelectorAll('button,[role=\"button\"]');
+        for (var i = 0; i < nodes.length; i += 1) {
+          var n = nodes[i];
+          var label = (n.getAttribute('aria-label') || '') + ' ' + (n.getAttribute('title') || '') + ' ' + (n.textContent || '');
+          if (!/播放|暂停|Play|Pause/i.test(label)) { continue; }
+          if (n.getAttribute('aria-pressed') === 'true' || /暂停|Pause/i.test(label)) { continue; }
+          btn = n;
+          break;
+        }
+        if (btn) {
+          return function(){ try { btn.click(); } catch (e) {} };
+        }
+        // 三级：媒体元素（线上站 DOM 里没有，但别的版本可能有）。
         var v = document.querySelector('audio,video');
         if (v && v.paused && typeof v.play === 'function') {
           return function(){ try { var p = v.play(); if (p && p.catch) { p.catch(function(){}); } } catch (e) {} };
         }
+        // 四级：只改状态位，不动播放。它不会自己出声，但能让下一次探测
+        // 判成 media-playing 而不是 no-elements，避免恢复链被永久判死。
         var ms = navigator.mediaSession;
         if (ms && ms.playbackState !== undefined) {
           return function(){ try { ms.playbackState = 'playing'; } catch (e) {} };
@@ -2514,7 +2533,28 @@ final class WebContainerView: UIView {
     };
     """
 
+    /// 上一次给页面补放的时间。用来给 `resumeAudio` 节流。
+    ///
+    /// 线上站的 play handler 是**幂等**的（页内 `resumePlayback` 判断已在放就直接返回），
+    /// 但反复跨进程调它仍有代价：每次都会让播放器重建一次 `play()` 链路，
+    /// 在弱机上是能听出来的顿挫。6 秒三拍足够覆盖「切出去再回来」的真实恢复。
+    private var lastResumeAttempt: Date?
+
     private func resumeAudio(reason: String) {
+        // **节流：6 秒内最多补放一次。**
+        //
+        // `resumeAudio` 现在真的能调起页面播放了（之前 `__foliaMediaCommand`
+        // 在线上站根本不存在，等于空转）。而线上站**不一定写**
+        // `navigator.mediaSession.playbackState`，于是探测仍可能报
+        // `no-elements`。若不节流，保活每 2 秒就会调一次页面的 play handler，
+        // 用户听到的就是「每隔两秒被按一下」的卡顿。
+        //
+        // 6 秒 = 三拍保活。真正「点一次就恢复」的场景第一拍就生效；
+        // 只有连续三拍都没恢复才再试，那时的确需要重试。
+        if let last = lastResumeAttempt, Date().timeIntervalSince(last) < 6 {
+            return
+        }
+        lastResumeAttempt = Date()
         // 先叫醒 AudioContext 再补 play。
         //
         // 线上页是 WebAudio 出声：`<audio>` 只当解码源，接在 `AudioContext` 上。
@@ -2558,9 +2598,13 @@ final class WebContainerView: UIView {
               // 页面把真正的播放入口登记在 `navigator.mediaSession.setActionHandler('play')`，
               // 壳在 `audioKeeperScript` 里已经把它存进 `__foliaMediaCommand.play`。
               // 调它等价于用户点了播放，是这里唯一真正能让 WebAudio 引擎重新出声的动作。
+              //
+              // `__foliaPlay()` 返回的是**无参闭包**，不要往里传 `{ action }` ——
+              // 那会让 handler 拿到一个陌生参数（线上站的 handler 是无参箭头函数，
+              // 传了也没用，但别的版本可能拿首参当事件对象用）。
               var playFn = __foliaPlay();
               if (typeof playFn === 'function') {
-                try { playFn({ action: 'play' }); } catch (e) {}
+                try { playFn(); } catch (e) {}
                 if (window.__foliaAudioContexts) {
                   for (var k = 0; k < window.__foliaAudioContexts.length; k += 1) {
                     var ck = window.__foliaAudioContexts[k];
@@ -2660,32 +2704,46 @@ final class WebContainerView: UIView {
         let js = """
         (function(a){
           try {
+            \(Self.playEntryJS)
             var media = document.querySelector('audio,video');
-            var ms = navigator.mediaSession;
-            // 页面自身已经绑过 setActionHandler，优先借它的处理器：
-            // 它走的是 React 状态机，切歌后 UI、队列、歌词都会同步；
-            // 直接点 DOM 在页面重载后或按钮被隐藏时会静默失效。
-            if (a === 'play') {
-              var playFn = window.__foliaMediaCommand && window.__foliaMediaCommand.play;
-              if (playFn) { playFn(); return; }
-              if (media && media.play) { media.play(); return; }
-              if (ms) { try { ms.playbackState = 'playing'; } catch (e) {} }
+            var cmd = window.__foliaMediaCommand || {};
+            // 页面自己通过 setActionHandler 登记的处理器，走的是 React 状态机，
+            // 切歌后 UI、队列、歌词都会同步。线上站只登记了这四个动作。
+            var bound = a === 'play' ? cmd.play
+              : a === 'pause' ? cmd.pause
+              : a === 'next' ? cmd.next
+              : a === 'prev' ? cmd.prev
+              : null;
+            if (typeof bound === 'function') {
+              var r = bound({ action: a });
+              if (r && r.catch) { r.catch(function(){}); }
               return;
             }
+            if (a === 'toggle') {
+              // `playbackState` 是页面自己维护的，比 DOM 可靠得多。
+              var ms = navigator.mediaSession;
+              var st = ms && ms.playbackState;
+              if (st === 'playing') {
+                if (typeof cmd.pause === 'function') { cmd.pause(); return; }
+              } else {
+                var play = __foliaPlay();
+                if (play) { play(); return; }
+              }
+            }
+            if (a === 'play') {
+              var p = __foliaPlay();
+              if (p) { p(); return; }
+            }
             if (a === 'pause') {
-              var pauseFn = window.__foliaMediaCommand && window.__foliaMediaCommand.pause;
-              if (pauseFn) { pauseFn(); return; }
               if (media && media.pause) { media.pause(); return; }
               return;
             }
-            var fn = window.__foliaMediaCommand && window.__foliaMediaCommand[a];
-            if (fn) { fn(); return; }
-            // 兜底：界面上没有暴露接口时，按 data-testid / aria-label 点按钮。
+            // 上一首 / 下一首只能靠界面按钮：线上站没有暴露任何全局切歌接口。
             var sel = a === 'next'
-              ? ['[data-testid="player-next"]','[aria-label*="下一"]','[aria-label*="Next"]']
+              ? ['[aria-label*="下一"]','[aria-label*="Next"]']
               : a === 'prev'
-                ? ['[data-testid="player-prev"]','[aria-label*="上一"]','[aria-label*="Previous"]']
-                : ['[data-testid="player-toggle"]','[aria-label*="播放"]','[aria-label*="暂停"]'];
+                ? ['[aria-label*="上一"]','[aria-label*="Previous"]']
+                : [];
             for (var i = 0; i < sel.length; i += 1) {
               var el = document.querySelector(sel[i]);
               if (el) { el.click(); return; }
@@ -3125,23 +3183,47 @@ final class WebContainerView: UIView {
             }
           } catch (e) {}
 
-          // 记录页面自身的 MediaSession 处理器，供锁屏按钮直接调用。
+          // 记录页面自身的 MediaSession 处理器，供锁屏按钮与音频恢复直接调用。
+          //
+          // **这是线上站唯一真实存在的播放入口。** 反查过线上 bundle：
+          // 播放/暂停由 React 闭包里的 `mediaSessionPlayRef` 承担，通过
+          // `navigator.mediaSession.setActionHandler('play', ...)` 登记；
+          // 页面**从未**暴露过 `window.__foliaMediaCommand`（整个 bundle 里
+          // `__folia*` 只有 `__folia_current_time`）。之前所有「调页面播放入口」
+          // 的兜底因此全是空转 —— 日志 10-24-58Z 里 4 分 39 秒无声就是这么来的。
+          //
+          // **必须装在实例上而不是原型上，且必须只装一次。** 本脚本会注入两次
+          //（`atDocumentStart` + `didFinish`）；若每次都用当前值再 `bind` 一次覆盖，
+          // 第二次包住的就是自己，调用会无限递归。所以用 `__foliaWrapped` 门控。
           var handlers = window.__foliaMediaCommand = window.__foliaMediaCommand || {};
           try {
             var ms = navigator.mediaSession;
             if (ms && ms.setActionHandler) {
-              ['play','pause','previoustrack','nexttrack'].forEach(function(name){
-                try {
-                  var prev = ms.setActionHandler.bind(ms);
-                  var wrapped = function(detail){
-                    if (typeof detail === 'function') {
-                      handlers[name === 'previoustrack' ? 'prev' : name === 'nexttrack' ? 'next' : name] = detail;
+              // **已装过就不再重装，但必须保持引用一致。**
+              //
+              // 包装器闭包里捕获的是 `handlers` 这个变量。本脚本会注入两次，
+              // 第二次执行时 `window.__foliaMediaCommand` 是同一个对象，所以
+              // 「已装过就直接跳过」不会让记录丢失；而若在这里摘掉重装，
+              // 页面在两次注入之间登记过的 handler 就会永远丢失（页面不会再登记
+              // 同一个 effect）。所以只在没有包装时安装。
+              if (!ms.setActionHandler.__foliaWrapped) {
+                var prev = ms.setActionHandler;
+                var wrapped = function(detail){
+                  try {
+                    var key = arguments[0];
+                    if (typeof detail === 'function' && typeof key === 'string') {
+                      if (key === 'play') { handlers.play = detail; }
+                      else if (key === 'pause') { handlers.pause = detail; }
+                      else if (key === 'previoustrack') { handlers.prev = detail; }
+                      else if (key === 'nexttrack') { handlers.next = detail; }
                     }
-                    return prev(detail);
-                  };
-                  ms.setActionHandler = wrapped;
-                } catch (e) {}
-              });
+                  } catch (e) {}
+                  return prev.apply(ms, arguments);
+                };
+                wrapped.__foliaWrapped = true;
+                wrapped.__foliaRaw = prev;
+                ms.setActionHandler = wrapped;
+              }
             }
           } catch (e) {}
 
