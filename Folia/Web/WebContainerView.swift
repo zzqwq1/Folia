@@ -2893,31 +2893,18 @@ final class WebContainerView: UIView {
             // 双 deck 交叉淡化（automix）下有两个 `<audio>`：一个在放、一个待命。
             // 待命的那个同样是 `paused` 且有 `src`，**不能**一起 `play()` ——
             // 那会让两首歌同时出声，用户听到的是爆音和互相抢拍。
-            // 所以只认「刚才确实在出声的那一个」：优先用进后台前记下的元素，
-            // 其次挑 `currentTime > 0` 的那个（待命 deck 还停在 0）。
-            // **递归查找Shadow DOM里的audio元素。**
-            function collectAudio(root, out) {
-              try {
-                var nodes = root.querySelectorAll('audio');
-                for (var n = 0; n < nodes.length; n += 1) { out.push(nodes[n]); }
-                var all = root.querySelectorAll('*');
-                for (var i = 0; i < all.length; i += 1) {
-                  if (all[i].shadowRoot) {
-                    collectAudio(all[i].shadowRoot, out);
-                  }
-                }
-              } catch (e) {}
-            }
-            var list = [];
-            collectAudio(document, list);
+            // 所以只认「刚才确实在出声的那一个」：优先用__foliaLastAudio
             var pick = window.__foliaLastAudio;
             var chosen = null;
             var pickSrc = pick ? (pick.currentSrc || pick.src) : null;
-            if (pick && pickSrc && !pick.ended && pick.paused && pick.isConnected) {
+            // 不检查isConnected，因为纯WebAudio页面的audio元素不在DOM里
+            if (pick && pickSrc && !pick.ended && pick.paused) {
               chosen = pick;
             } else {
-              for (var i = 0; i < list.length; i += 1) {
-                var el = list[i];
+              // 轻量查找，不递归Shadow DOM
+              var nodes = document.querySelectorAll('audio');
+              for (var i = 0; i < nodes.length; i += 1) {
+                var el = nodes[i];
                 var elSrc = el.currentSrc || el.src;
                 if (!el.paused || el.ended || !elSrc) { continue; }
                 if (!chosen || (el.currentTime || 0) > (chosen.currentTime || 0)) { chosen = el; }
@@ -3009,17 +2996,18 @@ final class WebContainerView: UIView {
                     }
                   } catch (e) {}
                 }
-                var list = [];
-                collectAudio(document, list);
                 var el = window.__foliaLastAudio;
-                if (!el || !el.isConnected) {
-                  for (var i = 0; i < list.length; i += 1) {
-                    var x = list[i];
-                    if (!x.src || x.ended) { continue; }
+                if (!el) {
+                  // 轻量查找
+                  var nodes = document.querySelectorAll('audio');
+                  for (var i = 0; i < nodes.length; i += 1) {
+                    var x = nodes[i];
+                    var src = x.currentSrc || x.src;
+                    if (!src || x.ended) { continue; }
                     if (!el || (x.currentTime || 0) > (el.currentTime || 0)) { el = x; }
                   }
                 }
-                if (!el || !el.src || el.ended) {
+                if (!el) {
                   // 与上面同理：纯 WebAudio 的页面没有 `<audio>` 可用，
                   // 这一拍也必须回到页面自己的播放入口，否则第二次补放同样落空。
                   var fn = __foliaPlay();
@@ -3796,8 +3784,8 @@ final class WebContainerView: UIView {
             var el = e.target;
             if (!el || el.tagName !== 'AUDIO') { return; }
             window.__foliaHeard = false;
-            // 页面重建播放器树时会丢掉这个指针，按当前 src 逐个比对重新绑定。
-            if (el.paused && el.src && (!window.__foliaLastAudio || !window.__foliaLastAudio.isConnected)) {
+            // 不检查isConnected，因为纯WebAudio页面的audio元素不在DOM里
+            if (el.paused && (el.currentSrc || el.src)) {
               window.__foliaLastAudio = el;
             }
             // 播完的 pause 不算用户意图，否则一轮播完就不再续播。
