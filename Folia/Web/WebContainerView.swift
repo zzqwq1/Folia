@@ -5447,6 +5447,10 @@ extension WebContainerView {
           if (window.__foliaNativePlayerBridgeInstalled) return;
           window.__foliaNativePlayerBridgeInstalled = true;
 
+          // 设置iOS安全渲染模式：页面据此降低歌词画布、花火等效果的内存占用，减少闪退
+          window.__foliaIosSafe = /iPhone|iPad|iPod/.test(navigator.userAgent);
+          window.__foliaSafeMode = false;
+
           function nativeHandler() {
             return window.webkit && window.webkit.messageHandlers &&
                    window.webkit.messageHandlers.foliaPlayer;
