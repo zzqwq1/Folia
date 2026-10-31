@@ -1,0 +1,254 @@
+sha: 57a59b5e734c62297b743eab1b320d6fc083c072
+run: 41218184921
+=== ERROR LINES ===
+=== TAIL 300 ===
+Command line invocation:
+    /Applications/Xcode_16.4.app/Contents/Developer/usr/bin/xcodebuild -project Folia.xcodeproj -scheme Folia -configuration Release -sdk iphoneos -destination generic/platform=iOS -derivedDataPath /Users/runner/work/Folia/Folia/build CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY= CODE_SIGN_ENTITLEMENTS= build
+
+Build settings from command line:
+    CODE_SIGN_ENTITLEMENTS = 
+    CODE_SIGN_IDENTITY = 
+    CODE_SIGNING_ALLOWED = NO
+    CODE_SIGNING_REQUIRED = NO
+    SDKROOT = iphoneos18.5
+
+note: Using codesigning identity override: 
+ComputePackagePrebuildTargetDependencyGraph
+
+Prepare packages
+
+CreateBuildRequest
+
+SendProjectDescription
+
+CreateBuildOperation
+
+ComputeTargetDependencyGraph
+note: Building targets in dependency order
+note: Target dependency graph (1 target)
+    Target 'Folia' in project 'Folia' (no dependencies)
+
+GatherProvisioningInputs
+
+CreateBuildDescription
+
+ExecuteExternalTool /Applications/Xcode_16.4.app/Contents/Developer/usr/bin/actool --print-asset-tag-combinations --output-format xml1 /Users/runner/work/Folia/Folia/Folia/Resources/Assets.xcassets
+
+ExecuteExternalTool /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang -v -E -dM -isysroot /Applications/Xcode_16.4.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.5.sdk -x c -c /dev/null
+
+ExecuteExternalTool /Applications/Xcode_16.4.app/Contents/Developer/usr/bin/actool --version --output-format xml1
+
+ExecuteExternalTool /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc --version
+
+ExecuteExternalTool /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld -version_details
+
+Build description signature: 5a005302d7f5b67acdd9e5f205dca951
+Build description path: /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/XCBuildData/5a005302d7f5b67acdd9e5f205dca951.xcbuilddata
+ClangStatCache /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang-stat-cache /Applications/Xcode_16.4.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.5.sdk /Users/runner/work/Folia/Folia/build/SDKStatCaches.noindex/iphoneos18.5-22F76-a529daf784b3616c7c04a36aeb7f5c05.sdkstatcache
+    cd /Users/runner/work/Folia/Folia/Folia.xcodeproj
+    /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang-stat-cache /Applications/Xcode_16.4.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.5.sdk -o /Users/runner/work/Folia/Folia/build/SDKStatCaches.noindex/iphoneos18.5-22F76-a529daf784b3616c7c04a36aeb7f5c05.sdkstatcache
+
+CreateBuildDirectory /Users/runner/work/Folia/Folia/build/Build/Products
+    cd /Users/runner/work/Folia/Folia/Folia.xcodeproj
+    builtin-create-build-directory /Users/runner/work/Folia/Folia/build/Build/Products
+
+CreateBuildDirectory /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex
+    cd /Users/runner/work/Folia/Folia/Folia.xcodeproj
+    builtin-create-build-directory /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex
+
+WriteAuxiliaryFile /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia-702a08d9b10b598ef98f5420c88bb266-VFS-iphoneos/all-product-headers.yaml
+    cd /Users/runner/work/Folia/Folia/Folia.xcodeproj
+    write-file /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia-702a08d9b10b598ef98f5420c88bb266-VFS-iphoneos/all-product-headers.yaml
+
+CreateBuildDirectory /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos
+    cd /Users/runner/work/Folia/Folia/Folia.xcodeproj
+    builtin-create-build-directory /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos
+
+CreateBuildDirectory /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/EagerLinkingTBDs/Release-iphoneos
+    cd /Users/runner/work/Folia/Folia/Folia.xcodeproj
+    builtin-create-build-directory /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/EagerLinkingTBDs/Release-iphoneos
+
+WriteAuxiliaryFile /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia_const_extract_protocols.json (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    write-file /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia_const_extract_protocols.json
+
+WriteAuxiliaryFile /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia.SwiftFileList (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    write-file /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia.SwiftFileList
+
+WriteAuxiliaryFile /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia.SwiftConstValuesFileList (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    write-file /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia.SwiftConstValuesFileList
+
+WriteAuxiliaryFile /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia.LinkFileList (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    write-file /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia.LinkFileList
+
+WriteAuxiliaryFile /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia-OutputFileMap.json (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    write-file /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia-OutputFileMap.json
+
+WriteAuxiliaryFile /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Folia.hmap (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    write-file /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Folia.hmap
+
+WriteAuxiliaryFile /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Folia.DependencyStaticMetadataFileList (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    write-file /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Folia.DependencyStaticMetadataFileList
+
+WriteAuxiliaryFile /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Folia.DependencyMetadataFileList (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    write-file /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Folia.DependencyMetadataFileList
+
+WriteAuxiliaryFile /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Folia-project-headers.hmap (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    write-file /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Folia-project-headers.hmap
+
+WriteAuxiliaryFile /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Folia-own-target-headers.hmap (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    write-file /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Folia-own-target-headers.hmap
+
+WriteAuxiliaryFile /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Folia-generated-files.hmap (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    write-file /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Folia-generated-files.hmap
+
+WriteAuxiliaryFile /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Folia-all-target-headers.hmap (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    write-file /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Folia-all-target-headers.hmap
+
+WriteAuxiliaryFile /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Folia-all-non-framework-target-headers.hmap (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    write-file /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Folia-all-non-framework-target-headers.hmap
+
+MkDir /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    /bin/mkdir -p /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app
+
+MkDir /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/assetcatalog_output/thinned (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    /bin/mkdir -p /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/assetcatalog_output/thinned
+
+MkDir /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/assetcatalog_output/unthinned (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    /bin/mkdir -p /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/assetcatalog_output/unthinned
+
+GenerateAssetSymbols /Users/runner/work/Folia/Folia/Folia/Resources/Assets.xcassets (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    /Applications/Xcode_16.4.app/Contents/Developer/usr/bin/actool /Users/runner/work/Folia/Folia/Folia/Resources/Assets.xcassets --compile /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app --output-format human-readable-text --notices --warnings --export-dependency-info /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/assetcatalog_dependencies --output-partial-info-plist /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/assetcatalog_generated_info.plist --app-icon AppIcon --compress-pngs --enable-on-demand-resources YES --development-region en --target-device iphone --target-device ipad --minimum-deployment-target 16.0 --platform iphoneos --bundle-identifier app.folia.web --generate-swift-asset-symbol-extensions NO --generate-swift-asset-symbols /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/DerivedSources/GeneratedAssetSymbols.swift --generate-objc-asset-symbols /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/DerivedSources/GeneratedAssetSymbols.h --generate-asset-symbol-index /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/DerivedSources/GeneratedAssetSymbols-Index.plist
+/* com.apple.actool.compilation-results */
+/Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/DerivedSources/GeneratedAssetSymbols-Index.plist
+/Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/DerivedSources/GeneratedAssetSymbols.h
+/Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/DerivedSources/GeneratedAssetSymbols.swift
+
+
+CpResource /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app/www /Users/runner/work/Folia/Folia/Folia/www (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    builtin-copy -exclude .DS_Store -exclude CVS -exclude .svn -exclude .git -exclude .hg -resolve-src-symlinks /Users/runner/work/Folia/Folia/Folia/www /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app
+
+CompileAssetCatalogVariant thinned /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app /Users/runner/work/Folia/Folia/Folia/Resources/Assets.xcassets (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    /Applications/Xcode_16.4.app/Contents/Developer/usr/bin/actool /Users/runner/work/Folia/Folia/Folia/Resources/Assets.xcassets --compile /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/assetcatalog_output/thinned --output-format human-readable-text --notices --warnings --export-dependency-info /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/assetcatalog_dependencies_thinned --output-partial-info-plist /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/assetcatalog_generated_info.plist_thinned --app-icon AppIcon --compress-pngs --enable-on-demand-resources YES --development-region en --target-device iphone --target-device ipad --minimum-deployment-target 16.0 --platform iphoneos
+/* com.apple.actool.compilation-results */
+/Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/assetcatalog_generated_info.plist_thinned
+/Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/assetcatalog_output/thinned/AppIcon60x60@2x.png
+/Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/assetcatalog_output/thinned/AppIcon76x76@2x~ipad.png
+/Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/assetcatalog_output/thinned/Assets.car
+
+
+SwiftDriver Folia normal arm64 com.apple.xcode.tools.swift.compiler (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    builtin-SwiftDriver -- /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc -module-name Folia -O -whole-module-optimization -enforce-exclusivity\=checked @/Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia.SwiftFileList -enable-bare-slash-regex -enable-experimental-feature DebugDescriptionMacro -sdk /Applications/Xcode_16.4.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.5.sdk -target arm64-apple-ios16.0 -g -module-cache-path /Users/runner/work/Folia/Folia/build/ModuleCache.noindex -Xfrontend -serialize-debugging-options -swift-version 5 -I /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos -F /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos -emit-localized-strings -emit-localized-strings-path /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64 -c -num-threads 3 -Xcc -ivfsstatcache -Xcc /Users/runner/work/Folia/Folia/build/SDKStatCaches.noindex/iphoneos18.5-22F76-a529daf784b3616c7c04a36aeb7f5c05.sdkstatcache -output-file-map /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia-OutputFileMap.json -use-frontend-parseable-output -save-temps -no-color-diagnostics -serialize-diagnostics -emit-dependencies -emit-module -emit-module-path /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia.swiftmodule -validate-clang-modules-once -clang-build-session-file /Users/runner/work/Folia/Folia/build/ModuleCache.noindex/Session.modulevalidation -Xcc -I/Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/swift-overrides.hmap -emit-const-values -Xfrontend -const-gather-protocols-file -Xfrontend /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia_const_extract_protocols.json -Xcc -iquote -Xcc /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Folia-generated-files.hmap -Xcc -I/Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Folia-own-target-headers.hmap -Xcc -I/Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Folia-all-target-headers.hmap -Xcc -iquote -Xcc /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Folia-project-headers.hmap -Xcc -I/Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/include -Xcc -I/Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/DerivedSources-normal/arm64 -Xcc -I/Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/DerivedSources/arm64 -Xcc -I/Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/DerivedSources -emit-objc-header -emit-objc-header-path /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia-Swift.h -working-directory /Users/runner/work/Folia/Folia -no-emit-module-separately-wmo
+
+SwiftCompile normal arm64 Compiling\ ContentView.swift,\ CrashLog.swift,\ FoliaWebApp.swift,\ QRTool.swift,\ WebContainerView.swift,\ WebShellState.swift,\ GeneratedAssetSymbols.swift /Users/runner/work/Folia/Folia/Folia/Views/ContentView.swift /Users/runner/work/Folia/Folia/Folia/App/CrashLog.swift /Users/runner/work/Folia/Folia/Folia/App/FoliaWebApp.swift /Users/runner/work/Folia/Folia/Folia/Web/QRTool.swift /Users/runner/work/Folia/Folia/Folia/Web/WebContainerView.swift /Users/runner/work/Folia/Folia/Folia/App/WebShellState.swift /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/DerivedSources/GeneratedAssetSymbols.swift (in target 'Folia' from project 'Folia')
+CompileSwift normal arm64 (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    
+/Users/runner/work/Folia/Folia/Folia/Views/ContentView.swift:128:16: warning: 'contentEdgeInsets' was deprecated in iOS 15.0: This property is ignored when using UIButtonConfiguration
+        button.contentEdgeInsets = UIEdgeInsets(top: 8, left: 14, bottom: 8, right: 14)
+               ^
+/Users/runner/work/Folia/Folia/Folia/Web/WebContainerView.swift:1259:35: warning: immutable value 'self' was never used; consider replacing with '_' or removing it
+                        guard let self, let current = currentURL as? String,
+                              ~~~~^~~~
+                              _
+
+SwiftDriver\ Compilation Folia normal arm64 com.apple.xcode.tools.swift.compiler (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    builtin-Swift-Compilation -- /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc -module-name Folia -O -whole-module-optimization -enforce-exclusivity\=checked @/Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia.SwiftFileList -enable-bare-slash-regex -enable-experimental-feature DebugDescriptionMacro -sdk /Applications/Xcode_16.4.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.5.sdk -target arm64-apple-ios16.0 -g -module-cache-path /Users/runner/work/Folia/Folia/build/ModuleCache.noindex -Xfrontend -serialize-debugging-options -swift-version 5 -I /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos -F /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos -emit-localized-strings -emit-localized-strings-path /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64 -c -num-threads 3 -Xcc -ivfsstatcache -Xcc /Users/runner/work/Folia/Folia/build/SDKStatCaches.noindex/iphoneos18.5-22F76-a529daf784b3616c7c04a36aeb7f5c05.sdkstatcache -output-file-map /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia-OutputFileMap.json -use-frontend-parseable-output -save-temps -no-color-diagnostics -serialize-diagnostics -emit-dependencies -emit-module -emit-module-path /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia.swiftmodule -validate-clang-modules-once -clang-build-session-file /Users/runner/work/Folia/Folia/build/ModuleCache.noindex/Session.modulevalidation -Xcc -I/Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/swift-overrides.hmap -emit-const-values -Xfrontend -const-gather-protocols-file -Xfrontend /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia_const_extract_protocols.json -Xcc -iquote -Xcc /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Folia-generated-files.hmap -Xcc -I/Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Folia-own-target-headers.hmap -Xcc -I/Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Folia-all-target-headers.hmap -Xcc -iquote -Xcc /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Folia-project-headers.hmap -Xcc -I/Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/include -Xcc -I/Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/DerivedSources-normal/arm64 -Xcc -I/Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/DerivedSources/arm64 -Xcc -I/Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/DerivedSources -emit-objc-header -emit-objc-header-path /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia-Swift.h -working-directory /Users/runner/work/Folia/Folia -no-emit-module-separately-wmo
+
+LinkAssetCatalog /Users/runner/work/Folia/Folia/Folia/Resources/Assets.xcassets (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    builtin-linkAssetCatalog --thinned /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/assetcatalog_output/thinned --thinned-dependencies /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/assetcatalog_dependencies_thinned --thinned-info-plist-content /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/assetcatalog_generated_info.plist_thinned --unthinned /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/assetcatalog_output/unthinned --unthinned-dependencies /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/assetcatalog_dependencies_unthinned --unthinned-info-plist-content /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/assetcatalog_generated_info.plist_unthinned --output /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app --plist-output /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/assetcatalog_generated_info.plist
+note: Emplaced /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app/Assets.car (in target 'Folia' from project 'Folia')
+note: Emplaced /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app/AppIcon76x76@2x~ipad.png (in target 'Folia' from project 'Folia')
+note: Emplaced /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app/AppIcon60x60@2x.png (in target 'Folia' from project 'Folia')
+
+ProcessInfoPlistFile /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app/Info.plist /Users/runner/work/Folia/Folia/Folia/Info.plist (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    builtin-infoPlistUtility /Users/runner/work/Folia/Folia/Folia/Info.plist -producttype com.apple.product-type.application -genpkginfo /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app/PkgInfo -expandbuildsettings -format binary -platform iphoneos -additionalcontentfile /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/assetcatalog_generated_info.plist -requiredArchitecture arm64 -o /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app/Info.plist
+
+SwiftDriverJobDiscovery normal arm64 Compiling ContentView.swift, CrashLog.swift, FoliaWebApp.swift, QRTool.swift, WebContainerView.swift, WebShellState.swift, GeneratedAssetSymbols.swift (in target 'Folia' from project 'Folia')
+
+SwiftDriver\ Compilation\ Requirements Folia normal arm64 com.apple.xcode.tools.swift.compiler (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    builtin-Swift-Compilation-Requirements -- /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc -module-name Folia -O -whole-module-optimization -enforce-exclusivity\=checked @/Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia.SwiftFileList -enable-bare-slash-regex -enable-experimental-feature DebugDescriptionMacro -sdk /Applications/Xcode_16.4.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.5.sdk -target arm64-apple-ios16.0 -g -module-cache-path /Users/runner/work/Folia/Folia/build/ModuleCache.noindex -Xfrontend -serialize-debugging-options -swift-version 5 -I /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos -F /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos -emit-localized-strings -emit-localized-strings-path /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64 -c -num-threads 3 -Xcc -ivfsstatcache -Xcc /Users/runner/work/Folia/Folia/build/SDKStatCaches.noindex/iphoneos18.5-22F76-a529daf784b3616c7c04a36aeb7f5c05.sdkstatcache -output-file-map /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia-OutputFileMap.json -use-frontend-parseable-output -save-temps -no-color-diagnostics -serialize-diagnostics -emit-dependencies -emit-module -emit-module-path /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia.swiftmodule -validate-clang-modules-once -clang-build-session-file /Users/runner/work/Folia/Folia/build/ModuleCache.noindex/Session.modulevalidation -Xcc -I/Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/swift-overrides.hmap -emit-const-values -Xfrontend -const-gather-protocols-file -Xfrontend /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia_const_extract_protocols.json -Xcc -iquote -Xcc /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Folia-generated-files.hmap -Xcc -I/Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Folia-own-target-headers.hmap -Xcc -I/Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Folia-all-target-headers.hmap -Xcc -iquote -Xcc /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Folia-project-headers.hmap -Xcc -I/Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/include -Xcc -I/Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/DerivedSources-normal/arm64 -Xcc -I/Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/DerivedSources/arm64 -Xcc -I/Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/DerivedSources -emit-objc-header -emit-objc-header-path /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia-Swift.h -working-directory /Users/runner/work/Folia/Folia -no-emit-module-separately-wmo
+
+SwiftMergeGeneratedHeaders /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/DerivedSources/Folia-Swift.h /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia-Swift.h (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    builtin-swiftHeaderTool -arch arm64 /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia-Swift.h -o /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/DerivedSources/Folia-Swift.h
+
+Copy /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.swiftmodule/arm64-apple-ios.swiftdoc /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia.swiftdoc (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    builtin-copy -exclude .DS_Store -exclude CVS -exclude .svn -exclude .git -exclude .hg -resolve-src-symlinks -rename /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia.swiftdoc /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.swiftmodule/arm64-apple-ios.swiftdoc
+
+Copy /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.swiftmodule/arm64-apple-ios.swiftmodule /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia.swiftmodule (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    builtin-copy -exclude .DS_Store -exclude CVS -exclude .svn -exclude .git -exclude .hg -resolve-src-symlinks -rename /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia.swiftmodule /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.swiftmodule/arm64-apple-ios.swiftmodule
+
+Copy /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.swiftmodule/arm64-apple-ios.abi.json /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia.abi.json (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    builtin-copy -exclude .DS_Store -exclude CVS -exclude .svn -exclude .git -exclude .hg -resolve-src-symlinks -rename /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia.abi.json /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.swiftmodule/arm64-apple-ios.abi.json
+
+Copy /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.swiftmodule/Project/arm64-apple-ios.swiftsourceinfo /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia.swiftsourceinfo (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    builtin-copy -exclude .DS_Store -exclude CVS -exclude .svn -exclude .git -exclude .hg -resolve-src-symlinks -rename /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia.swiftsourceinfo /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.swiftmodule/Project/arm64-apple-ios.swiftsourceinfo
+
+Ld /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app/Folia normal (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang -Xlinker -reproducible -target arm64-apple-ios16.0 -isysroot /Applications/Xcode_16.4.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.5.sdk -Os -L/Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/EagerLinkingTBDs/Release-iphoneos -L/Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos -F/Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/EagerLinkingTBDs/Release-iphoneos -F/Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos -filelist /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia.LinkFileList -Xlinker -rpath -Xlinker @executable_path/Frameworks -dead_strip -Xlinker -object_path_lto -Xlinker /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia_lto.o -Xlinker -dependency_info -Xlinker /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia_dependency_info.dat -fobjc-link-runtime -L/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/iphoneos -L/usr/lib/swift -Xlinker -add_ast_path -Xlinker /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia.swiftmodule -o /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app/Folia
+
+CopySwiftLibs /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    builtin-swiftStdLibTool --copy --verbose --scan-executable /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app/Folia --scan-folder /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app/Frameworks --scan-folder /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app/PlugIns --scan-folder /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app/SystemExtensions --scan-folder /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app/Extensions --platform iphoneos --toolchain /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain --destination /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app/Frameworks --strip-bitcode --strip-bitcode-tool /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/bitcode_strip --emit-dependency-info /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/SwiftStdLibToolInputDependencies.dep --filter-for-swift-os
+Ignoring --strip-bitcode because --sign was not passed
+
+ExtractAppIntentsMetadata (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/appintentsmetadataprocessor --toolchain-dir /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain --module-name Folia --sdk-root /Applications/Xcode_16.4.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.5.sdk --xcode-version 16F6 --platform-family iOS --deployment-target 16.0 --bundle-identifier app.folia.web --output /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app --target-triple arm64-apple-ios16.0 --binary-file /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app/Folia --dependency-file /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia_dependency_info.dat --stringsdata-file /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/ExtractedAppShortcutsMetadata.stringsdata --source-file-list /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia.SwiftFileList --metadata-file-list /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Folia.DependencyMetadataFileList --static-metadata-file-list /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Folia.DependencyStaticMetadataFileList --swift-const-vals-list /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Objects-normal/arm64/Folia.SwiftConstValuesFileList --compile-time-extraction --deployment-aware-processing --validate-assistant-intents --no-app-shortcuts-localization
+2026-10-31 16:09:05.962 appintentsmetadataprocessor[6306:23427] Starting appintentsmetadataprocessor export
+2026-10-31 16:09:05.972 appintentsmetadataprocessor[6306:23427] warning: Metadata extraction skipped. No AppIntents.framework dependency found.
+
+GenerateDSYMFile /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app.dSYM /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app/Folia (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/dsymutil /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app/Folia -o /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app.dSYM
+
+AppIntentsSSUTraining (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/appintentsnltrainingprocessor --infoplist-path /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app/Info.plist --temp-dir-path /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/ssu --bundle-id app.folia.web --product-path /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app --extracted-metadata-path /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app/Metadata.appintents --metadata-file-list /Users/runner/work/Folia/Folia/build/Build/Intermediates.noindex/Folia.build/Release-iphoneos/Folia.build/Folia.DependencyMetadataFileList --archive-ssu-assets
+2026-10-31 16:09:06.024 appintentsnltrainingprocessor[6308:23432] Parsing options for appintentsnltrainingprocessor
+2026-10-31 16:09:06.026 appintentsnltrainingprocessor[6308:23432] No AppShortcuts found - Skipping.
+
+RegisterExecutionPolicyException /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    builtin-RegisterExecutionPolicyException /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app
+
+Validate /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    builtin-validationUtility /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app -infoplist-subpath Info.plist
+
+Touch /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app (in target 'Folia' from project 'Folia')
+    cd /Users/runner/work/Folia/Folia
+    /usr/bin/touch -c /Users/runner/work/Folia/Folia/build/Build/Products/Release-iphoneos/Folia.app
+
+note: Disabling previews because SWIFT_VERSION is set and SWIFT_OPTIMIZATION_LEVEL=-O, expected -Onone (in target 'Folia' from project 'Folia')
+** BUILD SUCCEEDED **
+
