@@ -5,6 +5,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: macos-15
@@ -66,22 +69,8 @@ jobs:
         if: failure()
         run: |
           echo "=== ERROR LINES ==="
-          grep -nE "error:|error " /tmp/xcodebuild.log | head -n 80 || true
+          grep -nE "error:" /tmp/xcodebuild.log | head -n 80 || true
           echo "=== END ==="
-          # 日志推到固定分支，便于不进 GitHub 界面也能取到
-          {
-            echo "=== ERROR LINES ==="
-            grep -nE "error:" /tmp/xcodebuild.log | head -n 60 || true
-            echo "=== TAIL ==="
-            tail -n 200 /tmp/xcodebuild.log || true
-          } > "$GITHUB_WORKSPACE/.build-error.txt"
-          cd "$GITHUB_WORKSPACE"
-          git config user.name "ci-bot"
-          git config user.email "ci-bot@users.noreply.github.com"
-          git checkout -q -B ci-log
-          git add -f .build-error.txt
-          git commit -q -m "ci: build error log for ${GITHUB_SHA}" || true
-          git push -q -f origin ci-log || true
 
       - name: Upload compiler log
         if: always()
@@ -90,6 +79,26 @@ jobs:
           name: xcodebuild-log
           path: /tmp/xcodebuild.log
           if-no-files-found: warn
+
+      - name: Store compiler log on branch
+        if: always()
+        continue-on-error: true
+        run: |
+          mkdir -p ci-logs
+          {
+            echo "sha: ${GITHUB_SHA}"
+            echo "run: ${GITHUB_RUN_ID}"
+            echo "=== ERROR LINES ==="
+            grep -nE "error:" /tmp/xcodebuild.log | head -n 80 || true
+            echo "=== TAIL 300 ==="
+            tail -n 300 /tmp/xcodebuild.log || true
+          } > ci-logs/last-build.txt
+          git checkout --orphan ci-log-tmp
+          git rm -rq --cached . || true
+          git add -f ci-logs/last-build.txt
+          git -c user.name=ci-bot -c user.email=ci-bot@users.noreply.github.com \
+            commit -q -m "ci: compiler log ${GITHUB_SHA}"
+          git push -q -f origin ci-log-tmp:ci-log
 
       - name: Wrap into IPA
         run: |
