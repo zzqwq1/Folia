@@ -2489,26 +2489,18 @@ final class WebContainerView: UIView {
         let js = """
         (function(){
           try {
-            // **递归查找Shadow DOM里的媒体元素。**
-            function collectMedia(root, out) {
-              try {
-                var nodes = root.querySelectorAll('audio,video');
-                for (var n = 0; n < nodes.length; n += 1) { out.push(nodes[n]); }
-                var all = root.querySelectorAll('*');
-                for (var i = 0; i < all.length; i += 1) {
-                  if (all[i].shadowRoot) {
-                    collectMedia(all[i].shadowRoot, out);
-                  }
-                }
-              } catch (e) {}
+            // 优先用__foliaLastAudio，避免遍历整个DOM树
+            var el = window.__foliaLastAudio;
+            if (el) {
+              var src = el.currentSrc || el.src;
+              if (src && !el.ended && !el.paused) { return 'playing'; }
             }
-            var list = [];
-            collectMedia(document, list);
-            for (var i = 0; i < list.length; i += 1) {
-              var el = list[i];
-              if (!el.src || el.ended) { continue; }
-              // 有一条带着源、没被用户按停的元素：播放器自己没停。
-              if (!el.paused && !el.ended) { return 'playing'; }
+            // 轻量查找
+            var nodes = document.querySelectorAll('audio,video');
+            for (var i = 0; i < nodes.length; i += 1) {
+              var node = nodes[i];
+              var src = node.currentSrc || node.src;
+              if (src && !node.ended && !node.paused) { return 'playing'; }
             }
             return 'idle';
           } catch (e) { return 'error'; }
@@ -2533,27 +2525,26 @@ final class WebContainerView: UIView {
     private func isPlaybackClockAdvancing(_ completion: @escaping (Bool) -> Void) {
         let js = """
         (function(){
-          // **递归查找Shadow DOM里的audio元素。**
-          function collectAudio(root, out) {
-            try {
-              var nodes = root.querySelectorAll('audio');
-              for (var n = 0; n < nodes.length; n += 1) { out.push(nodes[n]); }
-              var all = root.querySelectorAll('*');
-              for (var i = 0; i < all.length; i += 1) {
-                if (all[i].shadowRoot) {
-                  collectAudio(all[i].shadowRoot, out);
-                }
-              }
-            } catch (e) {}
+          // 优先用__foliaLastAudio，避免遍历整个DOM树
+          var el = window.__foliaLastAudio;
+          if (el) {
+            var src = el.currentSrc || el.src;
+            if (src && !el.ended && !el.paused) {
+              window.__foliaClockT0 = el.currentTime;
+              window.__foliaClockEl = el;
+              return 'sampled';
+            }
           }
-          var list = [];
-          collectAudio(document, list);
-          for (var i = 0; i < list.length; i += 1) {
-            var el = list[i];
-            if (!el.src || el.ended || el.paused) { continue; }
-            window.__foliaClockT0 = el.currentTime;
-            window.__foliaClockEl = el;
-            return 'sampled';
+          // 轻量查找
+          var nodes = document.querySelectorAll('audio');
+          for (var i = 0; i < nodes.length; i += 1) {
+            var node = nodes[i];
+            var src = node.currentSrc || node.src;
+            if (src && !node.ended && !node.paused) {
+              window.__foliaClockT0 = node.currentTime;
+              window.__foliaClockEl = node;
+              return 'sampled';
+            }
           }
           // **没有 `<audio>` 不代表没在放。**
           //
@@ -3821,7 +3812,9 @@ final class WebContainerView: UIView {
           var lastState = '';
           var report = function(){
             try {
-              var el = document.querySelector('audio,video');
+              // 优先用__foliaLastAudio（可能不在DOM里）
+              var el = window.__foliaLastAudio;
+              if (!el) { el = document.querySelector('audio,video'); }
               var state = '';
               if (el) { state = el.paused ? 'paused' : 'playing'; }
               else if (navigator.mediaSession) { state = navigator.mediaSession.playbackState || ''; }
