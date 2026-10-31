@@ -59,6 +59,7 @@ final class NativePlayer: NSObject, WKScriptMessageHandler {
                                didReceive message: WKScriptMessage) {
         guard let body = message.body as? [String: Any] else { return }
         let cmd = body["cmd"] as? String ?? ""
+        CrashLog.note("NativePlayer: received cmd=\(cmd)")
 
         // 保存会话信息
         if let session = body["session"] as? String {
@@ -96,10 +97,12 @@ final class NativePlayer: NSObject, WKScriptMessageHandler {
     private func handleLoad(_ body: [String: Any]) {
         guard let urlString = body["url"] as? String,
               let url = URL(string: urlString) else {
+            CrashLog.note("NativePlayer: load failed, invalid url")
             sendEvent(type: "error", message: "invalid url")
             return
         }
 
+        CrashLog.note("NativePlayer: load url=\(urlString.prefix(100))")
         currentURL = urlString
         let position = body["position"] as? Double ?? 0
         let autoplay = body["autoplay"] as? Bool ?? true
@@ -128,6 +131,7 @@ final class NativePlayer: NSObject, WKScriptMessageHandler {
             guard let self else { return }
             switch item.status {
             case .readyToPlay:
+                CrashLog.note("NativePlayer: ready to play, duration=\(item.duration.seconds)")
                 self.sendEvent(type: "loaded", duration: item.duration.seconds)
                 if autoplay {
                     self.player?.play()
@@ -135,6 +139,7 @@ final class NativePlayer: NSObject, WKScriptMessageHandler {
                     self.sendEvent(type: "state", playing: true)
                 }
             case .failed:
+                CrashLog.note("NativePlayer: failed - \(item.error?.localizedDescription ?? "unknown")")
                 self.sendEvent(type: "error", message: item.error?.localizedDescription ?? "playback failed")
             default:
                 break
