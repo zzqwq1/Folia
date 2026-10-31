@@ -7,6 +7,18 @@ import UniformTypeIdentifiers
 
 /// 承载官方网页版的 WKWebView 容器。
 ///
+/// 本轮（2.1/212 之后）针对两条实测仍未修复的反馈做的结构性改动：
+/// 1. 「进抖音再回软件没声音」：根因不在探测，而在**音频会话在离开期间被系统没收后，
+///    回前台时没有任何一条路无条件把它重新激活** —— `AudioSessionController.didBecomeActive`
+///    的三条分支全部以 `isPlaying` 为门（手机背面朝上时 WebKit 会真的按停媒体元素，
+///    页面随后上报 `paused`，`isPlaying` 就永久为假），容器侧又以页面自报的健康状态为准。
+///    现在改成：离开过 App 且用户没亲手暂停 → 回前台**先无条件激活会话再判定**，
+///    `isPlaying` 一律由容器按播放意图推进，不再单靠页面上报。
+/// 2. 「大退进歌单回加载界面」：首屏只认 `#app-splash` 这一个节点，而线上站的加载遮罩
+///    在 SPA 路由切换时还会再出现一次 —— 于是「进歌单」被记成首屏未完成，
+///    30 秒看门狗判死 → 自动重载 → 用户回到加载界面。现在遮罩只在①仍在加载 / ②根本没挂上
+///    这两种情况下才算「没画出来」，SPA 内部再出现的遮罩一律不算。
+///
 /// 目标：网页版的 UI / 动画 / WebGL 可视化 100% 原样运行，原生层只补三件事——
 /// 1. 直接远程加载线上站点（与 API 同域，前端请求天然同源，无需本地反代）；
 /// 2. 把实测安全区推给网页（页面里已预留 window.__foliaSafeInsets 接口）；
@@ -694,15 +706,14 @@ final class WebContainerView: UIView {
 
     /// 把「当前这份已经画出来的站内文档」记下来，供进程被回收后原样重开。
     ///
-    /// `#app-splash` 还在就说明首屏还没走完（React 没挂上或还在拉 bundle），
-    /// 这时候记下来等于把一份加载界面当成「用户所在的位置」。
+    /// 判据见 `firstPaintProbeScript`：只认「还在加载」与「根本没挂上」，
+    /// **不认** SPA 内部再出现一次的加载遮罩。
     private func markVisiblePageIfNeeded() {
         let container = webView
-        container?.evaluateJavaScript(
-            "(function(){return document.getElementById('app-splash') ? 'loading' : 'ready';})()"
-        ) { [weak self, weak container] result, _ in
+        container?.evaluateJavaScript(Self.firstPaintProbeScript) { [weak self, weak container] result, _ in
             guard let self, let container, container === self.webView else { return }
-            guard (result as? String) == "ready" else { return }
+            let phase = (result as? String) ?? "loading"
+            guard phase != "loading" else { return }
             if let url = Self.trustedSiteURL(container.url) {
                 self.lastVisibleURL = url
                 self.rememberVisibleURL(url)
@@ -711,6 +722,33 @@ final class WebContainerView: UIView {
             self.markFirstPaintSettled()
         }
     }
+
+    /// 首屏到底画出来没有 —— 三条判据，返回 `loading` / `empty` / `ready`。
+    ///
+    /// 为什么不能只看 `#app-splash` 是否存在：线上站的加载遮罩在**路由内部加载**时
+    /// 还会再挂出来一次（进歌单、切歌词都会）。于是「用户已经在歌单里正常听着歌」
+    /// 也会被判成首屏没完成，`reachedFirstPaintOnce` 一直是假，30 秒看门狗到点
+    /// 直接 `retryLoadForStall()` —— 用户看到的就是「进歌单回到加载界面」。
+    ///
+    /// 现在区分两种「有遮罩」：
+    /// - 文档还在加载（`readyState === 'loading'`）→ 真的没画出来；
+    /// - 遮罩还在，但 `#root` 已经挂上内容 → 页面本身已经画出来了，遮罩只是
+    ///   路由切换时又露出一次；
+    /// - `#root` 空且没有遮罩 → 悬空的白页，算没起来。
+    ///
+    /// 只有「文档已加载完、`#root` 一个子节点都没有、遮罩也还在」才算真的没起来。
+    private static let firstPaintProbeScript = """
+        (function(){
+          try {
+            if (document.readyState === 'loading') { return 'loading'; }
+            var root = document.getElementById('root');
+            if (root && root.children.length > 0) { return 'ready'; }
+            var splash = document.getElementById('app-splash');
+            if (!splash) { return 'empty'; }
+            return 'loading';
+          } catch (e) { return 'ready'; }
+        })();
+        """
 
     /// 「首屏确实画出来了」的收尾：复位各处的自动重载配额。
     ///
@@ -795,6 +833,16 @@ final class WebContainerView: UIView {
             // 它会重新 `setCategory` + `setActive`，并在上下文真的 running 之后再补 `play`。
             if self.wantsAudible && !self.userPaused {
                 self.preemptedByOtherApp = true
+            }
+            // **会话在离开期间可能已经被系统收走，这里先无条件把它激活。**
+            //
+            // 用户报的场景是「播放期间进抖音再回来没声音」，而控制中心那一栏仍是本 App 在播 ——
+            // 说明播放意图没丢，丢的是系统那一层通路。以前的判据全都要求「页面确实在出声」，
+            // 手机背面朝上被按停时页面会如实上报 `paused`，于是所有分支都判「本来就没在放」，
+            // 一次 `setActive` 都不做。`activate()` 是幂等的：通路还活着时它是空操作，
+            // 不会按停任何媒体；真正被收走时它才是唯一的救法。
+            if self.wantsAudible && !self.userPaused {
+                AudioSessionController.shared.ensureActive()
             }
             // 回前台不改变意图：该响的继续响，轮询照旧。
             //
@@ -1176,6 +1224,28 @@ final class WebContainerView: UIView {
     ///
     /// 两样都为假说明声音好端端地在放，直接返回 —— 这一条就是「进出不打断」的保证。
     private func probeThenRecover(reason: String) {
+        // 被别的 App 抢过、且用户仍要声音：不再问「页面自报健不健康」。
+        //
+        // 这一条专门治「从抖音回来，界面在放、进度在走、一点声都没有」：
+        // 被抢占之后页面侧的三项事实（`<audio>` 未暂停、`currentTime` 在推进、
+        // AudioContext 是 running）全部为真，靠探测永远发现不了 ——
+        // 丢的是它们下面那一层系统通路。所以只要「离开过 App + 该响」，
+        // 就重建一次会话：`setCategory` 会让 WebKit 把媒体元素按停一瞬间，
+        // 所以重建之后必须跟一次 `resumeAudio`（`recoverAudioPathPass` 里已经做了）。
+        //
+        // **必须排在最前面。** 早先它在 `stayedBackgroundedWhileAudible` 分支之后，
+        // 而后者一定会走到（离开过 + 该响就置位），并且只要页面报「在播 + 时钟在走」
+        // 就 `finishAudioRecovery()` 收工 —— `preemptedByOtherApp` 于是在这一拍被
+        // 悄悄跳过，下一次探测它已被别处清掉，重建通路的那条路一次都没跑过。
+        if preemptedByOtherApp {
+            preemptedByOtherApp = false
+            stayedBackgroundedWhileAudible = false
+            CrashLog.note("==== audio path preempted by another app, rebuilding path (\(reason)) ====")
+            brokenProbeStreak = 0
+            recoverAudioPathPass(reason: "preempted", attempt: 0)
+            return
+        }
+
         let session = AVAudioSession.sharedInstance()
         let silencedHint = session.secondaryAudioShouldBeSilencedHint
         // 本 App 的会话当前是否还「活着」。
@@ -1220,22 +1290,6 @@ final class WebContainerView: UIView {
                     self.recoverAudioPathPass(reason: "clock-stuck", attempt: 0)
                 }
             }
-            return
-        }
-
-        // 被别的 App 抢过、且用户仍要声音：不再问「页面自报健不健康」。
-        //
-        // 这一条专门治「从抖音回来，界面在放、进度在走、一点声都没有」：
-        // 被抢占之后页面侧的三项事实（`<audio>` 未暂停、`currentTime` 在推进、
-        // AudioContext 是 running）全部为真，靠探测永远发现不了 ——
-        // 丢的是它们下面那一层系统通路。所以只要「离开过 App + 该响」，
-        // 就重建一次会话：`setCategory` 会让 WebKit 把媒体元素按停一瞬间，
-        // 所以重建之后必须跟一次 `resumeAudio`（`recoverAudioPathPass` 里已经做了）。
-        if preemptedByOtherApp {
-            preemptedByOtherApp = false
-            CrashLog.note("==== audio path preempted by another app, rebuilding path (\(reason)) ====")
-            brokenProbeStreak = 0
-            recoverAudioPathPass(reason: "preempted", attempt: 0)
             return
         }
 
@@ -1807,16 +1861,15 @@ final class WebContainerView: UIView {
 
     private func checkFirstPaint() {
         guard !didReachFirstPaint else { return }
-        webView?.evaluateJavaScript(
-            "(function(){var s=document.getElementById('app-splash');"
-                + "var r=document.getElementById('root');"
-                + "return (s ? 0 : 1) + (r && r.children.length > 0 ? 2 : 0);})()"
-        ) { [weak self] result, _ in
+        webView?.evaluateJavaScript(Self.firstPaintProbeScript) { [weak self] result, _ in
             guard let self else { return }
-            let flags = (result as? NSNumber)?.intValue ?? 0
-            // 遮罩被移走、或者 React 已经往 `#root` 里挂了东西（此时遮罩多半正在淡出）：
-            // 都算首屏到了。只看遮罩的话，遮罩被 CSS 隐藏而没被删掉时会一直判成没就绪。
-            if flags & 1 == 1 || flags & 2 == 2 {
+            // 判据集中在 `firstPaintProbeScript`：只有「文档已加载完、`#root` 空、
+            // 遮罩仍挂着」才算没画出来。以前这里要求遮罩被移除或 `#root` 非空，
+            // 而线上站进歌单时会重新挂一次遮罩、`#root` 也可能在路由切换的空隙里
+            // 短暂为空 —— 于是 30 秒看门狗到点就判死并重载，用户看到的就是
+            // 「进歌单回到加载界面」。现在这两种情况都不再让 `reachedFirstPaintOnce` 为假。
+            let phase = (result as? String) ?? "loading"
+            if phase == "ready" || phase == "empty" {
                 DispatchQueue.main.async {
                     self.didReachFirstPaint = true
                     self.hasEvaluatedFirstPaint = true
@@ -1854,6 +1907,11 @@ final class WebContainerView: UIView {
     private func installAudioKeeper() {
         // 真正的那份在 `audioKeeperScript` 里，随文档开始一起注入；这里只兜一次「脚本被清掉」的情况。
         ensureAudioKeeper()
+        // 按播放意图同步一次：页面状态上报只在 `playing` / `pause` 事件时发一条，
+        // 而锁屏 / 背面朝上时 WebKit 会真的按停媒体元素并发 `pause`，
+        // `AudioSessionController.isPlaying` 于是变假，回前台的几条恢复分支全被它挡住。
+        // 这里在每次文档加载完时按 `wantsAudible` 重新对齐一次。
+        AudioSessionController.shared.updatePlaybackState(wantsAudible && !userPaused)
     }
 
     /// 保活 + 播放状态上报。

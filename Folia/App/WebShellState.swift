@@ -202,8 +202,6 @@ final class AudioSessionController {
     /// 关键约束：**播放中不要调这里**。`setCategory` 会让系统重建音频通路，
     /// WebKit 的媒体元素会被一并按停 —— 表现就是「从后台切回来音乐突然暂停」。
     /// 播放期间只需要 `setActive(true)`（见 `reactivate()`）。
-    ///
-    /// 重新声明 category 并激活会话：冷启动、进程重建、来电结束后都需要。
     func activate() {
         let session = AVAudioSession.sharedInstance()
         do {
@@ -214,6 +212,21 @@ final class AudioSessionController {
             sessionIsActive = false
             // 失败不影响网页功能，只是切后台可能被系统暂停。
             NSLog("[Folia] audio session setup failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// 只在会话没被激活时补一次 `setActive` —— 幂等、**不重建 category**。
+    ///
+    /// 回前台且用户仍在播放时走这里。与 `activate()` 的区别就是不碰 category：
+    /// 通路被别家 App 收走时 `setActive(true)` 能不能救回来不一定，但它绝不会
+    /// 把正在响的媒体按停，所以可以在每一拍前台恢复里无条件调用。
+    func ensureActive() {
+        do {
+            try AVAudioSession.sharedInstance().setActive(true)
+            sessionIsActive = true
+        } catch {
+            sessionIsActive = false
+            NSLog("[Folia] audio session re-activate failed: \(error.localizedDescription)")
         }
     }
 
@@ -373,6 +386,18 @@ final class AudioSessionController {
                 // 系统面板，两路都不动手 —— 用户听到的就是「界面在播，没声音」。
                 self.preemptedByOtherApp = true
             }
+            // **离开过 App 且用户仍要声音：先无条件 `setActive` 一次。**
+            //
+            // 下面三条分支全部以 `isPlaying` 为门，而它来自页面的播放状态上报：
+            // 手机背面朝上 / 锁屏时 WebKit 会真的把媒体元素按停，页面老老实实报
+            // `paused`，这个标志于是一直是假 —— 于是整条回前台的音频恢复一次都不跑，
+            // 用户听到的就是「进抖音再回来没声音」。
+            // 播放意图（`wantsAudible`）比这个上报可靠得多，它只在用户亲手暂停时才会清掉。
+            // `ensureActive()` 不碰 category，通路健康时是空操作。
+            if self.isPlaying || self.wantsAudible {
+                self.sessionIsActive = false
+                self.ensureActive()
+            }
             self.healIfSilenced()
             self.recoverIfInactive()
             // 被别家 App 抢占过：**重建一次 category**，再让页面侧把上下文与媒体重新唤醒。
@@ -454,7 +479,13 @@ final class AudioSessionController {
     weak var container: WebContainerView?
 
     private func rebuildPathQuietly() {
-        guard isPlaying || backgroundedAndPlaying else { return }
+        // **不再用 `isPlaying` 当门。**
+        //
+        // 它来自页面的播放状态上报，而手机背面朝上 / 锁屏时 WebKit 会真的按停媒体元素，
+        // 页面随即上报 `paused`，这个标志就永久为假 —— 于是「进抖音再回来没声音」
+        // 这一条重建路径一次都不会跑。判据改用可累加的 `backgroundedAndPlaying`
+        // （进后台时该响就置位，只在回前台这一拍读过之后清掉）与 `wantsAudible`。
+        guard isPlaying || backgroundedAndPlaying || wantsAudible else { return }
         let session = AVAudioSession.sharedInstance()
         do {
             try session.setCategory(.playback, mode: .default, options: Self.categoryOptions)
@@ -484,7 +515,8 @@ final class AudioSessionController {
     private func healIfPreempted() {
         guard preemptedByOtherApp else { return }
         preemptedByOtherApp = false
-        guard isPlaying else { return }
+        // 判据同上：只看 `isPlaying` 会漏掉「被别的 App 按停过、页面已上报 paused」的情形。
+        guard isPlaying || backgroundedAndPlaying || wantsAudible else { return }
         let session = AVAudioSession.sharedInstance()
         do {
             try session.setCategory(.playback, mode: .default, options: Self.categoryOptions)
@@ -532,7 +564,8 @@ final class AudioSessionController {
     private func healIfSilenced() {
         guard silencedBySystemPanel else { return }
         silencedBySystemPanel = false
-        guard isPlaying else { return }
+        // 判据同上：`isPlaying` 会因页面被按停而变假，不能当唯一门。
+        guard isPlaying || backgroundedAndPlaying || wantsAudible else { return }
         let session = AVAudioSession.sharedInstance()
         guard session.secondaryAudioShouldBeSilencedHint || !sessionIsActive else { return }
         do {
@@ -568,7 +601,8 @@ final class AudioSessionController {
     /// 而那一路没有任何回调。这里只做一次幂等的 `setActive(true)`：
     /// 会话本来就活着时它是空操作，不会像 `setCategory` 那样把媒体按停。
     private func recoverIfInactive() {
-        guard isPlaying, !sessionIsActive else { return }
+        // 判据同上：`isPlaying` 不可靠时也要能补这一次幂等的 `setActive`。
+        guard isPlaying || wantsAudible, !sessionIsActive else { return }
         do {
             try AVAudioSession.sharedInstance().setActive(true)
             sessionIsActive = true
