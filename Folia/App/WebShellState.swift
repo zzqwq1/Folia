@@ -446,7 +446,11 @@ final class AudioSessionController {
                 // 注意这时 `preemptedByOtherApp` 常常是假：对方已经被系统淡出，
                 // `isOtherAudioPlaying` 翻回了 false，只有页面自己的播放时钟能说明真相。
                 self.backgroundedWhilePlayingOK = false
-                self.audioPathVerify { alive in
+                // **必须 `[weak self]`。** `AudioSessionController` 是单例，
+                // 闭包被它持有；这里若强引用 self，单例就会把整个容器（以及它
+                // 的 WKWebView）一起永久留住，`deinit` 与观察者注销全都跑不到。
+                self.audioPathVerify { [weak self] alive in
+                    guard let self else { return }
                     guard !alive else {
                         NSLog("[Folia] audio clock advancing after background, keep path")
                         return

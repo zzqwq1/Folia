@@ -598,15 +598,22 @@ final class WebContainerView: UIView {
         let doomed = Self.trustedSiteURL(deadLandingURL)
             ?? Self.trustedSiteURL(lastCommittedURL)
             ?? Self.trustedSiteURL(lastVisibleURL)
+        // **只驱逐会话（`routeDeath`，60 秒窗），不永久标记重负载。**
+        //
+        // 这里只知道「要重建时地址位指向这个路由」，并不知道它真的顶死过进程 ——
+        // 重建也可能是看门狗判卡死、用户点重试、`hardReload` 触发的。
+        // 早先这一行是 `markMemoryHeavy`，落在 `UserDefaults` 里且只能被
+        // `markVisiblePageIfNeeded` 洗掉：于是用户正常进一次歌单、恰好碰上重建，
+        // 这个歌单就被永久判成重负载。真正的「顶死过」由
+        // `recordRouteDeath`（进程终止回调里）负责。
         if let dead = doomed, Self.stableFallback(from: dead) != nil {
             Self.forgetVisibleRoute(dead)
-            Self.markMemoryHeavy(dead)
+            Self.noteRouteDeath(dead)
         }
         if let history = landingHistory,
            history.absoluteString != landing.absoluteString,
            Self.stableFallback(from: history) != nil {
             Self.forgetVisibleRoute(history)
-            Self.markMemoryHeavy(history)
         }
         CrashLog.note("==== landing sources: committed=\(lastCommittedURL?.absoluteString ?? "-") visible=\(lastVisibleURL?.absoluteString ?? "-") dead=\(deadLandingURL?.absoluteString ?? "-") → \(landing.absoluteString) ====")
         deadLandingURL = nil
@@ -1279,7 +1286,7 @@ final class WebContainerView: UIView {
         stopKeepAliveTimer()
         stopPageHeartbeat()
         // block 型观察者不会随 self 释放自动注销，留着会在下一次通知时回调到已释放对象上。
-        let tokens: [Any?] = [remoteObservation, foregroundObservation, backgroundObservation, networkObservation, audioPathObservation]
+        let tokens: [Any?] = [remoteObservation, foregroundObservation, backgroundObservation, networkObservation, audioPathObservation, audioPathRebuiltObservation]
         for token in tokens.compactMap({ $0 }) {
             NotificationCenter.default.removeObserver(token)
         }
@@ -1403,14 +1410,20 @@ final class WebContainerView: UIView {
         // `audioRecoveryInFlight` 却已经被 `finishAudioRecovery()` 放掉，
         // 于是 `wantsAudible` 被打成假、保活停摆 —— 用户听到的就是「回来一直没声」。
         // 记一个时间窗，`markPausedIntent` 据此直接忽略这一条。
-        self.audioPathRebuiltObservation = NotificationCenter.default.addObserver(
-            forName: .foliaAudioPathRebuilt,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            guard let self else { return }
-            self.pathRebuiltAt = Date()
-            CrashLog.note("==== audio path rebuilt, pause events ignored for 2s ====")
+        //
+        // **只订一次。** 这里原来每次 `didBecomeActive` 都重新 addObserver，
+        // 并且直接覆盖 token —— 旧 token 再没有机会注销，于是每切一次前后台
+        // 就多留一个观察者，`pathRebuiltAt` 也会被连着写好几遍。
+        if audioPathRebuiltObservation == nil {
+            audioPathRebuiltObservation = NotificationCenter.default.addObserver(
+                forName: .foliaAudioPathRebuilt,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self else { return }
+                self.pathRebuiltAt = Date()
+                CrashLog.note("==== audio path rebuilt, pause events ignored for 2s ====")
+            }
         }
         backgroundObservation = NotificationCenter.default.addObserver(
             forName: UIApplication.didEnterBackgroundNotification,
@@ -1541,6 +1554,15 @@ final class WebContainerView: UIView {
 
     /// 页面调过 play，且用户没有亲手暂停 —— 这就是「该有声」。
     fileprivate func markAudibleIntent() {
+        // **用户亲手按了播放，这一轮「离开过 App」的账就到此为止。**
+        //
+        // 早先刻意不清它，理由是「离开过是事实」。但事实已经用完 —— 用户现在的
+        // 动作明确表达了「我要它响」，此后页面再报 pause 就是他自己的事。
+        // 不清的代价在帧率上看得见：这一位此后一直为真，`confirmPausedIntent`
+        // 与 `markPausedIntent` 里所有以它为门的判断都永久放行，用户亲手按的暂停
+        // 永远认不下来（`paused by user (confirmed)` 再也不会出现），保活继续每 2 秒
+        // `play()` 一次 —— 用户看到的就是「点了暂停过一会儿自己又唱」。
+        wasBackgroundedThisSession = false
         wantsAudible = true
         userPaused = false
         pendingPauseCheck = false
@@ -1551,15 +1573,13 @@ final class WebContainerView: UIView {
         // 同理：用户亲手点播放，就是「这一轮离开过 App」的欠账已经不再需要壳去兜底。
         // 不清的话，下一次从抖音回来会先白重建一次通路（听感上就是断一下）。
         leftAppWhileAudible = false
-        // **`wasBackgroundedThisSession` 不在这里清。**
+        // **用户亲手点播放就是这一轮已经收尾的唯一凭据，所以这一位必须在这里清。**
         //
-        // 它只在 `didEnterBackground` 置真、由用户亲手暂停收尾。离开过 App 之后，
-        // 页面自己补 `play`（恢复链、交叉淡化换 deck）都会发 `intent-play`；
-        // 若在这一拍把「离开过」抹掉，紧接着系统那一次 pause 就会被当成用户收手
-        // —— 那正是「进抖音回来，界面在放、进度在走、一点声都没有」的起点。
-        //
-        // 在 `didEnterBackground` 那一拍无论如何都要置真（见 `observeLifecycle`）：
-        // 离开过 App 期间系统摘走通路，是**事实**，与「当时页面自报在不在出声」无关。
+        // 早先刻意不清（注释说的是「离开过是事实」），代价是它从此恒为真：
+        // `confirmPausedIntent` / `markPausedIntent` 里所有以它为门的判断永久放行，
+        // 用户之后亲手按的暂停一律认不下来，保活每 2 秒把歌放回去一次。
+        // 需要保留的只是「离开期间系统摘走通路」这一个短暂窗口，
+        // 它由 `stayedBackgroundedWhileAudible` / `preemptedByOtherApp` 表达。
         AudioSessionController.shared.updatePlaybackState(true)
         CrashLog.note("==== intent audible (state=\(UIApplication.shared.applicationState.rawValue)) ====")
         startKeepAliveTimer()
@@ -1711,17 +1731,13 @@ final class WebContainerView: UIView {
                     self.stopKeepAliveTimer()
                     self.wantsAudible = false
                     self.preemptedByOtherApp = false
-                    // 用户亲手停了：这一轮「离开过 App 但没确认过有声」的欠账也随之作废，
-                    // 否则用户出了 App 回来点了暂停，下一次回前台还会白重建一次通路。
+                    // 用户亲手停了：这一轮「离开过 App」的欠账也随之作废。
                     self.leftAppWhileAudible = false
                     // **这里刻意不清 `wasBackgroundedThisSession`。**
                     //
-                    // 早先在这里清：只要有一条 pause 被认成用户收手，这一位就没了，
-                    // 于是之后再从别的 App 回来时 `probeThenRecover` 里
-                    // `preemptedByOtherApp` 也没人替它置位，会话层的 `setCategory`
-                    // 重建永远不会发生 —— 用户听到的就是「切去抖音回来一直没声」。
-                    // 它代表的是「本次启动离开过 App」这个事实，生命周期只到
-                    // 「页面自己重新出声」或「用户亲手点播放」（见 `markAudibleIntent`）。
+                    // 保留它的原因：之后若再从别的 App 回来，`probeThenRecover` 里
+                    // 「离开过就别轻信页面自报暂停」这条判据还得在。
+                    // 它的收尾点只有 `markAudibleIntent`（用户亲手点了播放）。
                     self.stayedBackgroundedWhileAudible = false
                     CrashLog.note("==== paused by user (confirmed, gestureAge=\(Int(gestureAge))) ====")
                 }
@@ -1819,6 +1835,14 @@ final class WebContainerView: UIView {
             // `rebuild: reopen /`）。没有这条周期性采集，「死前用户在哪个歌单」
             // 就只有回前台那一拍碰运气才能拿到。
             self.refreshPageLocation()
+            // 保活**只允许补放，不允许改播放意图**。
+            //
+            // `enforcePlaybackIfNeeded` 在 `!wantsAudible` 时会把意图硬置回真，
+            // 这是给「页面被系统掐停」留的后路，但保活是每 2 秒一拍的常驻循环：
+            // 一旦哪一拍 `wantsAudible` 已经被判成假（而 `userPaused` 恰好还没立起来），
+            // 它就会把歌重新放起来 —— 用户看到的就是「点了暂停，过一会儿自己又唱」。
+            // 意图的恢复只在回前台 / 后台那两拍做（见 `didBecomeActive` / `didEnterBackground`）。
+            guard self.wantsAudible else { return }
             self.enforcePlaybackIfNeeded(reason: "keepalive")
         }
         // 挂 .common：滚动视图追踪模式下定时器也会照常触发，后台也照常。
@@ -3099,7 +3123,12 @@ final class WebContainerView: UIView {
             // 短暂为空 —— 于是 30 秒看门狗到点就判死并重载，用户看到的就是
             // 「进歌单回到加载界面」。现在这两种情况都不再让 `reachedFirstPaintOnce` 为假。
             let phase = (result as? String) ?? "loading"
-            if phase == "ready" || phase == "empty" {
+            // **`empty`（`#root` 空、无遮罩的悬空白页）不算画出来。**
+            //
+            // 它早先被当成成功，是因为怕「进歌单时 `#root` 短暂为空」被误判。
+            // 但那种空隙是毫秒级的，而这里每拍都会重探：真正的空壳会一直空着，
+            // 记成成功只会让 30 秒看门狗失去最后一次自愈机会，用户就一直对着白屏。
+            if phase == "ready" {
                 DispatchQueue.main.async {
                     self.didReachFirstPaint = true
                     self.hasEvaluatedFirstPaint = true
@@ -4511,6 +4540,9 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
 
     /// 远程页加载失败时自动重试一次，避免停在白屏上。
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        // 旧实例的回调一律作废：重建后它仍可能补发一次失败，
+        // 那样会改写 `consecutiveLoadFailures` 甚至把新页面顶成离线副本。
+        guard webView === self.webView else { return }
         let code = (error as NSError).code
         // -999 是「被新导航取消」，属正常流程。
         guard code != NSURLErrorCancelled else { return }
@@ -4767,14 +4799,18 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         // 退首页等于「回到加载界面」—— 用户报的就是这个。首页本身要重新拉全部
         // 脚本和首屏封面，内存曲线在重建后那几秒正是最紧的时候，很容易再被顶死。
         // 播放器那一屏结构最轻，而且用户真正想要的是「歌继续放」。
-        // 只有当死掉的那一屏本来就是播放器时，才退到不带哈希的首页。
-        if !fragment.hasPrefix("player") {
-            return URL(string: "https://\(siteHost)/#player")
+        // **已经是播放器就不用再降级。**
+        //
+        // 早先这里会退到不带哈希的首页，理由是「连播放器都撑不住」。
+        // 但通往这里的调用几乎都不是「真的死在播放器上」：`rebuildWebView` 里
+        // 对任何一个非首页路由都走这一步，而降级的结果经常正是 `#player`——
+        // 于是二次重建时 `landing` 已经是 `#player`，又被打回首页，
+        // 用户第三次看到的就是首页的加载遮罩。首页本身是最重的一屏，
+        // 退到那里只会更容易再被顶死。留在播放器即可。
+        if fragment.hasPrefix("player") {
+            return nil
         }
-        var comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
-        comps?.fragment = nil
-        comps?.query = nil
-        return comps?.url
+        return URL(string: "https://\(siteHost)/#player")
     }
 
     /// 「这个路由上次死在哪一刻」，跨重建、跨实例保留。
