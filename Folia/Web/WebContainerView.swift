@@ -1,4 +1,4 @@
-﻿import UIKit
+import UIKit
 import SwiftUI
 import WebKit
 import Combine
@@ -310,6 +310,28 @@ final class WebContainerView: UIView {
         config.applicationNameForUserAgent = "FoliaApp/\(Self.appVersion)"
 
         let userContent = WKUserContentController()
+        // 封面图降载：**在图片解码这一层**限制内存，而不是等页面自己响应开关。
+        //
+        // 日志 10-31-12-11-34Z 的现场：冷启动 8 秒进歌单，进程立刻被顶死。
+        // 歌单详情一次性铺几百张封面，每张解码后都要占 WebContent 的常驻内存 ——
+        // 这是「闪退频繁」的根。
+        //
+        // 原先的对策是给页面挂 `window.__foliaLowMemory` 让线上页自己降载，
+        // 但线上入口脚本（`assets/main-*.js`）里根本没有读这个开关的代码，
+        // 等于什么都没做。WKContentRuleList 是 WebKit 自己的网络/策略层，
+        // 不需要页面配合，也不会碰 DOM：
+        // - 只拦**图片**资源（`resource-type` = image），接口与脚本不受影响；
+        // - 只拦 `@2x` / `@3x` 这一类超采样变体（网易云的封面都是这个命名），
+        //   页面会退到 1x，视觉几乎无差，解码内存直接降到约 1/4～1/9；
+        // - 不带域名白名单，任何图床都适用 —— 网页版换域名也不会失效。
+        //
+        // 规则表必须**同步**准备好再交给 config：`WKUserContentController` 与
+        // `WKWebViewConfiguration` 都不能在后台线程回填。用信号量在这里等一次，
+        // 同一份 JSON 编译过之后走的是磁盘缓存，只有本进程第一次（几十毫秒）真的解析。
+        if let rules = WKContentRuleListStore.default().foliaDownscaleRuleList() {
+            userContent.add(rules)
+            CrashLog.note("==== content rule list installed: block @2x/@3x cover images ====")
+        }
         // 注入到所有 frame：离线副本里的 worker 也要把 `/api/...` 补成线上地址，
         // 否则元数据 / 歌词解析在 file:// 下会静默失败。脚本内部按协议判断，线上页不受影响。
         userContent.addUserScript(WKUserScript(
@@ -343,6 +365,41 @@ final class WebContainerView: UIView {
         config.userContentController = userContent
         return config
     }
+
+    /// 降载用的内容规则：「拦掉超采样的封面变体」。
+    ///
+    /// 单独抽出来是因为要经 `WKContentRuleListStore` 编译成一份可复用的规则表
+    /// （WebKit 只认编译后的 `WKContentRuleList`，且编译是异步的）。
+    /// 规则内容刻意写得很窄：
+    /// - `resource-type` 只到 `image`，API / 脚本 / 字体一条都不碰；
+    /// - `url-filter` 只匹配文件名形如 `@2x.png` / `@3x.jpg` / `@2x.webp` 的图片，
+    ///   网易云与大部分图床的封面都是这个命名，1x 版本仍在，页面不会缺图；
+    /// - 没有 `if-domain`：任何域名下的封面都一样处理，站点换域名不受影响。
+    private static let downscaleRuleJSON = #"[{"trigger":{"url-filter":".*@[23]x\\.(png|jpg|jpeg|webp)(\\?.*)?$","resource-type":["image"]},"action":{"type":"block"}}]"#
+}
+
+private extension WKContentRuleListStore {
+    /// 同步拿到降载规则表；编译失败就当作没有（不让它挡住页面）。
+    ///
+    /// 只在主线程调用（`makeConfiguration` 里），用信号量等编译回调：
+    /// 2 秒超时兜底，避免规则处理异常时拖住启动。
+    func foliaDownscaleRuleList() -> WKContentRuleList? {
+        var compiled: WKContentRuleList?
+        let semaphore = DispatchSemaphore(value: 0)
+        compileContentRuleList(forIdentifier: "folia-downscale-images",
+                               encodedContentRuleList: WebContainerView.downscaleRuleJSON) { list, error in
+            if let error {
+                NSLog("[Folia] content rule list compile failed: %@", error.localizedDescription)
+            }
+            compiled = list
+            semaphore.signal()
+        }
+        if semaphore.wait(timeout: .now() + 2) == .timedOut {
+            return nil
+        }
+        return compiled
+    }
+}
 
     /// 二维码回传通道（重建 WebView 时要重新指向新实例）。
     private var qrRelay: QRFallbackRelay?
@@ -1173,6 +1230,13 @@ final class WebContainerView: UIView {
     /// 已经只剩域名。所以「用户正在看哪一页」只能靠每隔一会儿问一次页面补上。
     private func refreshPageLocation() {
         guard let container = webView else { return }
+        // **每一拍都先把「要不要提前降载」判出来，且不受下面任何门控影响。**
+        //
+        // 原先这一拍只有在页面「已经画出来、body 还有子节点」时才执行（下面的 `guard`），
+        // 而歌单详情顶死进程恰好发生在那条路判断成立之前 —— 日志里地址采到了，
+        // 降载开关却一次都没被设上。现在判断只看地址（`location.href` 在加载中也拿得到），
+        // 一旦落在「顶死过进程」的详情路由上，就先挂降载再看别的。
+        Self.applyLowMemoryProbe(to: container)
         // **每一拍先把「主框架现在停在哪」记下来。**
         //
         // 下面那段 JS 要求 `body` 已经有子节点才肯记地址，可它恰恰在最需要的时候失效：
@@ -1222,36 +1286,6 @@ final class WebContainerView: UIView {
             self.lastVisibleURL = trusted
             self.rememberVisibleURL(trusted)
             
-            // **每次路由变化时，检查是否是重负载路由，及时设置低内存模式。**
-            //
-            // 原先 `__foliaLowMemory` 只在 `audioKeeperScript` 注入时检查一次，
-            // 那是页面刚加载时的路由。用户从首页导航到歌单时，路由变了，
-            // 但低内存标志没有更新 —— 等歌单渲染到一半内存爆了才闪退。
-            // 现在每次 refreshPageLocation 都检查一遍，及时切换模式。
-            let heavyRoutes = Self.memoryHeavyLiteral()
-            let lowMemoryJS = """
-            (function(){
-              try {
-                var heavy = \(heavyRoutes);
-                var here = location.href;
-                var isHeavy = false;
-                for (var hi = 0; hi < heavy.length; hi += 1) {
-                  if (heavy[hi] && here.indexOf(heavy[hi]) === 0) {
-                    isHeavy = true;
-                    break;
-                  }
-                }
-                window.__foliaLowMemory = isHeavy;
-                if (isHeavy) {
-                  document.documentElement.setAttribute('data-folia-low-memory', '1');
-                } else {
-                  document.documentElement.removeAttribute('data-folia-low-memory');
-                }
-              } catch (e) {}
-            })();
-            """
-            container.evaluateJavaScript(lowMemoryJS, completionHandler: nil)
-            
             container.evaluateJavaScript(Self.firstPaintProbeScript) { [weak self, weak container] phase, _ in
                 guard let self, let container, container === self.webView else { return }
                 guard ((phase as? String) ?? "loading") != "loading" else { return }
@@ -1282,6 +1316,40 @@ final class WebContainerView: UIView {
         }
     }
 
+    /// 把「这一屏要不要降载」推给页面，并落到 `window.__foliaLowMemory` /
+    /// `data-folia-low-memory` 两位上（线上页以后要读，直接就有）。
+    ///
+    /// 与地址采集解耦：只看 `location.href`，页面还在加载、`body` 还是空的时候也能判。
+    /// 这正是「进歌单 8 秒就死」那个时间窗 —— 等页面画出来再降载就来不及了。
+    private static func applyLowMemoryProbe(to container: WKWebView) {
+        let js = """
+        (function(){
+          try {
+            var heavy = \(memoryHeavyLiteral());
+            var here = String(location.href);
+            var isHeavy = false;
+            for (var i = 0; i < heavy.length; i += 1) {
+              if (heavy[i] && here.indexOf(heavy[i]) === 0) { isHeavy = true; break; }
+            }
+            window.__foliaLowMemory = isHeavy;
+            var root = document.documentElement;
+            if (!root) { return isHeavy; }
+            if (isHeavy) { root.setAttribute('data-folia-low-memory', '1'); }
+            else { root.removeAttribute('data-folia-low-memory'); }
+            // 把内存收紧落到图片上：重负载路由给封面挂 `loading="lazy"`，
+            // 屏幕外的不请求、不解码（见 `audioKeeperScript` 里的 `__foliaTuneImages`）。
+            if (typeof window.__foliaTuneImages === 'function') { window.__foliaTuneImages(isHeavy); }
+            return isHeavy;
+          } catch (e) { return false; }
+        })();
+        """
+        container.evaluateJavaScript(js) { result, _ in
+            guard let heavy = result as? Bool, heavy else { return }
+            // 只在真的判成重负载时打一行，避免每条路由切换都刷日志。
+            CrashLog.note("==== low memory mode on (route is memory heavy) ====")
+        }
+    }
+
     /// 把「当前这份已经画出来的站内文档」记下来，供进程被回收后原样重开。
     ///
     /// 判据见 `firstPaintProbeScript`：只认「还在加载」与「根本没挂上」，
@@ -1299,6 +1367,8 @@ final class WebContainerView: UIView {
                 self.lastCommittedURL = url
             }
             self.reachedFirstPaintOnce = true
+            // 画出来了，顺手再判一次降载：回前台这条路只走这里，不走 `refreshPageLocation`。
+            Self.applyLowMemoryProbe(to: container)
             self.markFirstPaintSettled()
         }
     }
@@ -3434,8 +3504,6 @@ final class WebContainerView: UIView {
                    WebContainerView.stableFallback(from: live) == nil {
                     WebContainerView.clearRouteDeath(live)
                 }
-                // 首屏就绪再开赞赏弹窗：在那之前 DOM 里的图片还没解码，弹出来是两张空白框。
-                self.installDonateCard()
                 // 版本行要等设置面板挂出来才有 DOM，首屏后每隔一秒补一次，两分钟内有效即停。
                 self.scheduleHelpVersionPatch()
                 return
@@ -3629,6 +3697,54 @@ final class WebContainerView: UIView {
               }
             }
           } catch (e) {}
+
+          // **图片解码限流：按当前路由决定同时留几张封面的解码位。**
+          //
+          // 这是「闪退频繁」的直接对策。歌单详情一次铺几百张封面，WebKit 给每个
+          // `<img>` 解码后都要占一份常驻内存，几百张叠加足以把 WebContent 顶没
+          // （日志 10-31-12-11-34Z：冷启动 8 秒进歌单立刻死）。
+          //
+          // 线上页并不读 `__foliaLowMemory`（入口脚本里根本没这段），所以壳在这里
+          // 自己接管图片的 `decoding` 与 `loading` 两个提示位：
+          // - 普通页面：`decoding="async"`，不阻塞主线程，也不改变加载策略；
+          // - 重负载路由（顶死过进程的那些歌单）：新插入的封面改成 `loading="lazy"`，
+          //   屏幕外的封面不请求、不解码，只有滚到眼前才占内存。
+          // 唯一的越界是首次扫描时给**已在文档里**的图片补 lazy —— 那是这批图片
+          // 内存最紧张的一刻，且 lazy 只影响「还没开始加载的」，不会撤掉已显示的图。
+          // 只动这两个属性，不碰 `src`、不改 `HTMLImageElement.prototype`、不拦请求，
+          // 页面的懒加载、点击放大、预加载逻辑全部照旧。
+          window.__foliaTuneImages = function(heavy){
+            try {
+              var imgs = document.images;
+              for (var i = 0; i < imgs.length; i += 1) {
+                var img = imgs[i];
+                try {
+                  if (!img.getAttribute('decoding')) { img.setAttribute('decoding', 'async'); }
+                  if (heavy && !img.getAttribute('loading')) { img.setAttribute('loading', 'lazy'); }
+                } catch (e) {}
+              }
+            } catch (e) {}
+            try {
+              if (window.__foliaImageObserver || typeof MutationObserver !== 'function') { return; }
+              window.__foliaImageObserver = new MutationObserver(function(records){
+                for (var r = 0; r < records.length; r += 1) {
+                  var nodes = records[r].addedNodes;
+                  for (var n = 0; n < nodes.length; n += 1) {
+                    var node = nodes[n];
+                    if (!node || node.nodeType !== 1) { continue; }
+                    if (node.tagName === 'IMG') {
+                      try {
+                        if (!node.getAttribute('decoding')) { node.setAttribute('decoding', 'async'); }
+                        if (window.__foliaLowMemory && !node.getAttribute('loading')) { node.setAttribute('loading', 'lazy'); }
+                      } catch (e) {}
+                    }
+                  }
+                }
+              });
+              window.__foliaImageObserver.observe(document.documentElement || document, { childList: true, subtree: true });
+            } catch (e) {}
+          };
+          try { window.__foliaTuneImages(!!window.__foliaLowMemory); } catch (e) {}
 
           // **媒体会话属性也绕一层。**
           //
@@ -3929,76 +4045,6 @@ final class WebContainerView: UIView {
           // 高频重渲染的页面上放大成本。
           setInterval(scan, 3000);
           scan();
-        })();
-        """
-        webView?.evaluateJavaScript(js, completionHandler: nil)
-    }
-
-    /// 把页面自带的赞赏弹窗打开。
-    ///
-    /// 线上页的赞赏脚本开头有 `if (/iPhone|iPad|iPod/i.test(UA)) return;`，
-    /// 装在 App 里时整段直接退出，弹窗永远不会出现；而壳的 UA 一定含 "iPhone"。
-    /// 这里在首屏就绪后按同一份 DOM 自己打开，并补上脚本里因提前返回而没绑上的点击：
-    /// 关闭按钮、点空白关闭、「获取」跳转、二维码长按保存。
-    ///
-    /// 版本号与更新公告也一并接手：壳把 Info.plist 的实际版本写进 `window.__foliaAppVersion`，
-    /// 「当前版本」与「最新版本」都取它，改版本只需要改 project.yml 一处。
-    private func installDonateCard() {
-        let js = """
-        (function(){
-          if (window.__foliaDonateInstalled) { return; }
-          var mask = document.getElementById('donate-mask');
-          if (!mask) { return; }
-          window.__foliaDonateInstalled = true;
-
-          var QUARK_URL = 'https://pan.quark.cn/s/934c480d5b9c';
-
-          // 两个版本号都取壳带进来的实际版本（Info.plist 的 MARKETING_VERSION）：
-          // 旧版线上页的常量停在 1.8.5，沿用会让「当前版本」永远显示旧值。
-          // 壳内「最新版本」=「当前版本」，因为包就是从网盘拿的最新那一份。
-          var cur = window.__foliaAppVersion || '';
-          var latest = cur;
-
-          var verNum = document.getElementById('donate-version-num');
-          if (verNum && cur) { verNum.textContent = cur; }
-          var latestNum = document.getElementById('donate-latest-num');
-          if (latestNum && latest) { latestNum.textContent = latest; }
-
-          var getLatest = document.getElementById('donate-get-latest');
-          if (getLatest) {
-            // 公告照弹、获取入口保留：这里是「去网盘拿最新包」的唯一入口，
-            // 版本号相同也照样可点，不能因为 2.0 就把它藏掉。
-            getLatest.addEventListener('click', function(e){
-              e.preventDefault();
-              try { window.open(QUARK_URL, '_blank'); } catch (err) { location.href = QUARK_URL; }
-            });
-          }
-
-          var closeBtn = document.getElementById('donate-close');
-          if (closeBtn) {
-            closeBtn.addEventListener('click', function(){ mask.classList.remove('show'); });
-          }
-          mask.addEventListener('click', function(e){ if (e.target === mask) { mask.classList.remove('show'); } });
-
-          // 每次启动都弹一次：sessionStorage 里那条是网页版防重复用的，壳里不清就会被跳过。
-          try { sessionStorage.removeItem('folia.donate.shown'); } catch (e) {}
-
-          // 横幅本身已经挡住了整屏，网页里的长按菜单（放大镜、复制链接）用不上；
-          // 但二维码要能「长按保存到相册」，所以只对二维码图片放开手势。
-          var imgs = mask.querySelectorAll('img');
-          for (var i = 0; i < imgs.length; i += 1) {
-            try {
-              imgs[i].style.webkitUserSelect = 'auto';
-              imgs[i].style.webkitTouchCallout = 'default';
-            } catch (e) {}
-          }
-
-          setTimeout(function(){ mask.classList.add('show'); }, 1200);
-
-          // 更新公告（#update-mask）在壳里不弹：版本号已经固定成壳的实际版本，
-          // 这条「新版本已发布」对已装最新包的人只是打扰。网盘入口保留在赞赏弹窗里。
-          var updateMask = document.getElementById('update-mask');
-          if (updateMask) { updateMask.style.display = 'none'; }
         })();
         """
         webView?.evaluateJavaScript(js, completionHandler: nil)
@@ -4431,13 +4477,12 @@ final class WebContainerView: UIView {
       })();
       // 线上页的标志性版本号。
       //
-      // 线上 `index.html` 里整张赞赏卡（`#donate-version-num`）与实际部署的前端版本
-      // （`/assets/main-<hash>.js`）都能用来判断「脚下这份文档是哪一版」。
-      // 这不是界面上的版本号（那个由 `installDonateCard` 改成壳的真实版本），
-      // 只用来识别「浏览器里还留着一份很老的 HTML/入口脚本」。
+      // 线上 `index.html` 里赞赏卡上的版本号（`#donate-version-num`）与实际部署的
+      // 前端版本（`/assets/main-<hash>.js`）都能用来判断「脚下这份文档是哪一版」。
+      // 这不是界面上的版本号，只用来识别「浏览器里还留着一份很老的 HTML/入口脚本」。
       //
-      // 新版（2.1）的 `index.html` 由 `vite build` 生成，里面没有赞赏卡，
-      // `#donate-version-num` 取不到：此时标记里那一项就是空串，只有入口脚本的哈希可看。
+      // 壳侧的赞赏弹窗已经删掉，`#donate-version-num` 只作为线上页的自带标记读取：
+      // 取不到就是空串，此时只有入口脚本的哈希可看。
       window.__foliaIndexStamp = (function(){
         try {
           var hit = document.getElementById('donate-version-num');
@@ -5205,9 +5250,13 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
 
     /// 注入给页面的降载开关：`window.__foliaLowMemory`。
     ///
-    /// 线上站在壳模式下调低了背景可视化的开销；壳这边只负责把「当前页是不是
-    /// 顶死过进程的那种重页面」告诉它，具体怎么省内存由页面自己决定 ——
-    /// 壳不碰 DOM，避免和 React 抢节点。
+    /// 壳这边只负责把「当前页是不是顶死过进程的那种重页面」告诉页面，
+    /// 具体怎么省内存由页面自己决定 —— 壳不碰 DOM，避免和 React 抢节点。
+    ///
+    /// 注意：线上入口脚本目前**并没有**读这个开关（`assets/main-*.js` 里没有相关代码），
+    /// 所以真正生效的降载是 WebKit 层的内容规则（拦 `@2x`/`@3x` 封面解码，
+    /// 见 `buildConfiguration` 里的 `downscaleRuleJSON`）。这两位留着不改名，
+    /// 只是给页面以后加降载逻辑时留的接口，同时也方便真机日志核对判定是否打中。
     ///
     /// `audioKeeperScript` 在 `.atDocumentStart` 注入，那时 `location.href`
     /// 已经是目标路由，所以这里只需要把地址表编进脚本，不必按导航逐次重装。
@@ -5442,427 +5491,16 @@ extension WebContainerView {
     /// 把音频地址交给原生AVPlayer播放，网页里的audio元素静音暂停。
     /// 这样进后台、切App都不会影响声音。
     static func nativePlayerBridgeScript() -> String {
-        return """
-        (function () {
-          if (window.__foliaNativePlayerBridgeInstalled) return;
-          window.__foliaNativePlayerBridgeInstalled = true;
-
-          // 设置iOS安全渲染模式：页面据此降低歌词画布、花火等效果的内存占用，减少闪退
-          window.__foliaIosSafe = /iPhone|iPad|iPod/.test(navigator.userAgent);
-          window.__foliaSafeMode = false;
-
-          function nativeHandler() {
-            return window.webkit && window.webkit.messageHandlers &&
-                   window.webkit.messageHandlers.foliaPlayer;
-          }
-          if (!nativeHandler()) return;
-
-          var proto = HTMLMediaElement.prototype;
-          var origPlay = proto.play;
-          var origPause = proto.pause;
-          var D = {
-            currentTime: Object.getOwnPropertyDescriptor(proto, 'currentTime'),
-            paused: Object.getOwnPropertyDescriptor(proto, 'paused'),
-            duration: Object.getOwnPropertyDescriptor(proto, 'duration'),
-            ended: Object.getOwnPropertyDescriptor(proto, 'ended'),
-            volume: Object.getOwnPropertyDescriptor(proto, 'volume'),
-            muted: Object.getOwnPropertyDescriptor(proto, 'muted'),
-            src: Object.getOwnPropertyDescriptor(proto, 'src')
-          };
-
-          var session = 'folia-' + Date.now() + '-' + Math.random().toString(36).slice(2);
-          var generation = 0;
-          var mirror = null;
-          var st = null;
-          var silent = false;
-          var tick = null;
-
-          // —— 处理网页的AudioContext ——
-          // 原生播放时挂起AudioContext，避免进后台时系统把网页音频会话挂起，
-          // 导致Folia收到暂停事件、进而把原生播放器也停了。
-          var contexts = [];
-          ['AudioContext', 'webkitAudioContext'].forEach(function (name) {
-            var C = window[name];
-            if (typeof C !== 'function' || C.__foliaWrapped) return;
-            var Wrapped = function () {
-              var ctx = new (Function.prototype.bind.apply(C, [null].concat(Array.prototype.slice.call(arguments))))();
-              contexts.push(ctx);
-              if (mirror) suspendContexts('新建时');
-              return ctx;
-            };
-            Wrapped.prototype = C.prototype;
-            Object.getOwnPropertyNames(C).forEach(function (k) {
-              if (!(k in Wrapped)) { try { Wrapped[k] = C[k]; } catch (e) {} }
-            });
-            Wrapped.__foliaWrapped = true;
-            window[name] = Wrapped;
-          });
-          var origResume = window.AudioContext && AudioContext.prototype.resume;
-          if (origResume) {
-            AudioContext.prototype.resume = function () {
-              // 原生在放：网页引擎保持挂起，不让恢复
-              if (mirror && contexts.indexOf(this) >= 0) return Promise.resolve();
-              return origResume.apply(this, arguments);
-            };
-          }
-          function suspendContexts(reason) {
-            contexts.forEach(function (ctx) {
-              if (ctx.state === 'running') { try { ctx.suspend(); } catch (e) {} }
-            });
-          }
-          function resumeContexts() {
-            contexts.forEach(function (ctx) {
-              if (ctx.state !== 'closed' && origResume) {
-                try { origResume.call(ctx); } catch (e) {}
-              }
-            });
-          }
-
-          function srcOf(el) {
-            return D.src.get.call(el) || el.currentSrc || '';
-          }
-
-          function eligible(el) {
-            return el instanceof HTMLAudioElement && /^https?:/i.test(srcOf(el));
-          }
-
-          function send(msg) {
-            msg.generation = generation;
-            msg.session = session;
-            var h = nativeHandler();
-            if (h) { try { h.postMessage(msg); } catch (e) {} }
-          }
-
-          function fire(el, type) {
-            try { el.dispatchEvent(new Event(type)); } catch (e) {}
-          }
-
-          function position() {
-            if (!st) return 0;
-            var p = st.position;
-            if (st.playing) p += (Date.now() - st.at) / 1000;
-            if (st.duration > 0) p = Math.min(p, st.duration);
-            return Math.max(0, p);
-          }
-
-          function setPosition(p) {
-            st.position = p;
-            st.at = Date.now();
-          }
-
-          function realMute(el, on) {
-            silent = true;
-            try { D.muted.set.call(el, on); } finally { silent = false; }
-          }
-
-          function setPlaying(playing) {
-            if (!st || st.playing === playing) return;
-            setPosition(position());
-            st.playing = playing;
-            if (playing) {
-              fire(mirror, 'play');
-              fire(mirror, 'playing');
-            } else {
-              fire(mirror, 'pause');
-            }
-          }
-
-          function startTick() {
-            if (tick) return;
-            tick = setInterval(function () {
-              if (mirror && st && st.playing) fire(mirror, 'timeupdate');
-            }, 250);
-          }
-
-          function release(restore) {
-            if (!mirror) return null;
-            var el = mirror, pos = position(), state = st;
-            mirror = null;
-            st = null;
-            realMute(el, !!state.mutedIntent);
-            // 恢复网页的AudioContext
-            resumeContexts();
-            if (restore) { try { D.currentTime.set.call(el, pos); } catch (e) {} }
-            return { el: el, pos: pos, playing: state.playing };
-          }
-
-          function startNative(el, url) {
-            if (mirror && mirror !== el) {
-              var old = release(false);
-              if (old && old.playing) fire(old.el, 'pause');
-            }
-            var startAt = 0;
-            try { startAt = D.currentTime.get.call(el) || 0; } catch (e) {}
-            try { origPause.call(el); } catch (e) {}
-            var mutedIntent = mirror === el && st ? st.mutedIntent : D.muted.get.call(el);
-            var volumeIntent = mirror === el && st ? st.volumeIntent : D.volume.get.call(el);
-            generation += 1;
-            mirror = el;
-            st = {
-              url: url,
-              playing: true,
-              position: startAt,
-              at: Date.now(),
-              duration: NaN,
-              ended: false,
-              mutedIntent: mutedIntent,
-              volumeIntent: volumeIntent
-            };
-            realMute(el, true);
-            // 挂起网页的AudioContext，避免进后台时系统干扰
-            suspendContexts('交给原生');
-            send({
-              cmd: 'load',
-              url: url,
-              position: startAt,
-              autoplay: true,
-              volume: volumeIntent,
-              muted: mutedIntent
-            });
-            fire(el, 'play');
-            startTick();
-          }
-
-          proto.play = function () {
-            if (!eligible(this)) return origPlay.apply(this, arguments);
-            var url = srcOf(this);
-            if (mirror === this && st && st.url === url && !st.ended) {
-              send({ cmd: 'play' });
-              setPlaying(true);
-              expect(true);
-              return Promise.resolve();
-            }
-            startNative(this, url);
-            return Promise.resolve();
-          };
-
-          proto.pause = function () {
-            if (mirror !== this || silent) return origPause.apply(this, arguments);
-            if (st) st.intent = false;
-            send({ cmd: 'pause' });
-            setPlaying(false);
-            expect(false);
-          };
-
-          // 重写load函数：切换歌曲时正确释放原生播放器
-          var origLoad = proto.load;
-          proto.load = function () {
-            if (mirror === this) {
-              send({ cmd: 'pause' });
-              release(false);
-            }
-            return origLoad.apply(this, arguments);
-          };
-
-          // 重写src属性setter：src变化时释放原生播放器
-          Object.defineProperty(proto, 'src', {
-            configurable: true,
-            enumerable: D.src.enumerable,
-            get: D.src.get,
-            set: function (v) {
-              D.src.set.call(this, v);
-              if (mirror === this && st && D.src.get.call(this) !== st.url) {
-                send({ cmd: 'pause' });
-                release(false);
-              }
-            }
-          });
-
-          // 重写setAttribute：通过setAttribute设置src时也要处理
-          var origSetAttribute = Element.prototype.setAttribute;
-          Element.prototype.setAttribute = function (name, value) {
-            var result = origSetAttribute.apply(this, arguments);
-            if (this === mirror && String(name).toLowerCase() === 'src' &&
-                st && D.src.get.call(this) !== st.url) {
-              send({ cmd: 'pause' });
-              release(false);
-            }
-            return result;
-          };
-
-          Object.defineProperty(proto, 'paused', {
-            configurable: true,
-            enumerable: D.paused.enumerable,
-            get: function () {
-              return mirror === this && st ? !st.playing : D.paused.get.call(this);
-            }
-          });
-
-          Object.defineProperty(proto, 'ended', {
-            configurable: true,
-            enumerable: D.ended.enumerable,
-            get: function () {
-              return mirror === this && st ? st.ended : D.ended.get.call(this);
-            }
-          });
-
-          Object.defineProperty(proto, 'duration', {
-            configurable: true,
-            enumerable: D.duration.enumerable,
-            get: function () {
-              return mirror === this && st && st.duration > 0 ? st.duration : D.duration.get.call(this);
-            }
-          });
-
-          Object.defineProperty(proto, 'currentTime', {
-            configurable: true,
-            enumerable: D.currentTime.enumerable,
-            get: function () {
-              return mirror === this && st ? position() : D.currentTime.get.call(this);
-            },
-            set: function (v) {
-              if (mirror !== this || !st) {
-                D.currentTime.set.call(this, v);
-                return;
-              }
-              var t = Math.max(0, Number(v) || 0);
-              setPosition(t);
-              st.ended = false;
-              send({ cmd: 'seek', position: t });
-              fire(this, 'seeking');
-              fire(this, 'timeupdate');
-              fire(this, 'seeked');
-            }
-          });
-
-          Object.defineProperty(proto, 'volume', {
-            configurable: true,
-            enumerable: D.volume.enumerable,
-            get: function () {
-              return mirror === this && st ? st.volumeIntent : D.volume.get.call(this);
-            },
-            set: function (v) {
-              if (mirror !== this || !st) {
-                D.volume.set.call(this, v);
-                return;
-              }
-              st.volumeIntent = Math.max(0, Math.min(1, Number(v) || 0));
-              send({ cmd: 'volume', volume: st.mutedIntent ? 0 : st.volumeIntent });
-              fire(this, 'volumechange');
-            }
-          });
-
-          Object.defineProperty(proto, 'muted', {
-            configurable: true,
-            enumerable: D.muted.enumerable,
-            get: function () {
-              return mirror === this && st && !silent ? st.mutedIntent : D.muted.get.call(this);
-            },
-            set: function (v) {
-              if (silent || mirror !== this || !st) {
-                D.muted.set.call(this, v);
-                return;
-              }
-              st.mutedIntent = !!v;
-              send({ cmd: 'muted', muted: st.mutedIntent });
-              fire(this, 'volumechange');
-            }
-          });
-
-          // 原生回调
-          window.__foliaNativePlayerEvent = function (e) {
-            e = e || {};
-            if (!mirror || !st) return;
-            if (e.session && String(e.session) !== session) return;
-            var type = String(e.type || '');
-
-            if (Number.isFinite(Number(e.duration)) && Number(e.duration) > 0 &&
-                Number(e.duration) !== st.duration) {
-              st.duration = Number(e.duration);
-              fire(mirror, 'durationchange');
-              fire(mirror, 'loadedmetadata');
-            }
-
-            if (type === 'error') {
-              var r = release(true);
-              if (r) origPlay.call(r.el).catch(function () {});
-              return;
-            }
-
-            if (type === 'ended') {
-              setPosition(st.duration > 0 ? st.duration : position());
-              st.playing = false;
-              st.ended = true;
-              fire(mirror, 'timeupdate');
-              fire(mirror, 'ended');
-              return;
-            }
-
-            if (type === 'state' || type === 'time' || type === 'loaded') {
-              var playing = e.playing === true;
-              // expect机制：命令发出后短时间内，忽略不符合预期的旧状态
-              if (st.expectUntil && Date.now() < st.expectUntil &&
-                  playing !== st.expectPlaying) {
-                return;
-              }
-              var p = Number(e.position);
-              if (Number.isFinite(p)) setPosition(p);
-              if (playing !== st.playing) setPlaying(playing);
-              if (type === 'time') fire(mirror, 'timeupdate');
-              if (playing) st.ended = false;
-            }
-          };
-
-          // —— visibilitychange处理 ——
-          var hiddenAt = 0;
-          function justHidden() {
-            return document.hidden && Date.now() - hiddenAt < 4000;
-          }
-
-          // 保持原生播放：进后台时确保原生继续播放
-          function keepNativePlaying(reason) {
-            if (!mirror || !st) return;
-            send({ cmd: 'play' });
-            if (!st.playing) setPlaying(true);
-            expect(true);
-          }
-
-          // expect机制：命令发出后900ms内忽略不符合预期的旧状态
-          function expect(playing) {
-            if (st) {
-              st.expectPlaying = playing;
-              st.expectUntil = Date.now() + 900;
-            }
-          }
-
-          document.addEventListener('visibilitychange', function () {
-            if (document.hidden) {
-              hiddenAt = Date.now();
-              // 进后台时挂起AudioContext
-              suspendContexts('进入后台');
-              // 多次确保原生继续播放
-              [300, 700, 1200, 2000].forEach(function (ms) {
-                setTimeout(function () {
-                  if (document.hidden) keepNativePlaying('进入后台 +' + ms + 'ms');
-                }, ms);
-              });
-            } else {
-              // 回到前台：查询状态，对齐进度
-              if (mirror) send({ cmd: 'status' });
-            }
-          });
-
-          // 等待原生通道出现（如果通道晚注册）
-          var waits = 0;
-          (function waitForNative() {
-            if (nativeHandler()) {
-              if (mirror) return;
-              // 通道出现后，如果有正在播放的audio，交给原生
-              var playing = Array.prototype.filter.call(
-                document.querySelectorAll('audio'),
-                function (el) { return !el.paused && eligible(el); }
-              );
-              if (playing.length === 1) {
-                startNative(playing[0], srcOf(playing[0]));
-              }
-              return;
-            }
-            if (++waits < 120) setTimeout(waitForNative, 500);
-          })();
-
-          console.info('[Folia] Native player bridge installed');
-        })();
-        """
+        // 从 Bundle 读取独立 JS 文件（Folia/www/ios-fix/ios-native-audio.js），
+        // 保持脚本原样，避免在 Swift 字符串里转义反斜杠，也便于对照参考版本。
+        if let url = Bundle.main.url(forResource: "ios-native-audio",
+                                    withExtension: "js",
+                                    subdirectory: "www/ios-fix"),
+           let source = try? String(contentsOf: url, encoding: .utf8) {
+            return source
+        }
+        // 读不到就返回空脚本，不影响页面正常加载
+        return ""
     }
 }
 
