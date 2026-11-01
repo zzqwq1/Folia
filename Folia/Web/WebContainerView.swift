@@ -177,6 +177,10 @@ final class WebContainerView: UIView {
         return [URL(string: raw)].compactMap { $0 }
     }
 
+    /// 汽水音乐请求通道。页面侧是 `window.electron.qishuiRequest`，
+    /// 每次主框架提交后由 `installQishuiBridge()` 重新挂上。
+    private let qishuiRelay = QishuiBridge()
+
     /// 把「用户正在看的那一页」落盘。
     ///
     /// 这里记**完整地址（含哈希路由）**，不再提前去哈希。
@@ -359,6 +363,9 @@ final class WebContainerView: UIView {
         let intentRelay = AudioIntentRelay()
         intentRelay.container = self
         userContent.add(intentRelay, name: "foliaAudioIntent")
+        // 汽水音乐音源：线上页通过 `window.electron.qishuiRequest` 发请求。
+        // 壳里没有 Electron，这条通道由原生代发（见 `QishuiBridge`）。
+        userContent.add(qishuiRelay, name: "foliaQishui")
         // 注册原生播放器桥
         NativePlayer.shared.webView = nil
         userContent.add(NativePlayer.shared, name: "foliaPlayer")
@@ -424,6 +431,7 @@ final class WebContainerView: UIView {
         webView = makeWebView(configuration: config)
         // 两个回传通道都要拿到 webView：一个往页面塞本地画的二维码，一个做播放意图。
         qrRelay?.webView = webView
+        qishuiRelay.webView = webView
         // 原生播放器也要拿到webView，用于回调JS
         NativePlayer.shared.webView = webView
 
@@ -773,6 +781,7 @@ final class WebContainerView: UIView {
         // 新实例的 message handler 需要重新挂上（`makeConfiguration` 里已经建了新的
         // `WKUserContentController`，但二维码回传那条要拿到新的 webView 引用）。
         qrRelay?.webView = view
+        qishuiRelay.webView = view
         // 原生播放器也要更新webView引用
         NativePlayer.shared.webView = view
         view.load(URLRequest(url: pending.landing,
@@ -3962,6 +3971,57 @@ final class WebContainerView: UIView {
         webView?.evaluateJavaScript(Self.audioKeeperScript(), completionHandler: nil)
     }
 
+    /// 汽水音乐音源桥：给页面挂上 `window.electron.qishuiRequest`。
+    ///
+    /// 线上站把汽水音乐作为一个可选音源，判定条件是
+    /// `typeof window.electron?.qishuiRequest === 'function'`；不满足就报
+    /// `unavailable / Qishui requires the desktop app`，音源在列表里直接不可用。
+    /// 那段代码在桌面端由 Electron 主进程代发请求，iOS 壳里没有 Electron，
+    /// 于是这里用 `WKScriptMessageHandler` 把同一件事接过来（见 `QishuiBridge`）。
+    ///
+    /// 返回值形状必须严格对齐页面期望：
+    /// - 成功：`{ ok: true, data }`
+    /// - 失败：`{ ok: false, error: { code, message, stage?, upstreamCode? } }`
+    /// 任何一个字段错位，页面侧都会当成未知错误，登录二维码就停在转圈。
+    private func installQishuiBridge() {
+        let js = """
+        (function(){
+          if (window.electron && typeof window.electron.qishuiRequest === 'function'
+              && window.electron.__foliaNative) { return; }
+          var bridge = window.electron || {};
+          var seq = 0;
+          var pending = {};
+          bridge.qishuiRequest = function(action, params) {
+            return new Promise(function(resolve, reject){
+              var id = 'q' + (++seq) + '_' + Date.now();
+              pending[id] = { resolve: resolve, reject: reject };
+              try {
+                window.webkit.messageHandlers.foliaQishui.postMessage({
+                  id: id, action: String(action), params: params || {}
+                });
+              } catch (e) {
+                delete pending[id];
+                reject(new Error('bridge unavailable'));
+              }
+            });
+          };
+          bridge.__foliaNative = true;
+          bridge.__foliaResolve = function(id, payload) {
+            var slot = pending[id];
+            if (!slot) { return; }
+            delete pending[id];
+            try {
+              var obj = typeof payload === 'string' ? JSON.parse(payload) : payload;
+              if (obj && obj.ok) { slot.resolve(obj.data); }
+              else { slot.reject(obj && obj.error ? obj.error : { code: 'network', message: 'request failed' }); }
+            } catch (e) { slot.reject({ code: 'network', message: 'bad payload' }); }
+          };
+          window.electron = bridge;
+        })();
+        """
+        webView?.evaluateJavaScript(js, completionHandler: nil)
+    }
+
     /// 网易云扫码登录的兜底。
     ///
     /// `/login/qr/create` 只有带 `qrimg=true` 才返回 base64 图片，不带就返回空串，
@@ -4042,6 +4102,11 @@ final class WebContainerView: UIView {
         // 既方便排查，也让产物校验能直接确认「壳模式标记确实编进了二进制」。
         _ = Self.userAgentMarker
         webView.customUserAgent = ua
+    }
+
+    /// 权威 UA 串。原生代发的请求（汽水音源）也带同一个，服务端才能认成壳。
+    static var userAgent: String {
+        "Mozilla/5.0 (iPhone; CPU iPhone OS \(UIDevice.current.systemVersion.replacingOccurrences(of: ".", with: "_")) like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 \(userAgentMarker)"
     }
 
     /// 壳模式 UA 标记，页面入口脚本据此打开壳布局。
@@ -4779,6 +4844,10 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
             CrashLog.note("==== main frame committed, clearing stale failure notice ====")
             state.clearLoadFailure()
         }
+        // 汽水音乐音源桥：线上页只有检测到 `window.electron.qishuiRequest` 才会把
+        // 「汽水音乐」标成可用（`runtime-unavailable` 会让它在音源列表里直接不可选）。
+        // 每次提交都补一次，SPA 内部路由切换不会丢。
+        installQishuiBridge()
         // 记下「真正提交过的地址」：进程死掉之后 `webView.url` 会退成 `about:blank`，
         // 只有这一份记录能把用户重新送回他当时所在的那一页。
         if webView.url?.scheme == "https", webView.url?.host == Self.siteHost {
@@ -5450,6 +5519,119 @@ private final class QRFallbackRelay: NSObject, WKScriptMessageHandler {
           }
         })('\(dataURL)');
         """
+        DispatchQueue.main.async { [weak self] in
+            self?.webView?.evaluateJavaScript(js, completionHandler: nil)
+        }
+    }
+}
+
+// MARK: - 汽水音乐音源
+
+/// 汽水音乐的请求通道。
+///
+/// 线上站把汽水音源的所有请求都收敛到一个方法上（搜索、歌曲详情、音频地址、
+/// 歌词、扫码登录），桌面端由 Electron 主进程代发；iOS 壳里没有 Electron，
+/// 所以由这里用原生网络层代发，再把结果按页面期望的形状回填。
+///
+/// 关键点：**shell 只做转发，不做解析**。哪些字段、什么分页、是否加密，
+/// 全由服务端与页面约定；壳一旦试图理解返回结构，线上站一改就会全盘失效。
+private final class QishuiBridge: NSObject, WKScriptMessageHandler {
+    /// 页面里每个 action 对应的上游路径。
+    ///
+    /// 这是唯一需要和线上站对齐的映射：`qishuiRequest(action, params)` 里的 action
+    /// 就是这里的键，值是同域名下的 API 路径 + 参数形状。
+    private static let baseURL = "https://app.folia-api.top/api/qishui"
+
+    weak var webView: WKWebView?
+
+    private let session: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 15
+        config.timeoutIntervalForResource = 30
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: config)
+    }()
+
+    func userContentController(_ userContentController: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        guard let body = message.body as? [String: Any],
+              let id = body["id"] as? String,
+              let action = body["action"] as? String else { return }
+        let params = body["params"] as? [String: Any] ?? [:]
+
+        var components = URLComponents(string: Self.baseURL + "/" + action)
+        // 写操作走 POST 表单，其余走 GET query。
+        let writeActions: Set<String> = ["login_qr_create", "login_qr_cancel", "logout",
+                                         "like_song", "dislike_song"]
+        var items: [URLQueryItem] = []
+        for (key, value) in params {
+            if let text = value as? String { items.append(URLQueryItem(name: key, value: text)) }
+            else if let number = value as? NSNumber { items.append(URLQueryItem(name: key, value: number.stringValue)) }
+        }
+        components?.queryItems = items.isEmpty ? nil : items
+        guard let url = components?.url else {
+            reply(id: id, payload: ["ok": false, "error": ["code": "network", "message": "bad url"]])
+            return
+        }
+
+        var request = URLRequest(url: url)
+        if writeActions.contains(action) {
+            request.httpMethod = "POST"
+            request.setValue("application/x-www-form-urlencoded; charset=utf-8",
+                             forHTTPHeaderField: "Content-Type")
+        }
+        // 带上壳标识，方便服务端按客户端区分（与页面的 UA 约定一致）。
+        request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
+        // 站点自身的 Cookie 由 WKWebView 管理；这里用默认 cookie 存储共享登录态。
+        request.setValue(HTTPCookieStorage.shared.cookies(for: url)?.map { "\($0.name)=\($0.value)" }
+                            .joined(separator: "; "), forHTTPHeaderField: "Cookie")
+
+        let task = session.dataTask(with: request) { [weak self] data, response, error in
+            if let error {
+                self?.reply(id: id, payload: ["ok": false,
+                                              "error": ["code": "network",
+                                                        "message": error.localizedDescription]])
+                return
+            }
+            guard let http = response as? HTTPURLResponse, let data else {
+                self?.reply(id: id, payload: ["ok": false,
+                                              "error": ["code": "network", "message": "empty response"]])
+                return
+            }
+            guard (200..<300).contains(http.statusCode) else {
+                self?.reply(id: id, payload: ["ok": false,
+                                              "error": ["code": "http-\(http.statusCode)",
+                                                        "message": "upstream \(http.statusCode)"]])
+                return
+            }
+            // 上游返回什么就原样交给页面：`data` 这一层由页面自己解释。
+            let text = String(data: data, encoding: .utf8) ?? ""
+            if let json = try? JSONSerialization.jsonObject(with: data),
+               let dict = json as? [String: Any],
+               let inner = dict["data"] {
+                self?.reply(id: id, payload: ["ok": true, "data": inner])
+            } else if let json = try? JSONSerialization.jsonObject(with: data) {
+                self?.reply(id: id, payload: ["ok": true, "data": json])
+            } else {
+                self?.reply(id: id, payload: ["ok": true, "data": text])
+            }
+        }
+        task.resume()
+    }
+
+    private static let userAgent: String = WebContainerView.userAgent
+
+    /// 把结果交回页面里对应的那个 Promise。
+    private func reply(id: String, payload: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let text = String(data: data, encoding: .utf8) else { return }
+        // 用 JSON 字面量传，避免引号/换行在两处转义。
+        let literal = text
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "")
+        let js = "try { window.electron && window.electron.__foliaResolve && window.electron.__foliaResolve('\(id)', '\(literal)'); } catch (e) {}"
         DispatchQueue.main.async { [weak self] in
             self?.webView?.evaluateJavaScript(js, completionHandler: nil)
         }
