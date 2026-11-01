@@ -1,0 +1,3 @@
+# 本机参考用的解包 IPA / 临时产物，不进仓库
+reference_ipa/
+*.bak

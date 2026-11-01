@@ -177,7 +177,7 @@ final class WebContainerView: UIView {
         return [URL(string: raw)].compactMap { $0 }
     }
 
-    /// 汽水音乐请求通道。页面侧是 `window.electron.qishuiRequest`，
+    /// 汽水音乐请求通道。桥对象挂在 `window.__foliaBridge` 上，
     /// 每次主框架提交后由 `installQishuiBridge()` 重新挂上。
     private let qishuiRelay = QishuiBridge()
 
@@ -363,8 +363,9 @@ final class WebContainerView: UIView {
         let intentRelay = AudioIntentRelay()
         intentRelay.container = self
         userContent.add(intentRelay, name: "foliaAudioIntent")
-        // 汽水音乐音源：线上页通过 `window.electron.qishuiRequest` 发请求。
+        // 汽水音乐音源：线上页的请求入口是 `window.electron.qishuiRequest`。
         // 壳里没有 Electron，这条通道由原生代发（见 `QishuiBridge`）。
+        // 注意 `electron` 这个身份会被 `shellBridgeScript` 钉死（0.7.24 拿它判桌面窗口）。
         userContent.add(qishuiRelay, name: "foliaQishui")
         // 注册原生播放器桥
         NativePlayer.shared.webView = nil
@@ -383,6 +384,63 @@ final class WebContainerView: UIView {
     ///   网易云与大部分图床的封面都是这个命名，1x 版本仍在，页面不会缺图；
     /// - 没有 `if-domain`：任何域名下的封面都一样处理，站点换域名不受影响。
     static let downscaleRuleJSON = #"[{"trigger":{"url-filter":".*@[23]x\\.(png|jpg|jpeg|webp)(\\?.*)?$","resource-type":["image"]},"action":{"type":"block"}}]"#
+
+    /// 0.7.24 起线上页用「有没有 `window.electron`」判断是不是桌面窗口：
+    /// `isElectronWindow` 决定是否渲染 Electron 自绘标题栏、窗口圆角、点击穿透按钮，
+    /// 而 `AppShell` 在窗口圆角分支里会直接 `await window.electron.isWindowMaximized()`
+    /// 这类只有真 Electron 才有的句柄 —— 我们在 iOS 壳里补的 `qishuiRequest`
+    /// 会让页面把这些分支全部当成可用，表现是顶部多出一条桌面标题栏、
+    /// 窗口控件全失效（用户视角就是「布局乱了 / 点了没反应」）。
+    ///
+    /// 所以补完通道之后立刻抹掉 `electron` 这个名字：桥本身留在 `__foliaBridge` 上，
+    /// 原生回填也走 `__foliaBridge`，页面侧凡是 `window.electron?.xxx` 的探测
+    /// 全部退化成可选链短路（等价于网页版，正是 iOS 壳想要的）。
+    /// 代价是汽水音源在 0.7.24 页面上会重新变成不可用 —— 布局与点击可靠优先。
+    static let bridgeInstallScript = """
+    (function(){
+      var bridge = window.electron || {};
+      var seq = 0;
+      var pending = {};
+      bridge.qishuiRequest = function(action, params) {
+        return new Promise(function(resolve, reject){
+          var id = 'q' + (++seq) + '_' + Date.now();
+          pending[id] = { resolve: resolve, reject: reject };
+          try {
+            window.webkit.messageHandlers.foliaQishui.postMessage({
+              id: id, action: String(action), params: params || {}
+            });
+          } catch (e) {
+            delete pending[id];
+            reject(new Error('bridge unavailable'));
+          }
+        });
+      };
+      bridge.__foliaNative = true;
+      bridge.__foliaResolve = function(id, payload) {
+        var slot = pending[id];
+        if (!slot) { return; }
+        delete pending[id];
+        try {
+          var obj = typeof payload === 'string' ? JSON.parse(payload) : payload;
+          if (obj && obj.ok) { slot.resolve(obj.data); }
+          else { slot.reject(obj && obj.error ? obj.error : { code: 'network', message: 'request failed' }); }
+        } catch (e) { slot.reject({ code: 'network', message: 'bad payload' }); }
+      };
+      window.__foliaBridge = bridge;
+      try {
+        if (typeof bridge.getLoginDiagnostics !== 'function') {
+          bridge.getLoginDiagnostics = function(){ return Promise.resolve(null); };
+        }
+      } catch (e) {}
+      // 见 `bridgeInstallScript` 的注释：抹掉 electron 这个身份。
+      try {
+        if (window.electron) { delete window.electron; }
+      } catch (e) {}
+      try {
+        if (typeof window.electron !== 'undefined') { window.electron = undefined; }
+      } catch (e) {}
+    })();
+    """
 
     /// 二维码回传通道（重建 WebView 时要重新指向新实例）。
     private var qrRelay: QRFallbackRelay?
@@ -3707,24 +3765,38 @@ final class WebContainerView: UIView {
                 } catch (e) {}
               }
             } catch (e) {}
+            // **一次性把这一批里的图片全扫一遍，然后立刻断开。**
+            //
+            // 页面用的是虚拟列表，滚动时每帧都在批量插入节点。原先这里是
+            // `subtree: true` 的常驻观察器，等于让壳在页面自己的渲染循环里
+            // 再多跑一遍 DOM 遍历 —— 0.7.24 的歌词页（雾笺 / 町景）本来就
+            // 每帧重排，这一份额外开销会直接算进掉帧里。
+            // 改成「写完属性就断开」，只在拍到的这一批上花一次钱。
             try {
               if (window.__foliaImageObserver || typeof MutationObserver !== 'function') { return; }
-              window.__foliaImageObserver = new MutationObserver(function(records){
+              var observer = new MutationObserver(function(records){
+                var heavyNow = !!window.__foliaLowMemory;
                 for (var r = 0; r < records.length; r += 1) {
                   var nodes = records[r].addedNodes;
                   for (var n = 0; n < nodes.length; n += 1) {
                     var node = nodes[n];
                     if (!node || node.nodeType !== 1) { continue; }
-                    if (node.tagName === 'IMG') {
-                      try {
-                        if (!node.getAttribute('decoding')) { node.setAttribute('decoding', 'async'); }
-                        if (window.__foliaLowMemory && !node.getAttribute('loading')) { node.setAttribute('loading', 'lazy'); }
-                      } catch (e) {}
-                    }
+                    try {
+                      var batch = node.tagName === 'IMG' ? [node] : node.querySelectorAll('img');
+                      for (var b = 0; b < batch.length; b += 1) {
+                        if (!batch[b].getAttribute('decoding')) { batch[b].setAttribute('decoding', 'async'); }
+                        if (heavyNow && !batch[b].getAttribute('loading')) { batch[b].setAttribute('loading', 'lazy'); }
+                      }
+                    } catch (e) {}
                   }
                 }
+                try {
+                  observer.disconnect();
+                  if (window.__foliaImageObserver === observer) { window.__foliaImageObserver = null; }
+                } catch (e) {}
               });
-              window.__foliaImageObserver.observe(document.documentElement || document, { childList: true, subtree: true });
+              window.__foliaImageObserver = observer;
+              observer.observe(document.documentElement || document, { childList: true, subtree: true });
             } catch (e) {}
           };
           try { window.__foliaTuneImages(!!window.__foliaLowMemory); } catch (e) {}
@@ -3971,7 +4043,7 @@ final class WebContainerView: UIView {
         webView?.evaluateJavaScript(Self.audioKeeperScript(), completionHandler: nil)
     }
 
-    /// 汽水音乐音源桥：给页面挂上 `window.electron.qishuiRequest`。
+    /// 汽水音乐音源桥：补上 `qishuiRequest` 通道，然后把 `window.electron` 这个身份抹掉。
     ///
     /// 线上站把汽水音乐作为一个可选音源，判定条件是
     /// `typeof window.electron?.qishuiRequest === 'function'`；不满足就报
@@ -3979,56 +4051,16 @@ final class WebContainerView: UIView {
     /// 那段代码在桌面端由 Electron 主进程代发请求，iOS 壳里没有 Electron，
     /// 于是这里用 `WKScriptMessageHandler` 把同一件事接过来（见 `QishuiBridge`）。
     ///
+    /// 但 0.7.24 又把这个对象当成了「我是桌面窗口」的判据（`isElectronWindow`），
+    /// 留着它会让页面渲染 Electron 自绘标题栏并等一堆不存在的窗口句柄 ——
+    /// 所以补完通道后立刻删掉（script 见 `bridgeInstallScript`）。
+    ///
     /// 返回值形状必须严格对齐页面期望：
     /// - 成功：`{ ok: true, data }`
     /// - 失败：`{ ok: false, error: { code, message, stage?, upstreamCode? } }`
     /// 任何一个字段错位，页面侧都会当成未知错误，登录二维码就停在转圈。
     private func installQishuiBridge() {
-        let js = """
-        (function(){
-          if (window.electron && typeof window.electron.qishuiRequest === 'function'
-              && window.electron.__foliaNative) { return; }
-          var bridge = window.electron || {};
-          var seq = 0;
-          var pending = {};
-          bridge.qishuiRequest = function(action, params) {
-            return new Promise(function(resolve, reject){
-              var id = 'q' + (++seq) + '_' + Date.now();
-              pending[id] = { resolve: resolve, reject: reject };
-              try {
-                window.webkit.messageHandlers.foliaQishui.postMessage({
-                  id: id, action: String(action), params: params || {}
-                });
-              } catch (e) {
-                delete pending[id];
-                reject(new Error('bridge unavailable'));
-              }
-            });
-          };
-          bridge.__foliaNative = true;
-          bridge.__foliaResolve = function(id, payload) {
-            var slot = pending[id];
-            if (!slot) { return; }
-            delete pending[id];
-            try {
-              var obj = typeof payload === 'string' ? JSON.parse(payload) : payload;
-              if (obj && obj.ok) { slot.resolve(obj.data); }
-              else { slot.reject(obj && obj.error ? obj.error : { code: 'network', message: 'request failed' }); }
-            } catch (e) { slot.reject({ code: 'network', message: 'bad payload' }); }
-          };
-          window.electron = bridge;
-          // **只在真的需要时登记探测句柄。**
-          //
-          // 线上站的登录自检会按「有没有原生通道」分支跑，缺句柄会直接抛错把首屏卡死；
-          // 这里全部给上最小实现，返回值一律「无结论」，让自检走网页分支。
-          try {
-            if (typeof bridge.getLoginDiagnostics !== 'function') {
-              bridge.getLoginDiagnostics = function(){ return Promise.resolve(null); };
-            }
-          } catch (e) {}
-        })();
-        """
-        webView?.evaluateJavaScript(js, completionHandler: nil)
+        webView?.evaluateJavaScript(Self.bridgeInstallScript, completionHandler: nil)
     }
 
     /// 网易云扫码登录的兜底。
@@ -4275,6 +4307,27 @@ final class WebContainerView: UIView {
       try {
       document.documentElement.setAttribute('data-folia-shell', '1');
       window.__FOLIA_SHELL__ = 'ios';
+      // **确保线上页不会把壳当成 Electron 桌面窗口。**
+      //
+      // 0.7.24 的 `App.tsx` 用 `Boolean(window.electron)` 得出 `isElectronWindow`，
+      // 一旦为真就渲染桌面自绘标题栏、窗口圆角、点击穿透按钮，并 await
+      // `isWindowMaximized` / `isWindowFullscreen` / `onWindowFullscreenChanged`
+      // 这些只有 Electron 主进程才提供的句柄 —— iOS 壳里一个都没有，
+      // 结果是顶部多出一条点不动的标题栏、播放页按钮被压住。
+      // 这里在文档最前面把它钉成 undefined（属性本身存在但不可写，
+      // 之后任何脚本想赋值都会被静默忽略，判定恒为假）。
+      try {
+        var hadElectron = Object.prototype.hasOwnProperty.call(window, 'electron');
+        if (hadElectron || typeof window.electron !== 'undefined') {
+          try { delete window.electron; } catch (e) {}
+        }
+        Object.defineProperty(window, 'electron', {
+          configurable: true,
+          enumerable: false,
+          get: function(){ return undefined; },
+          set: function(){}
+        });
+      } catch (e) {}
       // 壳的实际版本（project.yml 的 MARKETING_VERSION），赞赏弹窗的「当前版本」用它，
       // 免得壳里显示的版本和装上的包对不上。
       window.__foliaAppVersion = '\(appVersion)';
@@ -4862,6 +4915,8 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         // `decidePolicyFor` 往上传，主框架提交被中断，用户看到的就是黑屏。
         // 所以推迟到下一个 runloop，并且单独吞掉错误 —— 桥挂了只影响汽水音源，
         // 绝不能连带整个页面打不开。
+        // 顺带把 `electron` 身份再钉一次：`shellBridgeScript` 只在文档开始跑一次，
+        // 万一页面自己在启动阶段写入了 `window.electron`，这里兜住。
         DispatchQueue.main.async { [weak self] in
             self?.installQishuiBridge()
         }
@@ -5648,7 +5703,7 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
             .replacingOccurrences(of: "'", with: "\\'")
             .replacingOccurrences(of: "\n", with: "\\n")
             .replacingOccurrences(of: "\r", with: "")
-        let js = "try { window.electron && window.electron.__foliaResolve && window.electron.__foliaResolve('\(id)', '\(literal)'); } catch (e) {}"
+        let js = "try { window.__foliaBridge && window.__foliaBridge.__foliaResolve && window.__foliaBridge.__foliaResolve('\(id)', '\(literal)'); } catch (e) {}"
         DispatchQueue.main.async { [weak self] in
             self?.webView?.evaluateJavaScript(js, completionHandler: nil)
         }
