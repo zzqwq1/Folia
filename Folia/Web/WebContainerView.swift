@@ -2738,12 +2738,11 @@ final class WebContainerView: UIView {
         let js = """
         (function(){
           try {
-            // **每次都检查当前路由是否是重负载路由，及时设置低内存模式。**
+            // **每次都检查当前路由是否是重负载路由，及时切换低内存模式。**
             //
-            // 原先 `__foliaLowMemory` 只在 `audioKeeperScript` 注入时检查一次，
-            // 那是页面刚加载时的路由。用户从首页导航到歌单时，路由变了，
-            // 但低内存标志没有更新 —— 等歌单渲染到一半内存爆了才闪退。
-            // 现在每次 revivePageAudio 都重新检查一遍，及时切换模式。
+            // 原先只在 `audioKeeperScript` 注入时检查一次，那是页面刚加载时的路由。
+            // 用户从首页导航到歌单时路由变了，低内存标志没跟着更新 ——
+            // 等歌单渲染到一半内存爆了才闪退。这里（`revivePageAudio`）每拍补一次。
             try {
               var heavy = \(heavyRoutes);
               var here = location.href;
@@ -2755,9 +2754,10 @@ final class WebContainerView: UIView {
                 }
               }
               window.__foliaLowMemory = isHeavy;
-              if (isHeavy) {
-                document.documentElement.setAttribute('data-folia-low-memory', '1');
-              }
+              var root = document.documentElement;
+              if (isHeavy) { root.setAttribute('data-folia-low-memory', '1'); }
+              else { root.removeAttribute('data-folia-low-memory'); }
+              if (typeof window.__foliaTuneImages === 'function') { window.__foliaTuneImages(isHeavy); }
             } catch (e) {}
             
             if (typeof window.__foliaResumeAudioContexts === 'function') {
@@ -3525,10 +3525,8 @@ final class WebContainerView: UIView {
 
           // **降载开关：这个路由曾经把 WebProcess 顶死过。**
           //
-          // 页面在启动时读不到它就会被按「正常页面」渲染，歌单几百张封面一起解码，
-          // 新进程几秒内又会被顶死（日志 09-27-39Z：启动 16 秒进歌单即死）。
-          // 这里在**所有页面脚本之前**按地址前缀装上，页面在壳模式下据此
-          // 把封面改按需加载、背景可视化降帧。
+          // 按地址前缀装在**所有页面脚本之前**。线上页目前不读它，
+          // 真正压内存的是 `__foliaTuneImages`（图片 lazy/async）与 WebKit 的内容规则。
           try {
             var heavy = __FOLIA_HEAVY_ROUTES__;
             var here = location.href;
