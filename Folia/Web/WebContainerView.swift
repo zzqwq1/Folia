@@ -4017,6 +4017,15 @@ final class WebContainerView: UIView {
             } catch (e) { slot.reject({ code: 'network', message: 'bad payload' }); }
           };
           window.electron = bridge;
+          // **只在真的需要时登记探测句柄。**
+          //
+          // 线上站的登录自检会按「有没有原生通道」分支跑，缺句柄会直接抛错把首屏卡死；
+          // 这里全部给上最小实现，返回值一律「无结论」，让自检走网页分支。
+          try {
+            if (typeof bridge.getLoginDiagnostics !== 'function') {
+              bridge.getLoginDiagnostics = function(){ return Promise.resolve(null); };
+            }
+          } catch (e) {}
         })();
         """
         webView?.evaluateJavaScript(js, completionHandler: nil)
@@ -4847,7 +4856,15 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         // 汽水音乐音源桥：线上页只有检测到 `window.electron.qishuiRequest` 才会把
         // 「汽水音乐」标成可用（`runtime-unavailable` 会让它在音源列表里直接不可选）。
         // 每次提交都补一次，SPA 内部路由切换不会丢。
-        installQishuiBridge()
+        //
+        // **不能同步注入**：这是首屏唯一的提交点，`evaluateJavaScript` 一旦抛错
+        // （页面 JS 上下文还没就绪 / 被 CSP 挡 / 实例正在换），异常会顺着
+        // `decidePolicyFor` 往上传，主框架提交被中断，用户看到的就是黑屏。
+        // 所以推迟到下一个 runloop，并且单独吞掉错误 —— 桥挂了只影响汽水音源，
+        // 绝不能连带整个页面打不开。
+        DispatchQueue.main.async { [weak self] in
+            self?.installQishuiBridge()
+        }
         // 记下「真正提交过的地址」：进程死掉之后 `webView.url` 会退成 `about:blank`，
         // 只有这一份记录能把用户重新送回他当时所在的那一页。
         if webView.url?.scheme == "https", webView.url?.host == Self.siteHost {
