@@ -5611,28 +5611,63 @@ private final class QRFallbackRelay: NSObject, WKScriptMessageHandler {
 
 /// 汽水音乐的请求通道。
 ///
-/// 线上站把汽水音源的所有请求都收敛到一个方法上（搜索、歌曲详情、音频地址、
-/// 歌词、扫码登录），桌面端由 Electron 主进程代发；iOS 壳里没有 Electron，
-/// 所以由这里用原生网络层代发，再把结果按页面期望的形状回填。
+/// 线上页把汽水音源的全部请求收敛到 `window.electron.qishuiRequest(action, params)`，
+/// 桌面端由 Electron 主进程用 `qishui-music-api` 直接跑字节开放接口；iOS 壳里没有
+/// Electron，也没有可以转发的后端（`/api/qishui` 这个路径从不存在，上一版据此
+/// 转发，用户看到的就是 `upstream 404`）。所以这里按协议自己实现。
 ///
-/// 关键点：**shell 只做转发，不做解析**。哪些字段、什么分页、是否加密，
-/// 全由服务端与页面约定；壳一旦试图理解返回结构，线上站一改就会全盘失效。
+/// 协议要点（对照 `qishui-music-api@0.2.2` 的 `src/*.cjs`）：
+/// - 公开读走 `open.qishui.com` 取 `client_token`，再带 `access-token` 头打
+///   `open.douyin.com/api/luna/v1/platform/<path>`；
+/// - 登录：`open.douyin.com/oauth/get_qrcode` 拿二维码 → 轮询 `check_qrcode` →
+///   `access/code/get` 换 access_code → `get_access_ticket` 换 ticket（需 P-256 CSR）。
+///
+/// 本轮只做到「二维码 + 轮询」：这一步不需要任何签名，实测可直接调用。
+/// 扫码之后那几步要带 `bd-ticket-guard` 的 P-256 签名头，页面侧会以
+/// `stage=access-code` 报错，界面上的表现是「扫码后登录未完成」，不会卡死。
+///
+/// 返回值形状由页面严格依赖（`qishuiTransport.ts`）：
+/// `{ok:true, data}` 或 `{ok:false, error:{code, message, upstreamCode?, stage?}}`。
 private final class QishuiBridge: NSObject, WKScriptMessageHandler {
-    /// 页面里每个 action 对应的上游路径。
-    ///
-    /// 这是唯一需要和线上站对齐的映射：`qishuiRequest(action, params)` 里的 action
-    /// 就是这里的键，值是同域名下的 API 路径 + 参数形状。
-    private static let baseURL = "https://app.folia-api.top/api/qishui"
+    private static let clientKey = "aw4bbxfujo741d09"
+    /// `md5("com.luna.music.car")`：车机端应用标识，缺了会被拒（error_code=10011）。
+    private static let appIdentity = "82a0737a3f8d93d9958c8a7938bbc365"
+    private static let signature = "cf9024ea72d9c71813238b13ea107a3d"
+    private static let sdkUA = "LunaOpenSDK/1.0.10"
+    private static let scope = "user_info,luna.openapi.platform.interaction,"
+        + "luna.openapi.platform.me_tab,luna.commerce.openapi_platform.vip_info"
+    private static let deviceIdKey = "folia.qishui.deviceId"
+
+    /// 页面上 `login_qr_key` → `login_qr_create` → `login_qr_check` 三步共用的会话。
+    private struct QRSession {
+        let token: String
+        let image: String
+        let expires: Date
+    }
+
+    private var pendingQR: [String: QRSession] = [:]
 
     weak var webView: WKWebView?
 
     private let session: URLSession = {
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 15
+        config.timeoutIntervalForRequest = 20
         config.timeoutIntervalForResource = 30
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         return URLSession(configuration: config)
     }()
+
+    /// 19 位数字设备号，按协议要求持久化（`/^\d{19}$/`）。
+    private var deviceId: String {
+        if let saved = UserDefaults.standard.string(forKey: Self.deviceIdKey),
+           saved.count == 19, saved.allSatisfy({ $0.isNumber }) {
+            return saved
+        }
+        var value = String(UInt64.random(in: 1_000_000_000_000_000_000...9_000_000_000_000_000_000))
+        while value.count < 19 { value = "1" + value }
+        UserDefaults.standard.set(value, forKey: Self.deviceIdKey)
+        return value
+    }
 
     func userContentController(_ userContentController: WKUserContentController,
                                didReceive message: WKScriptMessage) {
@@ -5640,68 +5675,184 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
               let id = body["id"] as? String,
               let action = body["action"] as? String else { return }
         let params = body["params"] as? [String: Any] ?? [:]
-
-        var components = URLComponents(string: Self.baseURL + "/" + action)
-        // 写操作走 POST 表单，其余走 GET query。
-        let writeActions: Set<String> = ["login_qr_create", "login_qr_cancel", "logout",
-                                         "like_song", "dislike_song"]
-        var items: [URLQueryItem] = []
-        for (key, value) in params {
-            if let text = value as? String { items.append(URLQueryItem(name: key, value: text)) }
-            else if let number = value as? NSNumber { items.append(URLQueryItem(name: key, value: number.stringValue)) }
-        }
-        components?.queryItems = items.isEmpty ? nil : items
-        guard let url = components?.url else {
-            reply(id: id, payload: ["ok": false, "error": ["code": "network", "message": "bad url"]])
-            return
-        }
-
-        var request = URLRequest(url: url)
-        if writeActions.contains(action) {
-            request.httpMethod = "POST"
-            request.setValue("application/x-www-form-urlencoded; charset=utf-8",
-                             forHTTPHeaderField: "Content-Type")
-        }
-        // 带上壳标识，方便服务端按客户端区分（与页面的 UA 约定一致）。
-        request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
-        // 站点自身的 Cookie 由 WKWebView 管理；这里用默认 cookie 存储共享登录态。
-        request.setValue(HTTPCookieStorage.shared.cookies(for: url)?.map { "\($0.name)=\($0.value)" }
-                            .joined(separator: "; "), forHTTPHeaderField: "Cookie")
-
-        let task = session.dataTask(with: request) { [weak self] data, response, error in
-            if let error {
-                self?.reply(id: id, payload: ["ok": false,
-                                              "error": ["code": "network",
-                                                        "message": error.localizedDescription]])
-                return
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let result: [String: Any]
+            do {
+                result = ["ok": true, "data": try self.perform(action, params)]
+            } catch let failure as Failure {
+                result = ["ok": false, "error": failure.payload]
+            } catch {
+                result = ["ok": false, "error": ["code": "invalid-response",
+                                                 "message": "Qishui operation failed"]]
             }
-            guard let http = response as? HTTPURLResponse, let data else {
-                self?.reply(id: id, payload: ["ok": false,
-                                              "error": ["code": "network", "message": "empty response"]])
-                return
-            }
-            guard (200..<300).contains(http.statusCode) else {
-                self?.reply(id: id, payload: ["ok": false,
-                                              "error": ["code": "http-\(http.statusCode)",
-                                                        "message": "upstream \(http.statusCode)"]])
-                return
-            }
-            // 上游返回什么就原样交给页面：`data` 这一层由页面自己解释。
-            let text = String(data: data, encoding: .utf8) ?? ""
-            if let json = try? JSONSerialization.jsonObject(with: data),
-               let dict = json as? [String: Any],
-               let inner = dict["data"] {
-                self?.reply(id: id, payload: ["ok": true, "data": inner])
-            } else if let json = try? JSONSerialization.jsonObject(with: data) {
-                self?.reply(id: id, payload: ["ok": true, "data": json])
-            } else {
-                self?.reply(id: id, payload: ["ok": true, "data": text])
-            }
+            self.reply(id: id, payload: result)
         }
-        task.resume()
     }
 
-    private static let userAgent: String = WebContainerView.userAgent
+    // MARK: - 操作分发
+
+    private func perform(_ action: String, _ params: [String: Any]) throws -> Any {
+        switch action {
+        case "login_qr_key": return try createQRKey()
+        case "login_qr_create": return try qrImage(key: string(params["key"]))
+        case "login_qr_check": return try checkQR(key: string(params["key"]))
+        case "login_qr_cancel":
+            pendingQR.removeValue(forKey: string(params["key"]))
+            return NSNull()
+        case "login_status": return NSNull()
+        case "logout":
+            pendingQR.removeAll()
+            return NSNull()
+        default:
+            throw Failure(code: "unavailable", message: "Qishui \(action) is not available on iOS")
+        }
+    }
+
+    private func createQRKey() throws -> Any {
+        pendingQR = pendingQR.filter { $0.value.expires > Date() }
+        // `get_qrcode` 只需要这一段查询串；带上 cookie 或签名都不需要，实测直连可用。
+        let url = "https://open.douyin.com/oauth/get_qrcode/?" + queryString(Self.qrParams())
+        let json = try jsonObject(GET(url))
+        guard let data = json["data"] as? [String: Any],
+              let token = data["token"] as? String,
+              let qrcode = data["qrcode"] as? String else {
+            throw Failure(code: "invalid-response", message: "QR code is missing")
+        }
+        let key = Self.hexKey()
+        pendingQR[key] = QRSession(token: token,
+                                   image: "data:image/png;base64,\(qrcode)",
+                                   expires: Date().addingTimeInterval(300))
+        return ["key": key]
+    }
+
+    private func qrImage(key: String) throws -> Any {
+        guard let entry = pendingQR[key] else {
+            throw Failure(code: "unavailable", message: "QR session expired")
+        }
+        return ["imageUrl": entry.image]
+    }
+
+    private func checkQR(key: String) throws -> Any {
+        guard let entry = pendingQR[key] else { return ["state": "expired"] }
+        var params = Self.qrParams()
+        params["token"] = entry.token
+        params["timestamp"] = String(Int(Date().timeIntervalSince1970 * 1000))
+        let json = try jsonObject(GET("https://open.douyin.com/oauth/check_qrcode/?" + queryString(params)))
+        let status = (json["data"] as? [String: Any])?["status"] as? String ?? ""
+        switch status {
+        case "new": return ["state": "waiting"]
+        case "scanned": return ["state": "scanned"]
+        case "confirmed":
+            // 换凭据要带 P-256 CSR 与 `bd-ticket-guard` 签名头，壳里没实现。
+            pendingQR.removeValue(forKey: key)
+            throw Failure(code: "unsupported",
+                          message: "Qishui sign-in needs the signed ticket exchange",
+                          stage: "access-code")
+        case "expired":
+            pendingQR.removeValue(forKey: key)
+            return ["state": "expired"]
+        case "refused":
+            pendingQR.removeValue(forKey: key)
+            return ["state": "error", "failure": ["case": "refused"]]
+        default:
+            throw Failure(code: "invalid-response", message: "Invalid QR status")
+        }
+    }
+
+    // MARK: - 网络
+
+    private func GET(_ raw: String) throws -> (Data, HTTPURLResponse) {
+        guard let url = URL(string: raw) else {
+            throw Failure(code: "invalid-response", message: "Invalid Qishui URL")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue(Self.sdkUA, forHTTPHeaderField: "User-Agent")
+        let box = ResponseBox()
+        let done = DispatchSemaphore(value: 0)
+        session.dataTask(with: request) { data, response, error in
+            box.data = data
+            box.response = response as? HTTPURLResponse
+            box.error = error
+            done.signal()
+        }.resume()
+        if done.wait(timeout: .now() + 30) == .timedOut {
+            throw Failure(code: "network", message: "Qishui service could not be reached")
+        }
+        if box.error != nil {
+            throw Failure(code: "network", message: "Qishui service could not be reached")
+        }
+        guard let http = box.response, let data = box.data else {
+            throw Failure(code: "network", message: "Qishui service could not be reached")
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            throw Failure(code: http.statusCode == 429 ? "unavailable" : "network",
+                          message: "Qishui HTTP \(http.statusCode)",
+                          upstream: String(http.statusCode))
+        }
+        return (data, http)
+    }
+
+    private func jsonObject(_ carried: (Data, HTTPURLResponse)) throws -> [String: Any] {
+        guard let json = try? JSONSerialization.jsonObject(with: carried.0) as? [String: Any] else {
+            throw Failure(code: "invalid-response", message: "Qishui response is not JSON")
+        }
+        let code = (json["error_code"] as? NSNumber)?.intValue ?? 0
+        if code != 0 {
+            throw Failure(code: "unavailable", message: "Qishui rejected the request",
+                          upstream: String(code))
+        }
+        return json
+    }
+
+    private static func qrParams() -> [String: String] {
+        ["aid": "1128", "client_key": clientKey, "scope": scope,
+         "state": "", "next": "", "jump_type": "native",
+         "optional_scope_check": "", "optional_scope_uncheck": "",
+         "customize_params": "{\"source\":\"pc_auth\",\"not_skip_confirm\":\"true\"}",
+         "source_from": "native", "device_platform": "android",
+         "app_identity": appIdentity, "signature": signature]
+    }
+
+    private func queryString(_ values: [String: String]) -> String {
+        values.map { key, value in
+            let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")
+            let encoded = value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+            return "\(key)=\(encoded)"
+        }.joined(separator: "&")
+    }
+
+    private static func hexKey() -> String {
+        (0..<16).map { _ in String(format: "%02x", Int.random(in: 0...255)) }.joined()
+    }
+
+    private func string(_ value: Any?) -> String {
+        if let text = value as? String { return text }
+        if let number = value as? NSNumber { return number.stringValue }
+        return ""
+    }
+
+    /// 页面侧的错误分类只认这几个字段，多传会被忽略。
+    private struct Failure: Error {
+        let code: String
+        let message: String
+        var upstream: String?
+        var stage: String?
+
+        var payload: [String: Any] {
+            var body: [String: Any] = ["code": code, "message": message]
+            if let upstream { body["upstreamCode"] = upstream }
+            if let stage { body["stage"] = stage }
+            return body
+        }
+    }
+
+    private final class ResponseBox: @unchecked Sendable {
+        var data: Data?
+        var response: HTTPURLResponse?
+        var error: Error?
+    }
 
     /// 把结果交回页面里对应的那个 Promise。
     private func reply(id: String, payload: [String: Any]) {
