@@ -375,31 +375,7 @@ final class WebContainerView: UIView {
     /// - `url-filter` 只匹配文件名形如 `@2x.png` / `@3x.jpg` / `@2x.webp` 的图片，
     ///   网易云与大部分图床的封面都是这个命名，1x 版本仍在，页面不会缺图；
     /// - 没有 `if-domain`：任何域名下的封面都一样处理，站点换域名不受影响。
-    private static let downscaleRuleJSON = #"[{"trigger":{"url-filter":".*@[23]x\\.(png|jpg|jpeg|webp)(\\?.*)?$","resource-type":["image"]},"action":{"type":"block"}}]"#
-}
-
-private extension WKContentRuleListStore {
-    /// 同步拿到降载规则表；编译失败就当作没有（不让它挡住页面）。
-    ///
-    /// 只在主线程调用（`makeConfiguration` 里），用信号量等编译回调：
-    /// 2 秒超时兜底，避免规则处理异常时拖住启动。
-    func foliaDownscaleRuleList() -> WKContentRuleList? {
-        var compiled: WKContentRuleList?
-        let semaphore = DispatchSemaphore(value: 0)
-        compileContentRuleList(forIdentifier: "folia-downscale-images",
-                               encodedContentRuleList: WebContainerView.downscaleRuleJSON) { list, error in
-            if let error {
-                NSLog("[Folia] content rule list compile failed: %@", error.localizedDescription)
-            }
-            compiled = list
-            semaphore.signal()
-        }
-        if semaphore.wait(timeout: .now() + 2) == .timedOut {
-            return nil
-        }
-        return compiled
-    }
-}
+    static let downscaleRuleJSON = #"[{"trigger":{"url-filter":".*@[23]x\\.(png|jpg|jpeg|webp)(\\?.*)?$","resource-type":["image"]},"action":{"type":"block"}}]"#
 
     /// 二维码回传通道（重建 WebView 时要重新指向新实例）。
     private var qrRelay: QRFallbackRelay?
@@ -5501,6 +5477,31 @@ extension WebContainerView {
         }
         // 读不到就返回空脚本，不影响页面正常加载
         return ""
+    }
+}
+
+// MARK: - 降载内容规则
+
+private extension WKContentRuleListStore {
+    /// 同步拿到降载规则表；编译失败就当作没有（不让它挡住页面）。
+    ///
+    /// 只在主线程调用（`makeConfiguration` 里），用信号量等编译回调：
+    /// 2 秒超时兜底，避免规则处理异常时拖住启动。
+    func foliaDownscaleRuleList() -> WKContentRuleList? {
+        var compiled: WKContentRuleList?
+        let semaphore = DispatchSemaphore(value: 0)
+        compileContentRuleList(forIdentifier: "folia-downscale-images",
+                               encodedContentRuleList: WebContainerView.downscaleRuleJSON) { list, error in
+            if let error {
+                NSLog("[Folia] content rule list compile failed: %@", error.localizedDescription)
+            }
+            compiled = list
+            semaphore.signal()
+        }
+        if semaphore.wait(timeout: .now() + 2) == .timedOut {
+            return nil
+        }
+        return compiled
     }
 }
 
