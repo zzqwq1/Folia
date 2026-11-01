@@ -365,7 +365,8 @@ final class WebContainerView: UIView {
         userContent.add(intentRelay, name: "foliaAudioIntent")
         // 汽水音乐音源：线上页的请求入口是 `window.electron.qishuiRequest`。
         // 壳里没有 Electron，这条通道由原生代发（见 `QishuiBridge`）。
-        // 注意 `electron` 这个身份会被 `shellBridgeScript` 钉死（0.7.24 拿它判桌面窗口）。
+        // 注意 `electron` 这个对象同时是 0.7.24 判定桌面窗口的依据，
+        // 桌面分支在 iPhone 上的影响已逐条核对（见 `bridgeInstallScript`）。
         userContent.add(qishuiRelay, name: "foliaQishui")
         // 注册原生播放器桥
         NativePlayer.shared.webView = nil
@@ -385,17 +386,30 @@ final class WebContainerView: UIView {
     /// - 没有 `if-domain`：任何域名下的封面都一样处理，站点换域名不受影响。
     static let downscaleRuleJSON = #"[{"trigger":{"url-filter":".*@[23]x\\.(png|jpg|jpeg|webp)(\\?.*)?$","resource-type":["image"]},"action":{"type":"block"}}]"#
 
-    /// 0.7.24 起线上页用「有没有 `window.electron`」判断是不是桌面窗口：
-    /// `isElectronWindow` 决定是否渲染 Electron 自绘标题栏、窗口圆角、点击穿透按钮，
-    /// 而 `AppShell` 在窗口圆角分支里会直接 `await window.electron.isWindowMaximized()`
-    /// 这类只有真 Electron 才有的句柄 —— 我们在 iOS 壳里补的 `qishuiRequest`
-    /// 会让页面把这些分支全部当成可用，表现是顶部多出一条桌面标题栏、
-    /// 窗口控件全失效（用户视角就是「布局乱了 / 点了没反应」）。
+    /// 汽水音乐音源的桥。页面侧入口是 `window.electron.qishuiRequest`。
     ///
-    /// 所以补完通道之后立刻抹掉 `electron` 这个名字：桥本身留在 `__foliaBridge` 上，
-    /// 原生回填也走 `__foliaBridge`，页面侧凡是 `window.electron?.xxx` 的探测
-    /// 全部退化成可选链短路（等价于网页版，正是 iOS 壳想要的）。
-    /// 代价是汽水音源在 0.7.24 页面上会重新变成不可用 —— 布局与点击可靠优先。
+    /// 线上页只有在 `typeof window.electron?.qishuiRequest === 'function'` 时才会把
+    /// 「汽水音乐」标成可用音源，否则在列表里是灰的、提示需要桌面端。
+    /// 桌面端这条通道由 Electron 主进程代发，iOS 里没有，所以原生替它发（见 `QishuiBridge`）。
+    ///
+    /// **为什么可以保留 `electron` 这个名字。**
+    ///
+    /// 0.7.24 的 `App.tsx` 用 `Boolean(window.electron)` 得出 `isElectronWindow`，
+    /// 早就担心这会把 iOS 壳误认成桌面窗口。逐个核对 0.7.24 源码后，它的下游分支在
+    /// iPhone 上都不会造成实际影响：
+    /// - `voiceInputPauseSupported = isElectronWindow && runsOnWindows()`：
+    ///   `runsOnWindows()` 读 UA，iOS 的 UA 不含 `win`，恒为假；
+    /// - `useCustomWindowRadius = isElectronWindow && transparentPlayerBackground && !wallpaperMode`：
+    ///   只在该组合下才挂窗口圆角的 `useEffect` 去等 `isWindowMaximized`，普通不透明播放页不进入；
+    /// - `usesCustomWindowChrome = isElectronWindow && !wallpaperMode` 会渲染一条 32px 的标题栏外壳，
+    ///   但它是 `absolute` + `pointer-events-none` 的浮层，只吞掉自身那一条高度，
+    ///   不参与布局流，也不拦截点击；
+    /// - 其余 `window.electron?.xxx` 全是可选链，缺方法就短路，不会抛错。
+    /// 所以保留它换回汽水音源，代价只是顶部多一条透明浮层。
+    ///
+    /// 另外补三个最小实现，避免桌面分支里 `await` 一个不存在的函数：
+    /// `isWindowMaximized` / `isWindowFullscreen` 返回 `false`，`onWindowFullscreenChanged`
+    /// 返回一个空的退订函数（页面把返回值当 unsubscribe 用）。
     static let bridgeInstallScript = """
     (function(){
       var bridge = window.electron || {};
@@ -426,19 +440,25 @@ final class WebContainerView: UIView {
           else { slot.reject(obj && obj.error ? obj.error : { code: 'network', message: 'request failed' }); }
         } catch (e) { slot.reject({ code: 'network', message: 'bad payload' }); }
       };
-      window.__foliaBridge = bridge;
+      // 窗口句柄的最小实现：壳里没有最大化 / 全屏窗口的概念，一律报「不是」。
+      try {
+        if (typeof bridge.isWindowMaximized !== 'function') {
+          bridge.isWindowMaximized = function(){ return Promise.resolve(false); };
+        }
+        if (typeof bridge.isWindowFullscreen !== 'function') {
+          bridge.isWindowFullscreen = function(){ return Promise.resolve(false); };
+        }
+        if (typeof bridge.onWindowFullscreenChanged !== 'function') {
+          bridge.onWindowFullscreenChanged = function(){ return function(){}; };
+        }
+      } catch (e) {}
       try {
         if (typeof bridge.getLoginDiagnostics !== 'function') {
           bridge.getLoginDiagnostics = function(){ return Promise.resolve(null); };
         }
       } catch (e) {}
-      // 见 `bridgeInstallScript` 的注释：抹掉 electron 这个身份。
-      try {
-        if (window.electron) { delete window.electron; }
-      } catch (e) {}
-      try {
-        if (typeof window.electron !== 'undefined') { window.electron = undefined; }
-      } catch (e) {}
+      window.electron = bridge;
+      window.__foliaBridge = bridge;
     })();
     """
 
@@ -4043,17 +4063,13 @@ final class WebContainerView: UIView {
         webView?.evaluateJavaScript(Self.audioKeeperScript(), completionHandler: nil)
     }
 
-    /// 汽水音乐音源桥：补上 `qishuiRequest` 通道，然后把 `window.electron` 这个身份抹掉。
+    /// 汽水音乐音源桥：给页面挂上 `window.electron.qishuiRequest`。
     ///
     /// 线上站把汽水音乐作为一个可选音源，判定条件是
     /// `typeof window.electron?.qishuiRequest === 'function'`；不满足就报
     /// `unavailable / Qishui requires the desktop app`，音源在列表里直接不可用。
     /// 那段代码在桌面端由 Electron 主进程代发请求，iOS 壳里没有 Electron，
     /// 于是这里用 `WKScriptMessageHandler` 把同一件事接过来（见 `QishuiBridge`）。
-    ///
-    /// 但 0.7.24 又把这个对象当成了「我是桌面窗口」的判据（`isElectronWindow`），
-    /// 留着它会让页面渲染 Electron 自绘标题栏并等一堆不存在的窗口句柄 ——
-    /// 所以补完通道后立刻删掉（script 见 `bridgeInstallScript`）。
     ///
     /// 返回值形状必须严格对齐页面期望：
     /// - 成功：`{ ok: true, data }`
@@ -4307,26 +4323,20 @@ final class WebContainerView: UIView {
       try {
       document.documentElement.setAttribute('data-folia-shell', '1');
       window.__FOLIA_SHELL__ = 'ios';
-      // **确保线上页不会把壳当成 Electron 桌面窗口。**
+      // **确保页面拿到的 `electron` 是个可写的普通对象。**
       //
       // 0.7.24 的 `App.tsx` 用 `Boolean(window.electron)` 得出 `isElectronWindow`，
-      // 一旦为真就渲染桌面自绘标题栏、窗口圆角、点击穿透按钮，并 await
-      // `isWindowMaximized` / `isWindowFullscreen` / `onWindowFullscreenChanged`
-      // 这些只有 Electron 主进程才提供的句柄 —— iOS 壳里一个都没有，
-      // 结果是顶部多出一条点不动的标题栏、播放页按钮被压住。
-      // 这里在文档最前面把它钉成 undefined（属性本身存在但不可写，
-      // 之后任何脚本想赋值都会被静默忽略，判定恒为假）。
+      // 而汽水音源又只在 `window.electron.qishuiRequest` 存在时才可用 ——
+      // 两者共用同一个对象。所以这里不能把它钉死成 `undefined`（那会连带让汽水音源消失），
+      // 而是保证它就是一个空的、可写的普通对象，具体方法由 `bridgeInstallScript` 在提交后补上。
+      // 桌面窗口分支在 iPhone 上的实际影响已逐条核对，见 `bridgeInstallScript` 的注释。
       try {
-        var hadElectron = Object.prototype.hasOwnProperty.call(window, 'electron');
-        if (hadElectron || typeof window.electron !== 'undefined') {
+        if (!Object.prototype.hasOwnProperty.call(window, 'electron')
+            || typeof window.electron !== 'object'
+            || window.electron === null) {
           try { delete window.electron; } catch (e) {}
+          window.electron = {};
         }
-        Object.defineProperty(window, 'electron', {
-          configurable: true,
-          enumerable: false,
-          get: function(){ return undefined; },
-          set: function(){}
-        });
       } catch (e) {}
       // 壳的实际版本（project.yml 的 MARKETING_VERSION），赞赏弹窗的「当前版本」用它，
       // 免得壳里显示的版本和装上的包对不上。
@@ -4915,8 +4925,8 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         // `decidePolicyFor` 往上传，主框架提交被中断，用户看到的就是黑屏。
         // 所以推迟到下一个 runloop，并且单独吞掉错误 —— 桥挂了只影响汽水音源，
         // 绝不能连带整个页面打不开。
-        // 顺带把 `electron` 身份再钉一次：`shellBridgeScript` 只在文档开始跑一次，
-        // 万一页面自己在启动阶段写入了 `window.electron`，这里兜住。
+        // 每次提交都补一次：桥挂在页面对象上，换文档就没了。
+        // `bridgeInstallScript` 里对已存在的方法做了覆盖，重复执行是安全的。
         DispatchQueue.main.async { [weak self] in
             self?.installQishuiBridge()
         }
