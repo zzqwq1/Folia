@@ -6283,7 +6283,7 @@ private final class QishuiSigner {
     /// 否则首次扫码会在 SDK 装载的几百毫秒里直接拿到 `signer not loaded`。
     private func dispatch(id: String, url: String) {
         guard let webView else {
-            take(id)?(.failure(SignError(message: "signer unavailable")))
+            take(id: id)?(.failure(SignError(message: "signer unavailable")))
             return
         }
         guard booted else {
@@ -6293,7 +6293,7 @@ private final class QishuiSigner {
         // 两个参数都编成 JSON 字符串字面量再嵌进脚本，避免网址里的引号、`&` 破坏语法。
         guard let data = try? JSONSerialization.data(withJSONObject: [id, url]),
               var pair = String(data: data, encoding: .utf8) else {
-            take(id)?(.failure(SignError(message: "signer argument error")))
+            take(id: id)?(.failure(SignError(message: "signer argument error")))
             return
         }
         pair.removeFirst(); pair.removeLast()
@@ -6317,7 +6317,7 @@ private final class QishuiSigner {
         webView.evaluateJavaScript(js) { [weak self] _, error in
             guard let self else { return }
             if error != nil {
-                self.take(id)?(.failure(SignError(message: "signer script error")))
+                self.take(id: id)?(.failure(SignError(message: "signer script error")))
             }
         }
     }
