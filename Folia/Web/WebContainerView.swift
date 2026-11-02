@@ -436,8 +436,16 @@ final class WebContainerView: UIView {
         delete pending[id];
         try {
           var obj = typeof payload === 'string' ? JSON.parse(payload) : payload;
-          if (obj && obj.ok) { slot.resolve(obj.data); }
-          else { slot.reject(obj && obj.error ? obj.error : { code: 'network', message: 'request failed' }); }
+          if (obj && obj.ok) { slot.resolve(obj.data); return; }
+          // 页面把 `result.error` 当对象直接读（`result.error.stage` / `.code` / `.message`），
+          // 这里必须保证它一定是个有这三个字段的对象，否则页面会 TypeError。
+          var err = (obj && obj.error && typeof obj.error === 'object') ? obj.error : {};
+          slot.reject({
+            code: typeof err.code === 'string' ? err.code : 'network',
+            message: typeof err.message === 'string' ? err.message : 'request failed',
+            stage: typeof err.stage === 'string' ? err.stage : undefined,
+            upstreamCode: err.upstreamCode
+          });
         } catch (e) { slot.reject({ code: 'network', message: 'bad payload' }); }
       };
       // 窗口句柄的最小实现：壳里没有最大化 / 全屏窗口的概念，一律报「不是」。
@@ -5775,6 +5783,8 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
               let id = body["id"] as? String,
               let action = body["action"] as? String else { return }
         let params = body["params"] as? [String: Any] ?? [:]
+        // 每次调用都必须回一条结果。页面侧抛异常时整个 Promise 永久挂起，
+        // 界面上就是「点了没反应」，所以这里不能有静默 return。
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             let result: [String: Any]
@@ -5805,7 +5815,10 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
             pendingQR.removeAll()
             return NSNull()
         default:
-            throw Failure(code: "unavailable", message: "Qishui \(action) is not available on iOS")
+            // `unavailable` 在页面侧是「这个音源不可用」，会把整个汽水入口置灰；
+            // 壳只是没实现某个读接口，不该让用户连登录都点不开。
+            throw Failure(code: "unsupported",
+                          message: "Qishui \(action) is not available on iOS")
         }
     }
 
@@ -5958,13 +5971,22 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
     private func reply(id: String, payload: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: payload),
               let text = String(data: data, encoding: .utf8) else { return }
-        // 用 JSON 字面量传，避免引号/换行在两处转义。
-        let literal = text
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "'", with: "\\'")
-            .replacingOccurrences(of: "\n", with: "\\n")
-            .replacingOccurrences(of: "\r", with: "")
-        let js = "try { window.__foliaBridge && window.__foliaBridge.__foliaResolve && window.__foliaBridge.__foliaResolve('\(id)', '\(literal)'); } catch (e) {}"
+        // 先把 payload 编成「JS 字符串字面量」，再把它嵌进调用里：
+        // 这样 payload 内部的任何引号、反斜杠、换行都由 JSON 自己保证转义正确，
+        // 不用手工拼三层转义（上一版就是手工拼的，base64 里的特殊字符会把脚本弄坏）。
+        guard let literalData = try? JSONSerialization.data(withJSONObject: [text], options: []),
+              var literal = String(data: literalData, encoding: .utf8) else { return }
+        // `[text]` 编出来是 `["..."]`，去掉两侧方括号就得到单个字符串字面量。
+        literal.removeFirst()
+        literal.removeLast()
+        let safeId = id.filter { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }
+        let js = """
+        try {
+          var bridge = window.__foliaBridge;
+          var payload = \(literal);
+          if (bridge && bridge.__foliaResolve) { bridge.__foliaResolve('\(safeId)', payload); }
+        } catch (e) {}
+        """
         DispatchQueue.main.async { [weak self] in
             self?.webView?.evaluateJavaScript(js, completionHandler: nil)
         }
