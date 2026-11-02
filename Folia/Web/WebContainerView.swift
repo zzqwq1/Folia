@@ -5874,7 +5874,20 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
 
     private func perform(_ action: String, _ params: [String: Any]) throws -> Any {
         switch action {
-        case "login_qr_key": return try createQRKey()
+        // 汽水账号登录在 iOS 上做不到，直接在第一步就说明，不再让用户扫码确认后才失败。
+        //
+        // 为什么不是「再补一步」：`oauth/access_code/get` 要求请求头带 `bd-ticket-guard`
+        // 的 P-256 签名，私钥只存在于官方车机 `LunaOpenSDK`，任何客户端调用都是
+        // `error_code=16 该应用无权限`；网页版绕行也不存在 —— `www.qishui.com` /
+        // `qishui.douyin.com` 都是下载引导页，`luna-web.douyin.com` 只有条款页，
+        // 没有可登录的 Web 播放器。
+        //
+        // 这里返回 `unavailable`（页面语义是「该音源登录不可用」），而不是让流程
+        // 走到换票那一步再抛错 —— 用户少扫一次码，诊断也一眼能看出原因。
+        case "login_qr_key":
+            throw Failure(code: "unavailable",
+                          message: "Qishui sign-in is not supported on iOS",
+                          stage: "access-code")
         case "login_qr_create": return try qrImage(key: string(params["key"]))
         case "login_qr_check": return try checkQR(key: string(params["key"]))
         case "login_qr_cancel":
@@ -5897,23 +5910,6 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
         }
     }
 
-    private func createQRKey() throws -> Any {
-        pendingQR = pendingQR.filter { $0.value.expires > Date() }
-        // `get_qrcode` 只需要这一段查询串；带上 cookie 或签名都不需要，实测直连可用。
-        let url = "https://open.douyin.com/oauth/get_qrcode/?" + queryString(Self.qrParams())
-        let json = try jsonObject(GET(url))
-        guard let data = json["data"] as? [String: Any],
-              let token = data["token"] as? String,
-              let qrcode = data["qrcode"] as? String else {
-            throw Failure(code: "invalid-response", message: "QR code is missing")
-        }
-        let key = Self.hexKey()
-        pendingQR[key] = QRSession(token: token,
-                                   image: "data:image/png;base64,\(qrcode)",
-                                   expires: Date().addingTimeInterval(300))
-        return ["key": key]
-    }
-
     private func qrImage(key: String) throws -> Any {
         guard let entry = pendingQR[key] else {
             throw Failure(code: "unavailable", message: "QR session expired")
@@ -5932,14 +5928,12 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
         case "new": return ["state": "waiting"]
         case "scanned": return ["state": "scanned"]
         case "confirmed":
-            // 用户已经扫过并在手机上确认了，剩下唯一一步是拿 `access_code` 换登录态。
-            //
-            // 这一步在客户端做不了：`oauth/access_code/get` 要求请求头带
-            // `bd-ticket-guard` 的 P-256 签名（私钥来自车机端 `LunaOpenSDK` 的 CSR 握手），
-            // 实测裸调返回 `error_code=16 该应用无权限`。所以把它交给服务端换票，
-            // 壳只负责转发。服务端接口见 `exchangeTicket`。
+            // 走到这里已经不可能：`login_qr_key` 在第一步就拒绝，拿不到 token。
+            // 保留分支只为覆盖服务端可能返回的未知状态，不发起任何请求。
             pendingQR.removeValue(forKey: key)
-            return try exchangeTicket(token: entry.token)
+            throw Failure(code: "unavailable",
+                          message: "Qishui sign-in is not supported on iOS",
+                          stage: "access-code")
         case "expired":
             pendingQR.removeValue(forKey: key)
             return ["state": "expired"]
@@ -5949,75 +5943,6 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
         default:
             throw Failure(code: "invalid-response", message: "Invalid QR status")
         }
-    }
-
-    // MARK: - 服务端换票
-
-    /// 换取登录态的转发地址。与站点里 `VITE_NETEASE_API_BASE` / `VITE_KUGOU_API_BASE` /
-    /// `VITE_QQ_API_BASE` 是同一套代理约定（`https://app.folia-api.top/api/<provider>`）。
-    private static let ticketExchangeURL = "https://app.folia-api.top/api/qishui/oauth/access-code"
-
-    /// 把已确认的扫码 token 交给服务端换成登录态。
-    ///
-    /// 服务端契约（与 `/api/qq` 等既有代理一致）：
-    /// - 请求：`POST { "token": "<check_qrcode 返回的 token>" }`
-    /// - 成功：`200 { "ok": true, "data": { ... } }`，`data` 原样交给页面
-    /// - 失败：`{ "ok": false, "error": { "code": "...", "message": "...", "stage": "..." } }`
-    ///
-    /// 服务端就位前这里会明确报「未部署」，而不是让页面停在一个含义不明的错误上。
-    private func exchangeTicket(token: String) throws -> Any {
-        guard let url = URL(string: Self.ticketExchangeURL) else {
-            throw Failure(code: "invalid-response", message: "Invalid Qishui ticket URL")
-        }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(Self.sdkUA, forHTTPHeaderField: "User-Agent")
-        request.httpBody = try JSONSerialization.data(withJSONObject: ["token": token])
-
-        let box = ResponseBox()
-        let done = DispatchSemaphore(value: 0)
-        session.dataTask(with: request) { data, response, error in
-            box.data = data
-            box.response = response as? HTTPURLResponse
-            box.error = error
-            done.signal()
-        }.resume()
-        if done.wait(timeout: .now() + 30) == .timedOut {
-            throw Failure(code: "network", message: "Qishui ticket exchange timed out",
-                          stage: "access-code")
-        }
-        if box.error != nil {
-            throw Failure(code: "network", message: "Qishui ticket exchange unreachable",
-                          stage: "access-code")
-        }
-        guard let http = box.response, let data = box.data else {
-            throw Failure(code: "network", message: "Qishui ticket exchange unreachable",
-                          stage: "access-code")
-        }
-        // 服务端还没部署这个路由时，把「未部署」和「换票失败」区分开。
-        guard (200..<300).contains(http.statusCode) else {
-            let deployed = http.statusCode != 404
-            throw Failure(code: deployed ? "network" : "unsupported",
-                          message: deployed
-                            ? "Qishui ticket exchange failed: HTTP \(http.statusCode)"
-                            : "Qishui ticket exchange is not deployed on the server",
-                          upstream: String(http.statusCode),
-                          stage: "access-code")
-        }
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw Failure(code: "invalid-response",
-                          message: "Qishui ticket exchange returned unreadable data",
-                          stage: "access-code")
-        }
-        if let ok = json["ok"] as? Bool, ok == false {
-            let err = json["error"] as? [String: Any] ?? [:]
-            throw Failure(code: err["code"] as? String ?? "network",
-                          message: err["message"] as? String ?? "Qishui ticket exchange failed",
-                          upstream: err["upstreamCode"] as? String,
-                          stage: err["stage"] as? String ?? "access-code")
-        }
-        return json["data"] ?? json
     }
 
     // MARK: - 网络
@@ -6081,10 +6006,6 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
             let encoded = value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
             return "\(key)=\(encoded)"
         }.joined(separator: "&")
-    }
-
-    private static func hexKey() -> String {
-        (0..<16).map { _ in String(format: "%02x", Int.random(in: 0...255)) }.joined()
     }
 
     private func string(_ value: Any?) -> String {
