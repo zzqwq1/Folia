@@ -3567,6 +3567,8 @@ final class WebContainerView: UIView {
                    WebContainerView.stableFallback(from: live) == nil {
                     WebContainerView.clearRouteDeath(live)
                 }
+                // 首屏就绪再开赞赏弹窗：在那之前 DOM 里的图片还没解码，弹出来是两张空白框。
+                self.installDonateCard()
                 // 版本行要等设置面板挂出来才有 DOM，首屏后每隔一秒补一次，两分钟内有效即停。
                 self.scheduleHelpVersionPatch()
                 return
@@ -4174,6 +4176,76 @@ final class WebContainerView: UIView {
     /// 但能让线上日志一眼看出是哪个版本的壳在跑。
     static let appVersion: String =
         (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0"
+
+    /// 把页面自带的赞赏弹窗打开。
+    ///
+    /// 线上页的赞赏脚本开头有 `if (/iPhone|iPad|iPod/i.test(UA)) return;`，
+    /// 装在 App 里时整段直接退出，弹窗永远不会出现；而壳的 UA 一定含 "iPhone"。
+    /// 这里在首屏就绪后按同一份 DOM 自己打开，并补上脚本里因提前返回而没绑上的点击：
+    /// 关闭按钮、点空白关闭、「获取」跳转、二维码长按保存。
+    ///
+    /// 版本号与更新公告也一并接手：壳把 Info.plist 的实际版本写进 `window.__foliaAppVersion`，
+    /// 「当前版本」与「最新版本」都取它，改版本只需要改 project.yml 一处。
+    private func installDonateCard() {
+        let js = """
+        (function(){
+          if (window.__foliaDonateInstalled) { return; }
+          var mask = document.getElementById('donate-mask');
+          if (!mask) { return; }
+          window.__foliaDonateInstalled = true;
+
+          var QUARK_URL = 'https://pan.quark.cn/s/934c480d5b9c';
+
+          // 两个版本号都取壳带进来的实际版本（Info.plist 的 MARKETING_VERSION）：
+          // 旧版线上页的常量停在 1.8.5，沿用会让「当前版本」永远显示旧值。
+          // 壳内「最新版本」=「当前版本」，因为包就是从网盘拿的最新那一份。
+          var cur = window.__foliaAppVersion || '';
+          var latest = cur;
+
+          var verNum = document.getElementById('donate-version-num');
+          if (verNum && cur) { verNum.textContent = cur; }
+          var latestNum = document.getElementById('donate-latest-num');
+          if (latestNum && latest) { latestNum.textContent = latest; }
+
+          var getLatest = document.getElementById('donate-get-latest');
+          if (getLatest) {
+            // 公告照弹、获取入口保留：这里是「去网盘拿最新包」的唯一入口，
+            // 版本号相同也照样可点，不能因为 2.0 就把它藏掉。
+            getLatest.addEventListener('click', function(e){
+              e.preventDefault();
+              try { window.open(QUARK_URL, '_blank'); } catch (err) { location.href = QUARK_URL; }
+            });
+          }
+
+          var closeBtn = document.getElementById('donate-close');
+          if (closeBtn) {
+            closeBtn.addEventListener('click', function(){ mask.classList.remove('show'); });
+          }
+          mask.addEventListener('click', function(e){ if (e.target === mask) { mask.classList.remove('show'); } });
+
+          // 每次启动都弹一次：sessionStorage 里那条是网页版防重复用的，壳里不清就会被跳过。
+          try { sessionStorage.removeItem('folia.donate.shown'); } catch (e) {}
+
+          // 横幅本身已经挡住了整屏，网页里的长按菜单（放大镜、复制链接）用不上；
+          // 但二维码要能「长按保存到相册」，所以只对二维码图片放开手势。
+          var imgs = mask.querySelectorAll('img');
+          for (var i = 0; i < imgs.length; i += 1) {
+            try {
+              imgs[i].style.webkitUserSelect = 'auto';
+              imgs[i].style.webkitTouchCallout = 'default';
+            } catch (e) {}
+          }
+
+          setTimeout(function(){ mask.classList.add('show'); }, 1200);
+
+          // 更新公告（#update-mask）在壳里不弹：版本号已经固定成壳的实际版本，
+          // 这条「新版本已发布」对已装最新包的人只是打扰。网盘入口保留在赞赏弹窗里。
+          var updateMask = document.getElementById('update-mask');
+          if (updateMask) { updateMask.style.display = 'none'; }
+        })();
+        """
+        webView?.evaluateJavaScript(js, completionHandler: nil)
+    }
 
     /// 首屏之后轮询补版本行：设置面板是懒挂载的，用户点到「帮助」时 DOM 才出现，
     /// 单次注入永远赶不上。命中一次就停，两分钟没命中自然放弃。
