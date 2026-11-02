@@ -4197,10 +4197,19 @@ final class WebContainerView: UIView {
           var QUARK_URL = 'https://pan.quark.cn/s/934c480d5b9c';
 
           // 两个版本号都取壳带进来的实际版本（Info.plist 的 MARKETING_VERSION）：
-          // 旧版线上页的常量停在 1.8.5，沿用会让「当前版本」永远显示旧值。
+          // 线上页自己的常量停在 '2.1'，沿用会显示成旧值。
           // 壳内「最新版本」=「当前版本」，因为包就是从网盘拿的最新那一份。
           var cur = window.__foliaAppVersion || '';
           var latest = cur;
+
+          // 线上页的弹窗脚本会读这两个全局常量自行回填，先改掉，
+          // 否则它晚一拍执行又把 '2.1' 写回去。
+          try {
+            if (cur) {
+              try { window.FOLIA_VERSION = cur; } catch (e) {}
+              try { window.FOLIA_LATEST_VERSION = cur; } catch (e) {}
+            }
+          } catch (e) {}
 
           var verNum = document.getElementById('donate-version-num');
           if (verNum && cur) { verNum.textContent = cur; }
@@ -4413,6 +4422,12 @@ final class WebContainerView: UIView {
       // 壳的实际版本（project.yml 的 MARKETING_VERSION），赞赏弹窗的「当前版本」用它，
       // 免得壳里显示的版本和装上的包对不上。
       window.__foliaAppVersion = '\(appVersion)';
+      // 线上页的赞赏脚本自己会读这两个常量回填版本号，而它的常量停在 '2.1'。
+      // 在 document-start 阶段就钉成壳版本，晚执行的页面脚本读到的也是新值。
+      try {
+        Object.defineProperty(window, 'FOLIA_VERSION', { value: '\(appVersion)', writable: true, configurable: true });
+        Object.defineProperty(window, 'FOLIA_LATEST_VERSION', { value: '\(appVersion)', writable: true, configurable: true });
+      } catch (e) {}
       // 线上站的赞赏弹窗自带 `if (/iPhone|iPad|iPod/i.test(UA)) return;`（本该是
       // 「网页版才弹、装进 App 别挡开机」的考虑），所以在壳里一直弹不出来。
       // 这里把 navigator.userAgent **只是**改掉 iPhone/iPad/iPod 这几个词，
