@@ -4341,6 +4341,19 @@ final class WebContainerView: UIView {
       // 壳的实际版本（project.yml 的 MARKETING_VERSION），赞赏弹窗的「当前版本」用它，
       // 免得壳里显示的版本和装上的包对不上。
       window.__foliaAppVersion = '\(appVersion)';
+      // 线上站的赞赏弹窗自带 `if (/iPhone|iPad|iPod/i.test(UA)) return;`（本该是
+      // 「网页版才弹、装进 App 别挡开机」的考虑），所以在壳里一直弹不出来。
+      // 这里把 navigator.userAgent **只是**改掉 iPhone/iPad/iPod 这几个词，
+      // 让页面那段判定放行；壳标识（FoliaApp/2.1.5）保持原样，页面其它按 UA 分支
+      // 的逻辑不受影响。
+      //
+      // 页面脚本在 document start 之后才执行，此刻改好即可。
+      try {
+        var ua = (navigator.userAgent || '').replace(/iPhone|iPad|iPod/g, 'Macintosh');
+        try {
+          Object.defineProperty(navigator, 'userAgent', { get: function(){ return ua; }, configurable: true });
+        } catch (e) {}
+      } catch (e) {}
       // 更新公告在壳里不弹。页面脚本自带 UA 判定会提前 return，本不该弹；
       // 这里在文档开始时先钉一条样式兜底，任何时序下都压住 #update-mask。
       // 脚本注入点早于 <head>，所以等 DOMContentLoaded 再插入。
