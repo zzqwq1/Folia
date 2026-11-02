@@ -3,6 +3,7 @@ import SwiftUI
 import WebKit
 import Combine
 import AVFoundation
+import CryptoKit
 import UniformTypeIdentifiers
 
 /// 承载官方网页版的 WKWebView 容器。
@@ -5893,14 +5894,12 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
     /// 网页端协议里 `get_qrcode` 一次就返回 token 和图，页面的「key」和「创建」
     /// 两步在这里合并成一次请求，token 就是 key。
     private func createQRKey() throws -> Any {
-        let body = form([
-            ("aid", Self.passportAid),
+        let json = try signedGet("/get_qrcode/", query: Self.deviceParams() + [
             ("next", "https://api.qishui.com"),
             ("need_logo", "false"),
             ("need_short_url", "false"),
             ("is_frontier", "true")
-        ] + Self.deviceParams())
-        let json = try signedPost("/get_qrcode/", body: body)
+        ])
         let data = json["data"] as? [String: Any] ?? [:]
         guard let token = data["token"] as? String, !token.isEmpty,
               let image = data["qrcode"] as? String, !image.isEmpty else {
@@ -5925,24 +5924,14 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
             pendingQR.removeValue(forKey: key)
             return ["state": "expired"]
         }
-        let body = form([
-            ("aid", Self.passportAid),
-            ("token", entry.token),
-            ("next", "https://api.qishui.com"),
-            ("need_logo", "false"),
-            ("need_short_url", "false"),
-            ("is_frontier", "true"),
-            ("is_new_login", "1")
-        ] + Self.deviceParams())
-        let json = try signedPost("/check_qrconnect/", body: body)
+        let json = try signedPost("/check_qrconnect/",
+                                  query: Self.deviceParams(),
+                                  body: [("token", entry.token)])
         let data = json["data"] as? [String: Any] ?? [:]
-        let status = (data["status"] as? String) ?? (json["status"] as? String) ?? ""
-        switch status.lowercased() {
-        case "new", "1":
-            return ["state": "waiting"]
-        case "scanned", "2":
-            return ["state": "scanned"]
-        case "confirmed", "3":
+        let status = ((data["status"] as? String) ?? "").lowercased()
+        let code = (data["error_code"] as? NSNumber)?.intValue ?? 0
+        switch status {
+        case "confirmed":
             // 服务端说「已确认」不等于壳已经拿到会话：session cookie 可能还没下发。
             // 没 cookie 就继续当 scanned 轮询，否则页面会停在假登录态上。
             guard hasSession() else { return ["state": "scanned"] }
@@ -5950,18 +5939,22 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
             UserDefaults.standard.set(true, forKey: Self.signedInKey)
             try? importCookies()
             return ["state": "confirmed"]
-        case "expired", "4":
+        case "scanned":
+            return ["state": "scanned"]
+        case "expired":
             pendingQR.removeValue(forKey: key)
             return ["state": "expired"]
-        case "refused", "5":
-            pendingQR.removeValue(forKey: key)
-            return ["state": "error", "failure": ["case": "refused"]]
-        default:
-            // 网页端在「码过期 / 已拒绝」时不下发 status，只给 error_code 与一句话。
-            let code = (data["error_code"] as? NSNumber)?.intValue ?? 0
-            if code == 0 { return ["state": "waiting"] }
+        case "error", "failed":
             pendingQR.removeValue(forKey: key)
             let message = (data["description"] as? String) ?? "扫码登录失败"
+            throw Failure(code: "unavailable", message: message,
+                          upstream: String(code), stage: "account")
+        default:
+            // 网页端的「等待扫码」有两条路：`status` 为空且 `error_code=0`，
+            // 或者风控要求稍后再查（`error_code=7`）。两者都当作继续轮询。
+            if code == 0 || code == 7 { return ["state": "waiting"] }
+            pendingQR.removeValue(forKey: key)
+            let message = (data["description"] as? String) ?? "扫码登录失败（code=\(code)）"
             throw Failure(code: "unavailable", message: message,
                           upstream: String(code), stage: "account")
         }
@@ -6003,20 +5996,22 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
 
     // MARK: - 网络
 
-    /// 带 `a_bogus` 签名的 POST。
+    /// 带 `a_bogus` 签名的 GET。
     ///
-    /// 签名由隐藏 WebView 里的 SDK 算，这里只负责把算好的 URL 真正发出去。
-    private func signedPost(_ path: String, body: String) throws -> [String: Any] {
-        let unsigned = Self.passportBase + path
+    /// 网页端这两个接口都是 GET，`aid` 等参数必须写在 **query string** 上：
+    /// 只放 body 会被服务端当成缺少参数的裸路径，直接回 404。
+    /// 签名也必须在参数拼好之后做 —— `a_bogus` 是按整个地址算出来的。
+    private func signedGet(_ path: String, query: [(String, String)]) throws -> [String: Any] {
+        let qs = form(query)
+        let unsigned = Self.passportBase + path + (qs.isEmpty ? "" : "?" + qs)
         let signed = try signer.sign(url: unsigned)
         guard let url = URL(string: signed) else {
             throw Failure(code: "invalid-response", message: "Invalid signed Qishui URL")
         }
         var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.httpBody = body.data(using: .utf8)
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.httpMethod = "GET"
         request.setValue(Self.webUA, forHTTPHeaderField: "User-Agent")
+        request.setValue("application/json, text/javascript", forHTTPHeaderField: "Accept")
         request.setValue("https://www.qishui.com/", forHTTPHeaderField: "Origin")
         request.setValue("https://www.qishui.com/", forHTTPHeaderField: "Referer")
 
@@ -6045,11 +6040,73 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
                 for: url, mainDocumentURL: nil)
         }
         guard (200..<300).contains(http.statusCode) else {
+            // 404 / 403 这类「地址问题」只靠状态码定位不了：把签名器交回来的实际地址
+            // 和响应体前一段打出来，才能判断是路径拼错、还是域名被 SDK 换掉。
+            let snippet = box.data.flatMap { String(data: $0.prefix(200), encoding: .utf8) } ?? ""
+            NSLog("[Qishui] http %d path=%@ signed=%@ body=%@",
+                  http.statusCode, path, signed, snippet)
             throw Failure(code: http.statusCode == 429 ? "unavailable" : "network",
                           message: "Qishui HTTP \(http.statusCode)",
                           upstream: String(http.statusCode))
         }
         return try jsonObject(data)
+    }
+
+    /// 带 `a_bogus` 签名的 POST。
+    ///
+    /// 网页端 `check_qrconnect` 的形状是「公共参数在 query、`token` 在 body」，
+    /// 还要带 `x-ss-stub`（body 的 SHA-256 大写十六进制）作为完整性校验。
+    /// 三者缺一个都会被服务端判成非法请求。
+    private func signedPost(_ path: String,
+                            query: [(String, String)],
+                            body: [(String, String)]) throws -> [String: Any] {
+        let qs = form(query)
+        let payload = form(body)
+        let unsigned = Self.passportBase + path + (qs.isEmpty ? "" : "?" + qs)
+        let signed = try signer.sign(url: unsigned)
+        guard let url = URL(string: signed) else {
+            throw Failure(code: "invalid-response", message: "Invalid signed Qishui URL")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.httpBody = payload.data(using: .utf8)
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.setValue(Self.stub(for: payload), forHTTPHeaderField: "x-ss-stub")
+        request.setValue(Self.webUA, forHTTPHeaderField: "User-Agent")
+        request.setValue("application/json, text/javascript", forHTTPHeaderField: "Accept")
+        request.setValue("https://www.qishui.com/", forHTTPHeaderField: "Origin")
+        request.setValue("https://www.qishui.com/", forHTTPHeaderField: "Referer")
+
+        let box = ResponseBox()
+        let done = DispatchSemaphore(value: 0)
+        session.dataTask(with: request) { data, response, error in
+            box.data = data
+            box.response = response as? HTTPURLResponse
+            box.error = error
+            done.signal()
+        }.resume()
+        _ = done.wait(timeout: .now() + 30)
+        if let error = box.error {
+            throw Failure(code: "network", message: error.localizedDescription,
+                          upstream: (error as NSError).code.description)
+        }
+        guard let http = box.response, let data = box.data else {
+            throw Failure(code: "network", message: "Qishui returned no response")
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            let snippet = String(data: data.prefix(200), encoding: .utf8) ?? ""
+            NSLog("[Qishui] http %d path=%@ signed=%@ body=%@",
+                  http.statusCode, path, signed, snippet)
+            throw Failure(code: http.statusCode == 429 ? "unavailable" : "network",
+                          message: "Qishui HTTP \(http.statusCode)",
+                          upstream: String(http.statusCode))
+        }
+        return try jsonObject(data)
+    }
+
+    /// `x-ss-stub`：请求体的 SHA-256，大写十六进制。
+    private static func stub(for body: String) -> String {
+        SHA256.hash(data: Data(body.utf8)).map { String(format: "%02X", $0) }.joined()
     }
 
     private static let webUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -6079,7 +6136,9 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
             ("passport_jssdk_version", "2.4.13"),
             ("passport_jssdk_type", "normal"),
             ("is_from_ttaccountsdk", "1"),
+            ("aid", Self.passportAid),
             ("language", "zh"),
+            ("is_new_login", "1"),
             ("is_from_iesaccountsaas", "1"),
             ("device_id", deviceId),
             ("install_id", installId),
@@ -6087,18 +6146,20 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
             ("iid", installId),
             ("device_platform", "PC"),
             ("version_code", "3.3.0"),
+            ("biz_trace_id", String(format: "%08x", UInt32.random(in: 0...UInt32.max))),
             ("account_sdk_source", "web"),
             ("p_js_v", "2.4.13"),
             ("p_js_t", "normal"),
             ("p_zt", "3.3.5"),
             ("p_ver", "1.0.29"),
+            ("request_host", "file://"),
             ("p_bd", "1.0.0.41")
         ]
     }
 
-    /// 拼 `application/x-www-form-urlencoded` 请求体。
+    /// 拼 `key=value&...`（用于 query string）。
     ///
-    /// `+` 必须转义：不转的话服务端会把它解成空格，token 直接失效。
+    /// `+` 必须转义：不转的话服务端会把它解成空格，token 和签名都会失效。
     private func form(_ pairs: [(String, String)]) -> String {
         var allowed = CharacterSet.alphanumerics
         allowed.insert(charactersIn: "-._~")
@@ -6112,20 +6173,17 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw Failure(code: "invalid-response", message: "Qishui response is not JSON")
         }
-        // 网页端这两个接口成功时 `status_code` 为 0；有些分支只在 `data` 里给状态。
+        // 只看**顶层**状态：`check_qrconnect` 把「继续轮询」「过期」这些业务状态
+        // 全写在 `data` 里，顶层仍是 0。在这里把 `data` 里的码也当成失败，
+        // 轮询会被直接打断。
         let code = (json["status_code"] as? NSNumber)?.intValue
             ?? (json["error_code"] as? NSNumber)?.intValue ?? 0
         if code != 0 {
-            // 网页端把真正的失败原因写在 `data.description` / `data.error_code` 里，
-            // 顶层只有一个 `status_code`，照原样抛出去日志里才看得懂。
-            let inner = json["data"] as? [String: Any] ?? [:]
-            let detail = (inner["error_code"] as? NSNumber)?.intValue
-            let message = (inner["description"] as? String)
-                ?? (json["status_msg"] as? String)
+            let message = (json["status_msg"] as? String)
                 ?? (json["message"] as? String)
                 ?? "Qishui rejected the request"
             throw Failure(code: "unavailable", message: message,
-                          upstream: String(detail ?? code), stage: "account")
+                          upstream: String(code), stage: "account")
         }
         return json
     }
