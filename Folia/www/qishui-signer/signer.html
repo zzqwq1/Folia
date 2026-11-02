@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>signer</title>
+<style>html,body{margin:0;padding:0;background:transparent}</style>
+</head>
+<body>
+<script src="signer-hook.js"></script>
+<script src="sdk-glue.js"></script>
+<script>
+  window._SdkGlueInit({
+    self: { aid: 386088, pageId: 24554 },
+    bdms: { aid: 386088, paths: ['/passport'] }
+  });
+  window.__foliaSignerBooted = true;
+  window.webkit.messageHandlers.foliaQishuiSigner.postMessage({ type: 'booted' });
+</script>
+</body>
+</html>

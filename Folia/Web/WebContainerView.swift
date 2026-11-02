@@ -5765,31 +5765,26 @@ private final class QRFallbackRelay: NSObject, WKScriptMessageHandler {
 /// 汽水音乐的请求通道。
 ///
 /// 线上页把汽水音源的全部请求收敛到 `window.electron.qishuiRequest(action, params)`，
-/// 桌面端由 Electron 主进程用 `qishui-music-api` 直接跑字节开放接口；iOS 壳里没有
-/// Electron，也没有可以转发的后端（`/api/qishui` 这个路径从不存在，上一版据此
-/// 转发，用户看到的就是 `upstream 404`）。所以这里按协议自己实现。
+/// 桌面端由 Electron 主进程直接跑官方接口；iOS 壳里没有 Electron，所以按协议自己实现。
 ///
-/// 协议要点（对照 `qishui-music-api@0.2.2` 的 `src/*.cjs`）：
-/// - 公开读走 `open.qishui.com` 取 `client_token`，再带 `access-token` 头打
-///   `open.douyin.com/api/luna/v1/platform/<path>`；
-/// - 登录：`open.douyin.com/oauth/get_qrcode` 拿二维码 → 轮询 `check_qrcode` →
-///   `access/code/get` 换 access_code → `get_access_ticket` 换 ticket（需 P-256 CSR）。
+/// 登录走**网页端扫码协议**，不是开放平台那套：
+/// - `POST api.qishui.com/passport/web/get_qrcode/` 拿二维码；
+/// - `POST api.qishui.com/passport/web/check_qrconnect/` 轮询状态；
+/// - 确认后服务端直接把会话 cookie 下发到 `Set-Cookie`，登录即完成。
 ///
-/// 本轮只做到「二维码 + 轮询」：这一步不需要任何签名，实测可直接调用。
-/// 扫码之后那几步要带 `bd-ticket-guard` 的 P-256 签名头，页面侧会以
-/// `stage=access-code` 报错，界面上的表现是「扫码后登录未完成」，不会卡死。
+/// 关键点有两个，缺一不可：
+/// 1. 这些接口都要求 44 位 `a_bogus` 签名。签名由抖音风控 SDK 结合浏览器环境算出，
+///    原生侧造不出来，所以在壳里开一个隐藏的 WKWebView 跑 SDK（`www/qishui-signer/`），
+///    只取签名、不发请求。
+/// 2. 会话 cookie 必须写进**页面那个 WKWebView 的 `WKHTTPCookieStore`**，
+///    而不是 URLSession 自己的 cookie 仓，否则页面后续请求带不上登录态。
 ///
 /// 返回值形状由页面严格依赖（`qishuiTransport.ts`）：
 /// `{ok:true, data}` 或 `{ok:false, error:{code, message, upstreamCode?, stage?}}`。
 private final class QishuiBridge: NSObject, WKScriptMessageHandler {
-    private static let clientKey = "aw4bbxfujo741d09"
-    /// `md5("com.luna.music.car")`：车机端应用标识，缺了会被拒（error_code=10011）。
-    private static let appIdentity = "82a0737a3f8d93d9958c8a7938bbc365"
-    private static let signature = "cf9024ea72d9c71813238b13ea107a3d"
-    private static let sdkUA = "LunaOpenSDK/1.0.10"
-    private static let scope = "user_info,luna.openapi.platform.interaction,"
-        + "luna.openapi.platform.me_tab,luna.commerce.openapi_platform.vip_info"
-    private static let deviceIdKey = "folia.qishui.deviceId"
+    /// 汽水网页端登录的 aid：`get_qrcode` / `check_qrconnect` 都按它识别应用。
+    private static let passportAid = "386088"
+    private static let passportBase = "https://api.qishui.com/passport/web"
 
     /// 页面上 `login_qr_key` → `login_qr_create` → `login_qr_check` 三步共用的会话。
     private struct QRSession {
@@ -5810,17 +5805,12 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
         return URLSession(configuration: config)
     }()
 
-    /// 19 位数字设备号，按协议要求持久化（`/^\d{19}$/`）。
-    private var deviceId: String {
-        if let saved = UserDefaults.standard.string(forKey: Self.deviceIdKey),
-           saved.count == 19, saved.allSatisfy({ $0.isNumber }) {
-            return saved
-        }
-        var value = String(UInt64.random(in: 1_000_000_000_000_000_000...9_000_000_000_000_000_000))
-        while value.count < 19 { value = "1" + value }
-        UserDefaults.standard.set(value, forKey: Self.deviceIdKey)
-        return value
-    }
+    /// 跑签名 SDK 的隐藏容器。惰性创建，只在真正要登录时才付出这份启动开销。
+    private lazy var signer = QishuiSigner()
+
+    /// 页面上一次成功的登录态。cookie 由页面自己的 `WKHTTPCookieStore` 保存，
+    /// 这里只记「有没有登录过」，用于诊断和 `login_status`。
+    private static let signedInKey = "folia.qishui.signedIn"
 
     func userContentController(_ userContentController: WKUserContentController,
                                didReceive message: WKScriptMessage) {
@@ -5856,17 +5846,17 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
         }
     }
 
-    /// 壳侧自检：只有壳自己知道的事实（通道是否装好、设备号是否合规）。
+    /// 壳侧自检：页面在诊断报告的 `qishui details` 里逐行展示这些内容。
     ///
-    /// 页面在诊断报告的 `qishui details` 里逐行展示 `getLoginDiagnostics()` 的结果，
-    /// 之前这里是 `Promise.resolve(null)`，所以报告永远是 `(none)`。现在至少带上
-    /// 「桥是原生实现」「设备号是否合规」，下次再出问题能直接排除壳这一层。
+    /// 之前这里是空数组，报告永远是 `(none)`。现在至少带上「用的是哪套登录协议」
+    /// 「有没有登录成功过」，下次出问题能直接排除壳这一层。
     private static func diagnostics() -> [String] {
-        let device = UserDefaults.standard.string(forKey: deviceIdKey) ?? ""
+        let signedIn = UserDefaults.standard.bool(forKey: signedInKey)
         return [
             "bridge=swift",
             "qishuiRequest=native",
-            "deviceId=" + (device.count == 19 ? "ok" : "invalid")
+            "login=web-passport",
+            "signedIn=" + (signedIn ? "yes" : "no")
         ]
     }
 
@@ -5874,33 +5864,19 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
 
     private func perform(_ action: String, _ params: [String: Any]) throws -> Any {
         switch action {
-        // 汽水账号登录在 iOS 上做不到，直接在第一步就说明，不再让用户扫码确认后才失败。
-        //
-        // 为什么不是「再补一步」：`oauth/access_code/get` 要求请求头带 `bd-ticket-guard`
-        // 的 P-256 签名，私钥只存在于官方车机 `LunaOpenSDK`，任何客户端调用都是
-        // `error_code=16 该应用无权限`；网页版绕行也不存在 —— `www.qishui.com` /
-        // `qishui.douyin.com` 都是下载引导页，`luna-web.douyin.com` 只有条款页，
-        // 没有可登录的 Web 播放器。
-        //
-        // 这里返回 `unavailable`（页面语义是「该音源登录不可用」），而不是让流程
-        // 走到换票那一步再抛错 —— 用户少扫一次码，诊断也一眼能看出原因。
-        case "login_qr_key":
-            throw Failure(code: "unavailable",
-                          message: "Qishui sign-in is not supported on iOS",
-                          stage: "access-code")
+        case "login_qr_key": return try createQRKey()
         case "login_qr_create": return try qrImage(key: string(params["key"]))
         case "login_qr_check": return try checkQR(key: string(params["key"]))
         case "login_qr_cancel":
             pendingQR.removeValue(forKey: string(params["key"]))
             return NSNull()
-        // 只读接口做最小实现，数据形状按线上页的解码器（`normalizeSong` / `normalizeUser`）来。
-        //
-        // 背景：`QishuiBridge.userContentController` 里的 `session` / `logout` 写成了属性名，
-        // 编译不过，整个 App 在构建阶段就断了 —— 这一段以前没有被编译过。
         case "search": return ["items": [], "hasMore": false, "nextOffset": 0]
-        case "login_status": return NSNull()
+        case "login_status":
+            return UserDefaults.standard.bool(forKey: Self.signedInKey)
+                ? ["loggedIn": true] : NSNull()
         case "logout":
             pendingQR.removeAll()
+            UserDefaults.standard.removeObject(forKey: Self.signedInKey)
             return NSNull()
         default:
             // `unavailable` 在页面侧是「这个音源不可用」，会把整个汽水入口置灰；
@@ -5908,6 +5884,32 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
             throw Failure(code: "unsupported",
                           message: "Qishui \(action) is not available on iOS")
         }
+    }
+
+    // MARK: - 扫码登录
+
+    /// 第一步：要一张二维码。
+    ///
+    /// 网页端协议里 `get_qrcode` 一次就返回 token 和图，页面的「key」和「创建」
+    /// 两步在这里合并成一次请求，token 就是 key。
+    private func createQRKey() throws -> Any {
+        let body = form([
+            ("aid", Self.passportAid),
+            ("next", "https://api.qishui.com"),
+            ("need_logo", "false"),
+            ("need_short_url", "false"),
+            ("is_frontier", "true")
+        ] + Self.deviceParams())
+        let json = try signedPost("/get_qrcode/", body: body)
+        let data = json["data"] as? [String: Any] ?? [:]
+        guard let token = data["token"] as? String, !token.isEmpty,
+              let image = data["qrcode"] as? String, !image.isEmpty else {
+            throw Failure(code: "invalid-response", message: "Qishui returned no QR code")
+        }
+        pendingQR[token] = QRSession(token: token,
+                                     image: image,
+                                     expires: Date().addingTimeInterval(300))
+        return ["key": token]
     }
 
     private func qrImage(key: String) throws -> Any {
@@ -5919,41 +5921,105 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
 
     private func checkQR(key: String) throws -> Any {
         guard let entry = pendingQR[key] else { return ["state": "expired"] }
-        var params = Self.qrParams()
-        params["token"] = entry.token
-        params["timestamp"] = String(Int(Date().timeIntervalSince1970 * 1000))
-        let json = try jsonObject(GET("https://open.douyin.com/oauth/check_qrcode/?" + queryString(params)))
-        let status = (json["data"] as? [String: Any])?["status"] as? String ?? ""
-        switch status {
-        case "new": return ["state": "waiting"]
-        case "scanned": return ["state": "scanned"]
-        case "confirmed":
-            // 走到这里已经不可能：`login_qr_key` 在第一步就拒绝，拿不到 token。
-            // 保留分支只为覆盖服务端可能返回的未知状态，不发起任何请求。
-            pendingQR.removeValue(forKey: key)
-            throw Failure(code: "unavailable",
-                          message: "Qishui sign-in is not supported on iOS",
-                          stage: "access-code")
-        case "expired":
+        if Date() > entry.expires {
             pendingQR.removeValue(forKey: key)
             return ["state": "expired"]
-        case "refused":
+        }
+        let body = form([
+            ("aid", Self.passportAid),
+            ("token", entry.token),
+            ("next", "https://api.qishui.com"),
+            ("need_logo", "false"),
+            ("need_short_url", "false"),
+            ("is_frontier", "true"),
+            ("is_new_login", "1")
+        ] + Self.deviceParams())
+        let json = try signedPost("/check_qrconnect/", body: body)
+        let data = json["data"] as? [String: Any] ?? [:]
+        let status = (data["status"] as? String) ?? (json["status"] as? String) ?? ""
+        switch status.lowercased() {
+        case "new", "1":
+            return ["state": "waiting"]
+        case "scanned", "2":
+            return ["state": "scanned"]
+        case "confirmed", "3":
+            // 服务端说「已确认」不等于壳已经拿到会话：session cookie 可能还没下发。
+            // 没 cookie 就继续当 scanned 轮询，否则页面会停在假登录态上。
+            guard hasSession() else { return ["state": "scanned"] }
+            pendingQR.removeValue(forKey: key)
+            UserDefaults.standard.set(true, forKey: Self.signedInKey)
+            try? importCookies()
+            return ["state": "confirmed"]
+        case "expired", "4":
+            pendingQR.removeValue(forKey: key)
+            return ["state": "expired"]
+        case "refused", "5":
             pendingQR.removeValue(forKey: key)
             return ["state": "error", "failure": ["case": "refused"]]
         default:
-            throw Failure(code: "invalid-response", message: "Invalid QR status")
+            // 网页端在「码过期 / 已拒绝」时不下发 status，只给 error_code 与一句话。
+            let code = (data["error_code"] as? NSNumber)?.intValue ?? 0
+            if code == 0 { return ["state": "waiting"] }
+            pendingQR.removeValue(forKey: key)
+            let message = (data["description"] as? String) ?? "扫码登录失败"
+            throw Failure(code: "unavailable", message: message,
+                          upstream: String(code), stage: "account")
         }
+    }
+
+    /// 会话 cookie 是否已经到手。`sessionid` 一族任一存在即视为登录完成。
+    private func hasSession() -> Bool {
+        let names: Set<String> = ["sessionid", "sessionid_ss", "sid_tt", "sid_guard"]
+        let cookies = session.configuration.httpCookieStorage?.cookies ?? []
+        return cookies.contains { names.contains($0.name) && !$0.value.isEmpty }
+    }
+
+    /// 把这次登录产生的 cookie 同步到页面的 WebView。
+    ///
+    /// 登录请求是 URLSession 发的，`Set-Cookie` 落在它自己的 cookie 仓里；
+    /// 页面后续请求（`luna/me` 等）走的是 WKWebView，两个仓不互通，必须搬一次。
+    /// `WKHTTPCookieStore` 只能在主线程碰，这里同步等它写完，保证随后的轮询结果
+    /// 返回给页面时，页面紧接着发的请求已经能带上登录态。
+    private func importCookies() throws {
+        guard let webView,
+              let cookies = session.configuration.httpCookieStorage?.cookies,
+              !cookies.isEmpty else { return }
+        let store = webView.configuration.websiteDataStore.httpCookieStore
+        let targets = cookies.filter {
+            $0.domain.contains("qishui.com") || $0.domain.contains("douyin.com")
+        }
+        guard !targets.isEmpty else { return }
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.main.async {
+            let group = DispatchGroup()
+            for cookie in targets {
+                group.enter()
+                store.setCookie(cookie) { group.leave() }
+            }
+            group.notify(queue: .main) { done.signal() }
+        }
+        _ = done.wait(timeout: .now() + 5)
     }
 
     // MARK: - 网络
 
-    private func GET(_ raw: String) throws -> (Data, HTTPURLResponse) {
-        guard let url = URL(string: raw) else {
-            throw Failure(code: "invalid-response", message: "Invalid Qishui URL")
+    /// 带 `a_bogus` 签名的 POST。
+    ///
+    /// 签名由隐藏 WebView 里的 SDK 算，这里只负责把算好的 URL 真正发出去。
+    private func signedPost(_ path: String, body: String) throws -> [String: Any] {
+        let unsigned = Self.passportBase + path
+        let signed = try signer.sign(url: unsigned)
+        guard let url = URL(string: signed) else {
+            throw Failure(code: "invalid-response", message: "Invalid signed Qishui URL")
         }
         var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.setValue(Self.sdkUA, forHTTPHeaderField: "User-Agent")
+        request.httpMethod = "POST"
+        request.httpBody = body.data(using: .utf8)
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.setValue(Self.webUA, forHTTPHeaderField: "User-Agent")
+        request.setValue("https://www.qishui.com/", forHTTPHeaderField: "Origin")
+        request.setValue("https://www.qishui.com/", forHTTPHeaderField: "Referer")
+
         let box = ResponseBox()
         let done = DispatchSemaphore(value: 0)
         session.dataTask(with: request) { data, response, error in
@@ -5971,41 +6037,97 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
         guard let http = box.response, let data = box.data else {
             throw Failure(code: "network", message: "Qishui service could not be reached")
         }
+        // 登录成功后 `Set-Cookie` 会在这里，先收进 URLSession 的仓，再同步给页面。
+        if let headers = http.allHeaderFields as? [String: String],
+           let url = http.url {
+            session.configuration.httpCookieStorage?.setCookies(
+                HTTPCookie.cookies(withResponseHeaderFields: headers, for: url),
+                for: url, mainDocumentURL: nil)
+        }
         guard (200..<300).contains(http.statusCode) else {
             throw Failure(code: http.statusCode == 429 ? "unavailable" : "network",
                           message: "Qishui HTTP \(http.statusCode)",
                           upstream: String(http.statusCode))
         }
-        return (data, http)
+        return try jsonObject(data)
     }
 
-    private func jsonObject(_ carried: (Data, HTTPURLResponse)) throws -> [String: Any] {
-        guard let json = try? JSONSerialization.jsonObject(with: carried.0) as? [String: Any] else {
-            throw Failure(code: "invalid-response", message: "Qishui response is not JSON")
+    private static let webUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        + "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+    /// 网页端 passport 每次请求都要带的设备身份。
+    ///
+    /// 服务端按 `device_id` / `install_id` 做风控计数，缺了会直接拒绝要码；
+    /// 这两个值本地生成一次就固定下来，和网页端「同一台设备反复扫码」等价。
+    private static func deviceParams() -> [(String, String)] {
+        let key = "folia.qishui.device"
+        let defaults = UserDefaults.standard
+        let deviceId: String
+        let installId: String
+        if let saved = defaults.dictionary(forKey: key),
+           let device = saved["deviceId"] as? String,
+           let install = saved["installId"] as? String {
+            deviceId = device
+            installId = install
+        } else {
+            let seed = "\(Int(Date().timeIntervalSince1970 * 1000))\(Int.random(in: 0..<1_000_000))"
+            deviceId = seed
+            installId = seed + String(Int.random(in: 0..<1000))
+            defaults.set(["deviceId": deviceId, "installId": installId], forKey: key)
         }
-        let code = (json["error_code"] as? NSNumber)?.intValue ?? 0
-        if code != 0 {
-            throw Failure(code: "unavailable", message: "Qishui rejected the request",
-                          upstream: String(code))
-        }
-        return json
+        return [
+            ("passport_jssdk_version", "2.4.13"),
+            ("passport_jssdk_type", "normal"),
+            ("is_from_ttaccountsdk", "1"),
+            ("language", "zh"),
+            ("is_from_iesaccountsaas", "1"),
+            ("device_id", deviceId),
+            ("install_id", installId),
+            ("did", deviceId),
+            ("iid", installId),
+            ("device_platform", "PC"),
+            ("version_code", "3.3.0"),
+            ("account_sdk_source", "web"),
+            ("p_js_v", "2.4.13"),
+            ("p_js_t", "normal"),
+            ("p_zt", "3.3.5"),
+            ("p_ver", "1.0.29"),
+            ("p_bd", "1.0.0.41")
+        ]
     }
 
-    private static func qrParams() -> [String: String] {
-        ["aid": "1128", "client_key": clientKey, "scope": scope,
-         "state": "", "next": "", "jump_type": "native",
-         "optional_scope_check": "", "optional_scope_uncheck": "",
-         "customize_params": "{\"source\":\"pc_auth\",\"not_skip_confirm\":\"true\"}",
-         "source_from": "native", "device_platform": "android",
-         "app_identity": appIdentity, "signature": signature]
-    }
-
-    private func queryString(_ values: [String: String]) -> String {
-        values.map { key, value in
-            let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")
+    /// 拼 `application/x-www-form-urlencoded` 请求体。
+    ///
+    /// `+` 必须转义：不转的话服务端会把它解成空格，token 直接失效。
+    private func form(_ pairs: [(String, String)]) -> String {
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~")
+        return pairs.map { key, value in
             let encoded = value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
             return "\(key)=\(encoded)"
         }.joined(separator: "&")
+    }
+
+    private func jsonObject(_ data: Data) throws -> [String: Any] {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw Failure(code: "invalid-response", message: "Qishui response is not JSON")
+        }
+        // 网页端这两个接口成功时 `status_code` 为 0；有些分支只在 `data` 里给状态。
+        let code = (json["status_code"] as? NSNumber)?.intValue
+            ?? (json["error_code"] as? NSNumber)?.intValue ?? 0
+        if code != 0 {
+            // 网页端把真正的失败原因写在 `data.description` / `data.error_code` 里，
+            // 顶层只有一个 `status_code`，照原样抛出去日志里才看得懂。
+            let inner = json["data"] as? [String: Any] ?? [:]
+            let detail = (inner["error_code"] as? NSNumber)?.intValue
+            let message = (inner["description"] as? String)
+                ?? (json["status_msg"] as? String)
+                ?? (json["message"] as? String)
+                ?? "Qishui rejected the request"
+            throw Failure(code: "unavailable", message: message,
+                          upstream: String(detail ?? code), stage: "account")
+        }
+        return json
     }
 
     private func string(_ value: Any?) -> String {
@@ -6059,6 +6181,181 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
             self?.webView?.evaluateJavaScript(js, completionHandler: nil)
         }
     }
+}
+
+/// 汽水请求签名器。
+///
+/// `api.qishui.com/passport/*` 要 44 位 `a_bogus`，它由抖音风控 SDK 结合浏览器环境
+/// 算出，原生侧复现不了。这里用离线 WKWebView 加载 `www/qishui-signer/signer.html`，
+/// 让 SDK 在真实浏览器环境里算签名，只把「补好签名的 URL」取回来，请求本身不发。
+///
+/// 生命周期：第一次用到时才建 WebView；之后常驻复用，避免每次扫码都重新初始化 SDK。
+private final class QishuiSigner {
+    /// 签名结果。失败时抛错，让上层归到 `network` 而不是拿到半成品 URL。
+    struct SignError: Error {
+        let message: String
+    }
+
+    private var webView: WKWebView?
+    private var loaded = false
+    private var booted = false
+    private var waiting: [String: (Result<String, SignError>) -> Void] = [:]
+    private var queue: [(id: String, url: String)] = []
+    private var seq = 0
+    private let lock = NSLock()
+
+    /// 给 `url` 补上 `a_bogus`，返回补齐后的完整 URL。
+    ///
+    /// 调用方在后台线程（`QishuiBridge` 的消息处理线程），这里同步等结果：
+    /// 一次扫码只有两三个请求，阻塞可控，也让上层逻辑保持直白。
+    func sign(url: String) throws -> String {
+        let box = SignBox()
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else {
+                box.value = .failure(SignError(message: "signer released"))
+                done.signal()
+                return
+            }
+            self.prepare()
+            let id = "s" + String(self.nextSeq())
+            self.store(id: id) { result in
+                switch result {
+                case .success(let signed): box.value = .success(signed)
+                case .failure(let error): box.value = .failure(error)
+                }
+                done.signal()
+            }
+            self.dispatch(id: id, url: url)
+        }
+        if done.wait(timeout: .now() + 20) == .timedOut {
+            throw SignError(message: "signer timeout")
+        }
+        switch box.value {
+        case .success(let signed)?: return signed
+        case .failure(let error)?: throw error
+        case nil: throw SignError(message: "signer produced no result")
+        }
+    }
+
+    private func nextSeq() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        seq += 1
+        return seq
+    }
+
+    private func store(id: String, _ handler: @escaping (Result<String, SignError>) -> Void) {
+        lock.lock(); waiting[id] = handler; lock.unlock()
+    }
+
+    private func take(id: String) -> ((Result<String, SignError>) -> Void)? {
+        lock.lock(); defer { lock.unlock() }
+        return waiting.removeValue(forKey: id)
+    }
+
+    /// 建 WebView 并加载本地页面。只做一次。
+    private func prepare() {
+        if webView == nil {
+            let config = WKWebViewConfiguration()
+            // 签名页独立存储，不和主页面 cookie 混在一起。
+            config.websiteDataStore = .nonPersistent()
+            config.userContentController.add(WeakSignerHandler(owner: self),
+                                             name: "foliaQishuiSigner")
+            let view = WKWebView(frame: CGRect(x: 0, y: 0, width: 1, height: 1),
+                                 configuration: config)
+            view.isOpaque = false
+            view.backgroundColor = .clear
+            webView = view
+        }
+        guard !loaded, let webView,
+              let index = Bundle.main.url(forResource: "signer",
+                                          withExtension: "html",
+                                          subdirectory: "www/qishui-signer") else {
+            if !loaded { loaded = true }
+            return
+        }
+        loaded = true
+        // `allowingReadAccessTo` 指到目录，页面才能加载同目录下的 `sdk-glue.js`。
+        webView.loadFileURL(index, allowingReadAccessTo: index.deletingLastPathComponent())
+    }
+
+    /// 调页面里的 `__foliaSign`。SDK 还没初始化完（`booted` 未到）时先排队，
+    /// 否则首次扫码会在 SDK 装载的几百毫秒里直接拿到 `signer not loaded`。
+    private func dispatch(id: String, url: String) {
+        guard let webView else {
+            take(id)?(.failure(SignError(message: "signer unavailable")))
+            return
+        }
+        guard booted else {
+            queue.append((id, url))
+            return
+        }
+        // 两个参数都编成 JSON 字符串字面量再嵌进脚本，避免网址里的引号、`&` 破坏语法。
+        guard let data = try? JSONSerialization.data(withJSONObject: [id, url]),
+              var pair = String(data: data, encoding: .utf8) else {
+            take(id)?(.failure(SignError(message: "signer argument error")))
+            return
+        }
+        pair.removeFirst(); pair.removeLast()
+        let js = """
+        (function(){
+          var handler = window.webkit.messageHandlers.foliaQishuiSigner;
+          if (typeof window.__foliaSign !== 'function') {
+            handler.postMessage({ type: 'not-ready' });
+            return;
+          }
+          var args = [\(pair)];
+          var id = args[0], url = args[1];
+          window.__foliaSign('GET', url).then(function(r){
+            handler.postMessage({ id: id, ok: true, url: r.url });
+          }).catch(function(e){
+            handler.postMessage({ id: id, ok: false,
+                                  message: String((e && e.message) || e) });
+          });
+        })();
+        """
+        webView.evaluateJavaScript(js) { [weak self] _, error in
+            guard let self else { return }
+            if error != nil {
+                self.take(id)?(.failure(SignError(message: "signer script error")))
+            }
+        }
+    }
+
+    fileprivate func receive(_ body: [String: Any]) {
+        // 签名页加载完成，SDK 已就绪：把排队中的请求一次性发出去。
+        if (body["type"] as? String) == "booted" {
+            booted = true
+            let pending = queue
+            queue.removeAll()
+            for item in pending { dispatch(id: item.id, url: item.url) }
+            return
+        }
+        guard let id = body["id"] as? String, let handler = take(id: id) else { return }
+        if (body["ok"] as? Bool) == true, let url = body["url"] as? String {
+            handler(.success(url))
+        } else {
+            let reason = (body["message"] as? String) ?? "sign failed"
+            NSLog("[Qishui] signer failed: %@", reason)
+            handler(.failure(SignError(message: reason)))
+        }
+    }
+}
+
+
+/// 让 `WKUserContentController` 不强持有签名器（它被 `QishuiBridge` 持有）。
+private final class WeakSignerHandler: NSObject, WKScriptMessageHandler {
+    weak var owner: QishuiSigner?
+    init(owner: QishuiSigner) { self.owner = owner }
+    func userContentController(_ controller: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        guard let body = message.body as? [String: Any] else { return }
+        owner?.receive(body)
+    }
+}
+
+private final class SignBox: @unchecked Sendable {
+    var value: Result<String, QishuiSigner.SignError>?
 }
 
 // MARK: - 原生播放器桥JS
