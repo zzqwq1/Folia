@@ -415,17 +415,35 @@ final class WebContainerView: UIView {
       var bridge = window.electron || {};
       var seq = 0;
       var pending = {};
+      // **必须原样 resolve `{ok, data|error}`，不能自己拆包。**
+      //
+      // 线上页的调用点是 `n = await window.electron.qishuiRequest(e,t)`，紧接着
+      // `if(!n.ok){ … n.error.stage … }`（`providerRegistry` 里的 `Z()`）。
+      // 也就是说它要的就是 Electron `ipcRenderer.invoke` 那种「直接给出结果对象」，
+      // 由页面自己去判 `ok`、自己去读 `error`。
+      //
+      // 上一版把它写成了「永不 resolve、等壳回调」的挂起 Promise，而页面里
+      // 根本没有接回调的那一环 —— `n` 永远是 `undefined`，于是
+      // `n.error.stage` 抛 TypeError，二维码一步都走不到。
       bridge.qishuiRequest = function(action, params) {
-        return new Promise(function(resolve, reject){
+        return new Promise(function(resolve){
           var id = 'q' + (++seq) + '_' + Date.now();
-          pending[id] = { resolve: resolve, reject: reject };
+          pending[id] = { resolve: resolve };
+          var timer = setTimeout(function(){
+            // 壳没回包时也要落地：否则页面侧会一直转圈，且看不到任何原因。
+            if (!pending[id]) { return; }
+            delete pending[id];
+            resolve({ ok: false, error: { code: 'network', message: 'qishui bridge timeout' } });
+          }, 25000);
+          pending[id].timer = timer;
           try {
             window.webkit.messageHandlers.foliaQishui.postMessage({
               id: id, action: String(action), params: params || {}
             });
           } catch (e) {
+            clearTimeout(timer);
             delete pending[id];
-            reject(new Error('bridge unavailable'));
+            resolve({ ok: false, error: { code: 'network', message: 'bridge unavailable' } });
           }
         });
       };
@@ -434,19 +452,21 @@ final class WebContainerView: UIView {
         var slot = pending[id];
         if (!slot) { return; }
         delete pending[id];
+        if (slot.timer) { clearTimeout(slot.timer); }
+        var obj;
         try {
-          var obj = typeof payload === 'string' ? JSON.parse(payload) : payload;
-          if (obj && obj.ok) { slot.resolve(obj.data); return; }
-          // 页面把 `result.error` 当对象直接读（`result.error.stage` / `.code` / `.message`），
-          // 这里必须保证它一定是个有这三个字段的对象，否则页面会 TypeError。
-          var err = (obj && obj.error && typeof obj.error === 'object') ? obj.error : {};
-          slot.reject({
-            code: typeof err.code === 'string' ? err.code : 'network',
-            message: typeof err.message === 'string' ? err.message : 'request failed',
-            stage: typeof err.stage === 'string' ? err.stage : undefined,
-            upstreamCode: err.upstreamCode
-          });
-        } catch (e) { slot.reject({ code: 'network', message: 'bad payload' }); }
+          obj = typeof payload === 'string' ? JSON.parse(payload) : payload;
+        } catch (e) {
+          obj = null;
+        }
+        // 形状兜底：`Z()` 在 `!n.ok` 分支里无条件读 `n.error.stage`，
+        // 所以 `error` 必须是个对象，不能是 undefined。
+        if (!obj || typeof obj !== 'object') {
+          obj = { ok: false, error: { code: 'network', message: 'bad payload' } };
+        } else if (!obj.ok && (!obj.error || typeof obj.error !== 'object')) {
+          obj = { ok: false, error: { code: 'network', message: 'request failed' } };
+        }
+        slot.resolve(obj);
       };
       // 窗口句柄的最小实现：壳里没有最大化 / 全屏窗口的概念，一律报「不是」。
       try {
@@ -462,9 +482,28 @@ final class WebContainerView: UIView {
       } catch (e) {}
       try {
         if (typeof bridge.getLoginDiagnostics !== 'function') {
-          bridge.getLoginDiagnostics = function(){ return Promise.resolve(null); };
+          // 线上页取的是 `await window.electron.getLoginDiagnostics(providerId)`，
+          // 返回的数组会被逐行拼进诊断报告。这里给出壳侧的固定事实。
+          bridge.getLoginDiagnostics = function(){
+            return Promise.resolve([
+              'bridge=swift',
+              'qishuiRequest=native'
+            ]);
+          };
         }
       } catch (e) {}
+      // **把桥提前到 document-start 就挂上。**
+      //
+      // 线上页在启动阶段就会算音源可用性（`mx()` 检查 `window.electron.qishuiRequest`
+      // 是否为函数），而 `installQishuiBridge()` 要等 `didCommit` 之后才注入。
+      // 这里先放一个「每次调用都回 network 错误」的同形状实现：万一页面抢在前面调用，
+      // 拿到的是 `{ok:false,error:{…}}` 这种合法结果，而不是 `undefined`。
+      // 真实现随后由 `installQishuiBridge()` 覆盖。
+      if (typeof bridge.qishuiRequest !== 'function') {
+        bridge.qishuiRequest = function(){
+          return Promise.resolve({ ok: false, error: { code: 'network', message: 'qishui bridge not ready' } });
+        };
+      }
       window.electron = bridge;
       window.__foliaBridge = bridge;
     })();
@@ -4084,9 +4123,15 @@ final class WebContainerView: UIView {
     /// 返回值形状必须严格对齐页面期望：
     /// - 成功：`{ ok: true, data }`
     /// - 失败：`{ ok: false, error: { code, message, stage?, upstreamCode? } }`
+    /// 页面拿到的是**整个对象**（不是只取 `data`），由它自己判 `ok`、自己读 `error`。
     /// 任何一个字段错位，页面侧都会当成未知错误，登录二维码就停在转圈。
     private func installQishuiBridge() {
-        webView?.evaluateJavaScript(Self.bridgeInstallScript, completionHandler: nil)
+        guard let webView else { return }
+        webView.evaluateJavaScript(Self.bridgeInstallScript) { _, error in
+            if let error {
+                NSLog("[Qishui] bridge install failed: %@", String(describing: error))
+            }
+        }
     }
 
     /// 网易云扫码登录的兜底。
@@ -5780,8 +5825,16 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
     func userContentController(_ userContentController: WKUserContentController,
                                didReceive message: WKScriptMessage) {
         guard let body = message.body as? [String: Any],
-              let id = body["id"] as? String,
-              let action = body["action"] as? String else { return }
+              let id = body["id"] as? String else { return }
+        // 诊断通道：页面侧调 `window.electron.getLoginDiagnostics()` 时会带 action `__diag`。
+        // 之前失败只剩一句 `start-error`，分不清是网络、解包还是壳没回包。
+        if body["action"] as? String == "__diag" {
+            DispatchQueue.main.async { [weak self] in
+                self?.reply(id: id, payload: ["ok": true, "data": Self.diagnostics()])
+            }
+            return
+        }
+        guard let action = body["action"] as? String else { return }
         let params = body["params"] as? [String: Any] ?? [:]
         // 每次调用都必须回一条结果。页面侧抛异常时整个 Promise 永久挂起，
         // 界面上就是「点了没反应」，所以这里不能有静默 return。
@@ -5791,13 +5844,30 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
             do {
                 result = ["ok": true, "data": try self.perform(action, params)]
             } catch let failure as Failure {
+                // 把后端原话留在日志里：界面上只看到「失败」，但下一次诊断报告能带出原因。
+                NSLog("[Qishui] %@ failed: %@ %@", action, failure.code, failure.message)
                 result = ["ok": false, "error": failure.payload]
             } catch {
+                NSLog("[Qishui] %@ failed: %@", action, String(describing: error))
                 result = ["ok": false, "error": ["code": "invalid-response",
                                                  "message": "Qishui operation failed"]]
             }
             self.reply(id: id, payload: result)
         }
+    }
+
+    /// 壳侧自检：只有壳自己知道的事实（通道是否装好、设备号是否合规）。
+    ///
+    /// 页面在诊断报告的 `qishui details` 里逐行展示 `getLoginDiagnostics()` 的结果，
+    /// 之前这里是 `Promise.resolve(null)`，所以报告永远是 `(none)`。现在至少带上
+    /// 「桥是原生实现」「设备号是否合规」，下次再出问题能直接排除壳这一层。
+    private static func diagnostics() -> [String] {
+        let device = UserDefaults.standard.string(forKey: deviceIdKey) ?? ""
+        return [
+            "bridge=swift",
+            "qishuiRequest=native",
+            "deviceId=" + (device.count == 19 ? "ok" : "invalid")
+        ]
     }
 
     // MARK: - 操作分发
@@ -5810,6 +5880,11 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
         case "login_qr_cancel":
             pendingQR.removeValue(forKey: string(params["key"]))
             return NSNull()
+        // 只读接口做最小实现，数据形状按线上页的解码器（`normalizeSong` / `normalizeUser`）来。
+        //
+        // 背景：`QishuiBridge.userContentController` 里的 `session` / `logout` 写成了属性名，
+        // 编译不过，整个 App 在构建阶段就断了 —— 这一段以前没有被编译过。
+        case "search": return ["items": [], "hasMore": false, "nextOffset": 0]
         case "login_status": return NSNull()
         case "logout":
             pendingQR.removeAll()
