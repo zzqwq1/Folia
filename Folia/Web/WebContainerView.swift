@@ -3,6 +3,7 @@ import SwiftUI
 import WebKit
 import Combine
 import AVFoundation
+import CoreImage
 import CryptoKit
 import UniformTypeIdentifiers
 
@@ -5901,14 +5902,53 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
             ("is_frontier", "true")
         ])
         let data = json["data"] as? [String: Any] ?? [:]
-        guard let token = data["token"] as? String, !token.isEmpty,
-              let image = data["qrcode"] as? String, !image.isEmpty else {
-            throw Failure(code: "invalid-response", message: "Qishui returned no QR code")
+        guard let token = data["token"] as? String, !token.isEmpty else {
+            throw Failure(code: "invalid-response", message: "Qishui returned no QR token")
         }
+        // **不用**服务端返回的 `qrcode` 图：那张图里编的是网页端地址，
+        // 抖音扫开就是一个 404 页。改为按客户端的扫码入口自己生成一张，
+        // 地址形状是汽水客户端的 `scan_login` 链接。
+        let image = try Self.makeQRImage(Self.scanURL(token: token))
         pendingQR[token] = QRSession(token: token,
                                      image: image,
                                      expires: Date().addingTimeInterval(300))
         return ["key": token]
+    }
+
+    /// 二维码里编的地址：汽水客户端的扫码登录入口。
+    ///
+    /// 抖音只认这种形状 —— 它按 `bff-pc` 这个入口把 token 交给账号服务，
+    /// 换成网页端地址会被当成未知路由，直接 404。
+    private static func scanURL(token: String) -> String {
+        var comps = URLComponents(string: "https://bff-pc.qishui.com/light/invoke/scan_login")!
+        comps.queryItems = [
+            URLQueryItem(name: "token", value: token),
+            URLQueryItem(name: "os", value: "Mac"),
+            // 展示在抖音确认页上的设备名。抖音要求非空，缺了会被拒。
+            URLQueryItem(name: "computer_name", value: "Folia")
+        ]
+        // `+` 要转成 `%20`：token 里有 `+` 时，抖音按表单解码会把它当成空格。
+        return comps.string!.replacingOccurrences(of: "+", with: "%20")
+    }
+
+    /// 把一段文本编成二维码，返回 `data:image/png;base64,...`。
+    ///
+    /// 用系统自带的 `CIQRCodeGenerator`，不引第三方库：二维码内容必须由我们自己决定，
+    /// 服务端给的那张图内容不对。
+    private static func makeQRImage(_ text: String) throws -> String {
+        let filter = CIFilter(name: "CIQRCodeGenerator")
+        filter?.setValue(Data(text.utf8), forKey: "inputMessage")
+        filter?.setValue("M", forKey: "inputCorrectionLevel")
+        guard let output = filter?.outputImage else {
+            throw Failure(code: "invalid-response", message: "QR generate failed")
+        }
+        let scaled = output.transformed(by: CGAffineTransform(scaleX: 10, y: 10))
+        let context = CIContext()
+        guard let cgImage = context.createCGImage(scaled, from: scaled.extent),
+              let png = UIImage(cgImage: cgImage).pngData() else {
+            throw Failure(code: "invalid-response", message: "QR encode failed")
+        }
+        return "data:image/png;base64," + png.base64EncodedString()
     }
 
     private func qrImage(key: String) throws -> Any {
