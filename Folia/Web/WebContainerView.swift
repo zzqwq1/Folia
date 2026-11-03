@@ -6109,8 +6109,15 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
         SHA256.hash(data: Data(body.utf8)).map { String(format: "%02X", $0) }.joined()
     }
 
-    private static let webUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        + "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    /// 请求用的 UA。
+    ///
+    /// 必须是**汽水桌面客户端**的 UA，不能是普通浏览器 UA：
+    /// 服务端按 UA 决定二维码里编什么跳转地址，普通浏览器 UA 会拿到网页登录地址，
+    /// 抖音扫到之后打开就是一个 404 页。
+    static let webUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        + "AppleWebKit/537.36 (KHTML, like Gecko) SodaMusic/3.1.0 "
+        + "Chrome/136.0.7103.59 Electron/36.4.0-rs.22.release.main.1 "
+        + "TTElectron/36.4.0-rs.22.release.main.1 Safari/537.36"
 
     /// 网页端 passport 每次请求都要带的设备身份。
     ///
@@ -6321,6 +6328,9 @@ private final class QishuiSigner {
                                              name: "foliaQishuiSigner")
             let view = WKWebView(frame: CGRect(x: 0, y: 0, width: 1, height: 1),
                                  configuration: config)
+            // 签名器必须和真实请求用同一个 UA：SDK 会把 UA 等因素算进 `a_bogus`，
+            // 两边不一致时服务端会判签名无效。
+            view.customUserAgent = QishuiBridge.webUA
             view.isOpaque = false
             view.backgroundColor = .clear
             webView = view
