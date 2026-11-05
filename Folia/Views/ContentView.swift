@@ -12,7 +12,7 @@ struct ContentView: View {
             WebShellView(state: state)
                 .ignoresSafeArea()
             if state.showsBlockingNotice, let reason = state.offlineReason {
-                OfflineNotice(reason: reason, detail: state.failureDetail) { state.reload() }
+                OfflineNotice(reason: reason, detail: state.failureDetail, footnote: state.failureFootnote) { state.reload() }
             } else if state.isOfflineCopy {
                 // 已经回退到包内副本、页面本身可用：只留一条不挡操作的提示条。
                 OfflineBanner { state.reload() }
@@ -53,6 +53,8 @@ struct WebShellView: UIViewRepresentable {
 private struct OfflineNotice: View {
     let reason: String
     let detail: String?
+    /// 非 nil 时替换默认的联网提示文案（例如「反复回收」场景下的说明）。
+    var footnote: String? = nil
     let retry: () -> Void
 
     var body: some View {
@@ -68,13 +70,20 @@ private struct OfflineNotice: View {
                     .font(.system(size: 44, weight: .light))
                 Text(reason)
                     .font(.headline)
-                Text("Folia 需要联网加载播放页，请检查网络后重试。")
-                    .font(.footnote)
-                    .multilineTextAlignment(.center)
-                    .foregroundStyle(.secondary)
-                Text("网络恢复后会自动重新加载。")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                if let footnote {
+                    Text(footnote)
+                        .font(.footnote)
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Folia 需要联网加载播放页，请检查网络后重试。")
+                        .font(.footnote)
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.secondary)
+                    Text("网络恢复后会自动重新加载。")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
                 if let detail {
                     // 现场信息：真机上一眼能看出是脚本没跑到、还是资源没下来。
                     Text(detail)

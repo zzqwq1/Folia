@@ -36,6 +36,11 @@ final class WebContainerView: UIView {
     private var lastInsets: UIEdgeInsets = .zero
     /// 内容进程被回收的次数与时间窗，用来防止「重载→立刻再挂→再重载」的死循环。
     private var contentProcessRestarts: [Date] = []
+    /// 内容进程**终止**的时间窗（跨重建保留，不像 `contentProcessRestarts` 会被
+    /// `rebuildWebView` 清空）。90 秒内连死两次说明系统内存压力还没解除，
+    /// 这时每一次重建（新进程 + 全量 bundle + 恢复播放）都是下一次死亡的诱因。
+    /// 撞线就停在重试页等用户，不再自动起新进程。
+    private var terminationStrikes: [Date] = []
     /// 首屏卡住后的自动重试时间窗，同样用来限流。
     private var stallRetries: [Date] = []
 
@@ -1142,6 +1147,8 @@ final class WebContainerView: UIView {
         // 卡住重试的配额也要一起清掉：否则用户从离线副本点回线上后，
         // 上一轮攒下的 3 次 stall 记录会让首屏看门狗直接放弃重试。
         stallRetries.removeAll()
+        // 终止打击窗同样归零：用户点了「重试」就是明确指令，这一把必须真的重建。
+        terminationStrikes.removeAll()
         if webView == nil {
             // 重建还在异步路上：那一路已经会打 `startURL` 并挂上看门狗，这里不能再走一遍，
             // 否则会拿到两次并发加载。
@@ -1166,6 +1173,12 @@ final class WebContainerView: UIView {
     /// 仍没画面才换干净存储重建。`wakeReloadTried` 保证一轮里只会走一次原地重载。
     private func recoverAfterForegroundWake() {
         CrashLog.note("==== foreground wake: page not alive ====")
+        // 进程刚被系统反复回收过（终止打击撞线）：自动恢复只会在压力里再死一轮。
+        // 这时界面上是重试页，等用户点「重试」走 `hardReload` 即可。
+        guard !state.awaitingManualRetry else {
+            CrashLog.note("==== foreground wake: awaiting manual retry, stay parked ====")
+            return
+        }
         // 页面已经没了，任何「用户按了暂停」的现场都跟着没了；这里清掉，
         // 让重建后能按 `wantsAudible` 决定要不要续播。
         userPaused = false
@@ -5474,6 +5487,9 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         hasEvaluatedFirstPaint = false
         contentProcessRestarts = contentProcessRestarts.filter { now.timeIntervalSince($0) < 60 }
         contentProcessRestarts.append(now)
+        // 终止打击窗：跨重建累计，90 秒内的每一次进程终止都记在这里。
+        terminationStrikes = terminationStrikes.filter { now.timeIntervalSince($0) < 90 }
+        terminationStrikes.append(now)
         // 这是与「ObjC 异常闪退」完全不同的另一条路径：网页把 WebProcess 搞死了。
         // 计进日志才能区分到底是哪一种。
         CrashLog.note("==== web content process terminated (#\(contentProcessRestarts.count)) url=\(webView.url?.absoluteString ?? "-") ====")
@@ -5567,6 +5583,21 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         // 内存打满，重开一次就是再打满一次；而每次重建都会把页面换成 `#app-splash`，
         // 用户看到的正是「大退进歌单 → 回到加载界面」。
         //
+        // **90 秒内连死两次：停在重试页等用户，不再自动重建。**
+        //
+        // 日志 23-02-47/52Z：进程死亡 → 重建落 `#player` → 3 秒后又死。
+        // 系统内存压力没解除时，每一次重建都是「新进程 + 全量 bundle + 恢复播放」
+        // 再冲一次顶，重建本身就是下一次死亡的诱因。页面进程死了不等于 App 死了 ——
+        // 把这一拍停在静态重试页上（不再起 WebContent 进程），压力过去后用户
+        // 点一次「重试」（走 `hardReload`）就能回来。
+        // 封禁表与路由死亡记录在前面已经落盘，重试与下次冷启动都会绕开这条路由。
+        guard terminationStrikes.count < 2 else {
+            CrashLog.note("==== web content died \(terminationStrikes.count)x in 90s, parking on retry notice ====")
+            deadLandingURL = nil
+            state.noteRepeatedTermination(detail: landingCandidate?.absoluteString)
+            return
+        }
+
         // 判据改为**落盘的那份路由死亡记录**（`noteRouteDeath`）。
         //
         // 原先用内存里的 `processDeaths.count >= 2`，实测从未成立：
