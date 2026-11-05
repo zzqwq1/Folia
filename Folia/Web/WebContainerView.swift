@@ -494,6 +494,23 @@ final class WebContainerView: UIView {
           };
         }
       } catch (e) {}
+      // 0.7.25 的启动流程里这两个是**裸调用**（不是可选链）：
+      // `Promise.allSettled([e.getSettings(), e.getCacheDirectory(), …])`。
+      // 缺方法会同步抛 TypeError，把整段设置初始化打断，页面随后卡死并触发重建。
+      try {
+        if (typeof bridge.getSettings !== 'function') {
+          // 返回空对象即可：页面用 `if (a) { …a }` 展开，空对象等价于「没有自定义设置」。
+          bridge.getSettings = function(){
+            return Promise.resolve({});
+          };
+        }
+        if (typeof bridge.getCacheDirectory !== 'function') {
+          // 页面读的是 `o?.path` / `o.isDefault`，给同形状的空目录。
+          bridge.getCacheDirectory = function(){
+            return Promise.resolve({ path: '', isDefault: true });
+          };
+        }
+      } catch (e) {}
       // **把桥提前到 document-start 就挂上。**
       //
       // 线上页在启动阶段就会算音源可用性（`mx()` 检查 `window.electron.qishuiRequest`
@@ -513,6 +530,13 @@ final class WebContainerView: UIView {
 
     /// 二维码回传通道（重建 WebView 时要重新指向新实例）。
     private var qrRelay: QRFallbackRelay?
+
+    /// 本次启动是否已经真的弹过赞赏窗。
+    ///
+    /// 内容进程被系统回收后壳会重建 WebView，新文档的 `window.__foliaDonateInstalled`
+    /// 又变回 undefined，首屏就绪时就会再弹一次 —— 用户看到的就是「弹两次」。
+    /// 这里用进程内标记跨文档去重，App 冷启动时自然复位。
+    private var donateShownThisLaunch = false
 
     /// 按配置造一个 WKWebView，并把导航/UI 代理与外观一次性设好。
     ///
@@ -933,12 +957,23 @@ final class WebContainerView: UIView {
     private var hbLastBeat = Date()
     private var pageHeartbeat: Timer?
 
-    /// 每 5 秒问页面一句「还活着吗」，连续 12 秒没有回音就按卡死处理。
+    /// 上一次「页面无响应 → 强制重建」的时刻。
     ///
-    /// 时间窗取 12 秒：正常的一帧、一次路由切换、一次大列表渲染都在 1 秒内；
-    /// 连续三个周期都不回，说明主线程被同步任务占住了，再等也不会自己恢复。
+    /// 重建要新建一个 WebContent 进程，而旧进程的尸体要等下一轮 runloop 才回收；
+    /// 内存最紧的那几秒里两份页面同时存在，系统会直接回收整个 App —— 用户看到的
+    /// 就是「闪退」。2026-11-05 的日志里两次重建相隔 61 秒，第二次之后 App 没了。
+    /// 页面无响应不等于进程死了：一次性解码几百张封面本来就会占住主线程十几秒，
+    /// 这种时候该等它自己缓过来，而不是把整页推倒重来，所以同一轮里只允许一次。
+    private var lastUnresponsiveRebuild: Date?
+
+    /// 每 5 秒问页面一句「还活着吗」，连续 20 秒没有回音才按卡死处理。
+    ///
+    /// 时间窗原来取 12 秒，但日志里首页在正常使用中也会被判成无响应 ——
+    /// 歌单封面批量解码、雾笺预计算这类同步任务经常超过 12 秒，误判一次就要
+    /// 重建一次，重建本身就可能是闪退的直接原因。20 秒把常见的大任务排除掉，
+    /// 真正卡死的情况最多多等 8 秒。
     private static let heartbeatInterval: TimeInterval = 5.0
-    private static let heartbeatDeadline: TimeInterval = 12.0
+    private static let heartbeatDeadline: TimeInterval = 20.0
 
     private func startPageHeartbeat() {
         stopPageHeartbeat()
@@ -974,6 +1009,20 @@ final class WebContainerView: UIView {
         if Date().timeIntervalSince(hbLastBeat) >= Self.heartbeatDeadline {
             hbLastBeat = Date()
             hbGeneration += 1
+            // **同一轮里只重建一次。**
+            //
+            // 页面无响应多半是它自己在做大任务（批量解码封面、预计算歌词笔画），
+            // 这时重建等于把正在干的活连同整个进程扔掉重来，而且新旧两份进程
+            // 会同时占内存。日志里两次重建相隔 61 秒、第二次之后 App 被系统回收 ——
+            // 那一次才是用户说的「闪退」。第一次超时照旧重建；如果重建完 120 秒内
+            // 又超时，就只记一笔继续等，让页面自己缓过来（定时器仍在跑，
+            // 过了这个窗口再超时才会重新重建）。
+            if let last = lastUnresponsiveRebuild,
+               Date().timeIntervalSince(last) < 120 {
+                CrashLog.note("==== page unresponsive, rebuild throttled ====")
+                return
+            }
+            lastUnresponsiveRebuild = Date()
             CrashLog.note("==== page unresponsive for \(Int(Self.heartbeatDeadline))s, force rebuild ====")
             let dead = Self.trustedSiteURL(lastVisibleURL) ?? Self.trustedSiteURL(lastCommittedURL)
             if let dead {
@@ -4242,11 +4291,13 @@ final class WebContainerView: UIView {
     /// 版本号与更新公告也一并接手：壳把 Info.plist 的实际版本写进 `window.__foliaAppVersion`，
     /// 「当前版本」与「最新版本」都取它，改版本只需要改 project.yml 一处。
     private func installDonateCard() {
+        // 上一次已经真正弹出过就不再注入：重建后的新文档会重跑首屏逻辑。
+        if donateShownThisLaunch { return }
         let js = """
         (function(){
-          if (window.__foliaDonateInstalled) { return; }
+          if (window.__foliaDonateInstalled) { return false; }
           var mask = document.getElementById('donate-mask');
-          if (!mask) { return; }
+          if (!mask) { return false; }
           window.__foliaDonateInstalled = true;
 
           var QUARK_URL = 'https://pan.quark.cn/s/934c480d5b9c';
@@ -4306,9 +4357,15 @@ final class WebContainerView: UIView {
           // 这条「新版本已发布」对已装最新包的人只是打扰。网盘入口保留在赞赏弹窗里。
           var updateMask = document.getElementById('update-mask');
           if (updateMask) { updateMask.style.display = 'none'; }
+          return true;
         })();
         """
-        webView?.evaluateJavaScript(js, completionHandler: nil)
+        webView?.evaluateJavaScript(js) { [weak self] result, _ in
+            // 只有真的挂上并排好了弹窗才算「弹过」，DOM 还没就绪时留给下一次首屏检查重试。
+            if result as? Bool == true {
+                self?.donateShownThisLaunch = true
+            }
+        }
     }
 
     /// 首屏之后轮询补版本行：设置面板是懒挂载的，用户点到「帮助」时 DOM 才出现，
@@ -4483,19 +4540,12 @@ final class WebContainerView: UIView {
         Object.defineProperty(window, 'FOLIA_VERSION', { value: '\(appVersion)', writable: true, configurable: true });
         Object.defineProperty(window, 'FOLIA_LATEST_VERSION', { value: '\(appVersion)', writable: true, configurable: true });
       } catch (e) {}
-      // 线上站的赞赏弹窗自带 `if (/iPhone|iPad|iPod/i.test(UA)) return;`（本该是
-      // 「网页版才弹、装进 App 别挡开机」的考虑），所以在壳里一直弹不出来。
-      // 这里把 navigator.userAgent **只是**改掉 iPhone/iPad/iPod 这几个词，
-      // 让页面那段判定放行；壳标识（FoliaApp/2.1.5）保持原样，页面其它按 UA 分支
-      // 的逻辑不受影响。
+      // **不要动 `navigator.userAgent`。**
       //
-      // 页面脚本在 document start 之后才执行，此刻改好即可。
-      try {
-        var ua = (navigator.userAgent || '').replace(/iPhone|iPad|iPod/g, 'Macintosh');
-        try {
-          Object.defineProperty(navigator, 'userAgent', { get: function(){ return ua; }, configurable: true });
-        } catch (e) {}
-      } catch (e) {}
+      // 这里曾经把 UA 里的 iPhone/iPad/iPod 换成 Macintosh，好让线上页那个
+      // `if (/iPhone|iPad|iPod/i.test(UA)) return;` 放行、由页面自己弹赞赏窗。
+      // 但壳这边 `installDonateCard()` 也会弹一次，且比页面早 400ms ——
+      // 用户看到的就是「弹两次赞赏界面」。赞赏窗由壳独占，页面那份保持 return。
       // 更新公告在壳里不弹。页面脚本自带 UA 判定会提前 return，本不该弹；
       // 这里在文档开始时先钉一条样式兜底，任何时序下都压住 #update-mask。
       // 脚本注入点早于 <head>，所以等 DOMContentLoaded 再插入。

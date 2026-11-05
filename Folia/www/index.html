@@ -243,6 +243,8 @@ var FOLIA_LATEST_VERSION = '2.1.5';
     if (p.get('obs') === '1' || window.location.pathname === '/obs' || p.get('splash') === '0') return;
   } catch (e) {}
   // iOS 原生壳（WKWebView）里不弹：这个弹窗是网页版的赞赏入口，装在 App 里只是开机挡一层。
+  // 壳侧的 `installDonateCard()` 会在首屏就绪后弹一次；两边都弹就是「弹两次赞赏界面」。
+  if (/iPhone|iPad|iPod/i.test(navigator.userAgent || '')) return;
 
   var mask = document.getElementById('donate-mask');
   if (!mask) return;
