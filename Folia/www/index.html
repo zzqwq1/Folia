@@ -28,12 +28,11 @@
     "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
     "lucide-react": "https://aistudiocdn.com/lucide-react@^0.554.0",
     "react-i18next": "https://aistudiocdn.com/react-i18next@^16.3.5",
-    "i18next": "https://aistudiocdn.com/i18next@^25.6.3",
-    "i18next-browser-languagedetector": "https://aistudiocdn.com/i18next-browser-languagedetector@^8.2.0"
+    "i18next": "https://aistudiocdn.com/i18next@^25.6.3"
   }
 }
 </script>
-  <script type="module" crossorigin src="./assets/main-IaIRsYLo.js"></script>
+  <script type="module" crossorigin src="./assets/main-C4p9VOi-.js"></script>
   <link rel="modulepreload" crossorigin href="./assets/preload-helper-vuKwV25Y.js">
   <link rel="modulepreload" crossorigin href="./assets/modulepreload-polyfill-P2Xu9kJm.js">
   <link rel="modulepreload" crossorigin href="./assets/frameRateLimiter-DYVxXwkE.js">
@@ -234,7 +233,7 @@
 </div>
 
 <script>
-// 版本号唯一来源：下面的更新公告脚本读这两个值，避免多处版本号不一致。
+// 版本号唯一来源：下面的赞赏弹窗和更新公告脚本都读这两个值，避免多处版本号不一致。
 // FOLIA_VERSION = 本 App 当前版本；FOLIA_LATEST_VERSION = 最新可下载版本。
 var FOLIA_VERSION = '2.1.5';
 var FOLIA_LATEST_VERSION = '2.1.5';
@@ -243,6 +242,7 @@ var FOLIA_LATEST_VERSION = '2.1.5';
     var p = new URLSearchParams(window.location.search);
     if (p.get('obs') === '1' || window.location.pathname === '/obs' || p.get('splash') === '0') return;
   } catch (e) {}
+  // iOS 原生壳（WKWebView）里不弹：这个弹窗是网页版的赞赏入口，装在 App 里只是开机挡一层。
 
   var mask = document.getElementById('donate-mask');
   if (!mask) return;
@@ -313,8 +313,18 @@ var FOLIA_LATEST_VERSION = '2.1.5';
   });
   mask.addEventListener('click', function (e) { if (e.target === mask) close(); });
 
-  // 等赞赏弹窗先弹出来，避免两个遮罩叠在一起。
-  setTimeout(show, 2400);
+  var waited = 0;
+  var timer = setInterval(function () {
+    waited += 400;
+    var donate = document.getElementById('donate-mask');
+    var donateOpen = donate && donate.classList.contains('show');
+    if (!donateOpen) {
+      clearInterval(timer);
+      setTimeout(show, 400);
+    } else if (waited > 30000) {
+      clearInterval(timer);
+    }
+  }, 400);
 })();
 </script>
 <!-- ========== 版本更新公告 结束 ========== -->
