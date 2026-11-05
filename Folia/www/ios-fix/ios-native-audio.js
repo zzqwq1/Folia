@@ -105,6 +105,20 @@
     if (msg.cmd !== 'status') note('→ ' + msg.cmd + (msg.url ? ' ' + String(msg.url).slice(-48) : '') + (msg.position != null ? ' @' + Number(msg.position).toFixed(1) : '') + ' g' + msg.generation);
     try { h.postMessage(msg); return true; } catch (e) { note('postMessage 失败：' + e); return false; }
   }
+  // **用户亲手按的暂停：单独给壳报一条「这就是用户收手」。**
+  //
+  // 通用通道 `intent-pause` 同时承载「用户按的」和「WebKit / 恢复链按停的」，
+  // 壳只能靠「最近一次触摸过去多久」来猜。实测这个猜测并不可靠：
+  // 日志里用户明明按了暂停，`gestureAge` 却是 83 秒（页面按钮那一下没被记成手势），
+  // 壳于是判成「不是用户暂停」，保留 `wantsAudible`；紧接着切后台，
+  // 后台续播链又把歌放了起来 —— 用户看到的就是「暂停后退出后台还在放」。
+  // 这一条只在 `proto.pause` 的直接调用里发（锁屏 / 音频打断走 `remotePause`，不发）。
+  function notifyUserPause() {
+    try {
+      var h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.foliaAudioIntent;
+      if (h) h.postMessage('intent-pause-user');
+    } catch (e) {}
+  }
   // 用 src 属性（换歌时立刻变）而不是 currentSrc（要等浏览器重新加载才变）
   function srcOf(el) { return D.src.get.call(el) || el.currentSrc || ''; }
   function eligible(el) {
@@ -245,6 +259,7 @@
     send({ cmd: 'pause' });
     setPlaying(false);
     expect(false);
+    if (!remotePause) { notifyUserPause(); }
   };
   proto.load = function () {
     if (mirror === this) { send({ cmd: 'pause' }); release(false); }

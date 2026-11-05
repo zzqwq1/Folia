@@ -357,6 +357,22 @@ final class WebContainerView: UIView {
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
+        // 横屏时网页会把一排桌面窗口按钮画到右上角（见 `hideWindowChromeScript`）。
+        userContent.addUserScript(WKUserScript(
+            source: Self.hideWindowChromeScript,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
+        // 刚把进程顶死过的深链：短时间内由页面侧拦截，别再让它自动跳回去。
+        let routeGuard = Self.routeGuardScript()
+        if !routeGuard.isEmpty {
+            userContent.addUserScript(WKUserScript(
+                source: routeGuard,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: true
+            ))
+            CrashLog.note("==== crash route guard installed ====")
+        }
         userContent.add(AudioStateRelay(), name: "foliaAudioState")
         userContent.add(JSLogRelay(), name: "foliaJSLog")
         let qr = QRFallbackRelay()
@@ -387,6 +403,35 @@ final class WebContainerView: UIView {
     ///   网易云与大部分图床的封面都是这个命名，1x 版本仍在，页面不会缺图；
     /// - 没有 `if-domain`：任何域名下的封面都一样处理，站点换域名不受影响。
     static let downscaleRuleJSON = #"[{"trigger":{"url-filter":".*@[23]x\\.(png|jpg|jpeg|webp)(\\?.*)?$","resource-type":["image"]},"action":{"type":"block"}}]"#
+
+    /// 藏掉网页版按「桌面窗口」渲染出来的标题栏控件条。
+    ///
+    /// 页面用 `Boolean(window.electron)` 判定桌面版（见 `App.tsx` 的 `isElectronWindow`），
+    /// 而壳必须保留 `window.electron.qishuiRequest` 才能用汽水音源 ——
+    /// 于是横屏时右上角会多出一排「全屏 / 最小化 / 最大化 / 关闭」，
+    /// 既不是这个 App 的控件，点了还会调壳里没实现的窗口方法。
+    /// 只按「布局形状」隐藏那一个容器（`absolute top-0 left-0 right-0 z-[9999] h-8`），
+    /// 不碰页面其它任何界面；用属性选择器避免在 CSS 里转义方括号。
+    static let hideWindowChromeScript = """
+    (function(){
+      try {
+        var css = 'div[class~="absolute"][class~="top-0"][class~="left-0"][class~="right-0"][class~="z-[9999]"][class~="h-8"]{display:none !important;}';
+        function install(){
+          try {
+            if (!document.documentElement) { return; }
+            if (document.getElementById('__folia_no_window_chrome')) { return; }
+            var style = document.createElement('style');
+            style.id = '__folia_no_window_chrome';
+            style.textContent = css;
+            (document.head || document.documentElement).appendChild(style);
+          } catch (e) {}
+        }
+        install();
+        document.addEventListener('DOMContentLoaded', install);
+        setTimeout(install, 400);
+      } catch (e) {}
+    })();
+    """
 
     /// 汽水音乐音源的桥。页面侧入口是 `window.electron.qishuiRequest`。
     ///
@@ -471,6 +516,11 @@ final class WebContainerView: UIView {
         slot.resolve(obj);
       };
       // 窗口句柄的最小实现：壳里没有最大化 / 全屏窗口的概念，一律报「不是」。
+      //
+      // 页面把 `Boolean(window.electron)` 当成桌面版，横屏时会渲染一排窗口按钮
+      // （全屏 / 最小化 / 最大化 / 关闭）。`WindowControls` 里这些函数是裸调用，
+      // 缺一个就是 `TypeError: u.minimizeWindow is not a function`，整棵控件树抛错。
+      // 控件条本身已由 `hideWindowChromeScript` 藏掉，这里只补「不缺方法」。
       try {
         if (typeof bridge.isWindowMaximized !== 'function') {
           bridge.isWindowMaximized = function(){ return Promise.resolve(false); };
@@ -480,6 +530,24 @@ final class WebContainerView: UIView {
         }
         if (typeof bridge.onWindowFullscreenChanged !== 'function') {
           bridge.onWindowFullscreenChanged = function(){ return function(){}; };
+        }
+        if (typeof bridge.minimizeWindow !== 'function') {
+          bridge.minimizeWindow = function(){ return Promise.resolve(true); };
+        }
+        if (typeof bridge.toggleMaximizeWindow !== 'function') {
+          bridge.toggleMaximizeWindow = function(){ return Promise.resolve(false); };
+        }
+        if (typeof bridge.maximizeWindow !== 'function') {
+          bridge.maximizeWindow = function(){ return Promise.resolve(false); };
+        }
+        if (typeof bridge.toggleFullscreenWindow !== 'function') {
+          bridge.toggleFullscreenWindow = function(){ return Promise.resolve(false); };
+        }
+        if (typeof bridge.closeWindow !== 'function') {
+          bridge.closeWindow = function(){ return Promise.resolve(true); };
+        }
+        if (typeof bridge.openRemoteControl !== 'function') {
+          bridge.openRemoteControl = function(){ return Promise.resolve(false); };
         }
       } catch (e) {}
       try {
@@ -2009,6 +2077,39 @@ final class WebContainerView: UIView {
             || preemptedByOtherApp
             || stayedBackgroundedWhileAudible
         confirmPausedIntent()
+    }
+
+    /// 页面明确告诉壳：这一次暂停是用户亲手按的（见 `ios-native-audio.js` 的 `notifyUserPause`）。
+    ///
+    /// 不再走 `confirmPausedIntent` 那条「按最近一次触摸去猜」的链：
+    /// 实测不可靠 —— 日志里用户明明按了暂停，`gestureAge` 却是 83 秒，
+    /// 这一拍被判成「不是用户」，`wantsAudible` 留了下来；20 秒后切后台，
+    /// 续播链又把歌放起来（用户听到的就是「暂停后退出后台还在放」）。
+    /// 这里只换成可靠信号，例外一条不少：恢复在跑、刚重建通路、刚被别家 App 抢过，
+    /// 都仍然不认账，避免把「从抖音回来没声」那条旧病重新放出来。
+    fileprivate func markUserPauseFromPage() {
+        guard UIApplication.shared.applicationState == .active else { return }
+        guard !audioRecoveryInFlight, !preemptedByOtherApp, !stayedBackgroundedWhileAudible else {
+            CrashLog.note("==== user pause ignored (audio recovery in flight) ====")
+            return
+        }
+        if let rebuiltAt = pathRebuiltAt, Date().timeIntervalSince(rebuiltAt) < 2 {
+            CrashLog.note("==== user pause ignored (right after audio path rebuild) ====")
+            return
+        }
+        pendingPauseCheck = false
+        pendingPauseDuringRecovery = false
+        userPaused = true
+        stopKeepAliveTimer()
+        wantsAudible = false
+        preemptedByOtherApp = false
+        leftAppWhileAudible = false
+        // 用户已经收手，这一轮「离开过 App」的欠账全部结清：
+        // 否则下一次进后台，续播链仍会按旧账把歌放回去。
+        wasBackgroundedThisSession = false
+        Self.wasAudibleInBackground = false
+        AudioSessionController.shared.notePlaybackStopped()
+        CrashLog.note("==== paused by user (page button) ====")
     }
 
     /// 页面暂停后二次确认：真的停了才停轮询。
@@ -5000,8 +5101,19 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
     }
 
     /// 当前文档不是站内页面时，主框架上的任何导航都可能是「外部闯入」。
+    ///
+    /// **必须先有一个文档**。冷启动 / 重建后的第一发导航，`webView.url` 还是 nil，
+    /// 这一发一定是壳自己 `load` 出去的，不可能是从别的 App 闯进来的。
+    /// 早先这里只看「当前不是站内页」，于是首屏加载被判成闯入者，在
+    /// `decidePolicyFor` 里被 `cancel` 掉 —— 日志里就是连续多条
+    /// `provisional navigation failed … 102 帧框加载已中断`，连错三次后
+    /// 还会把用户推到包内离线副本（「进不去 / 停在加载界面」）。
     private func isArrivalCandidate() -> Bool {
-        isShowingOfflineCopy || isOnSitePage ? false : true
+        if isShowingOfflineCopy || isOnSitePage { return false }
+        guard let current = webView?.url else { return false }
+        // `about:blank` 不算已有文档。
+        if current.scheme == "about" { return false }
+        return true
     }
 
     /// 当前文档是不是站内那份线上页面（离线副本不算）。
@@ -5537,6 +5649,106 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         guard let trusted = trustedSiteURL(url) else { return }
         markMemoryHeavy(trusted)
         noteRouteDeath(trusted)
+        banRoute(trusted)
+    }
+
+    /// 进程在某个深链路由上被顶死过：短时间内禁止页面再自动跳回那一条。
+    ///
+    /// 单靠「重建时换个落脚点」不够 —— 实测新实例明明打开的是 `#player`，
+    /// 两三秒后页面自己又跳回同一个歌单，然后进程再被顶死，循环往复。
+    /// 封禁只在**前台真崩溃**时生效；后台被系统回收是整机内存压力，
+    /// 和这条路由本身没关系。
+    private static let routeBanKey = "folia.shell.routeBan"
+    private static let routeBanSeconds: Double = 180
+
+    private static func banRoute(_ url: URL) {
+        guard UIApplication.shared.applicationState == .active else { return }
+        guard let fragment = url.fragment, !fragment.isEmpty else { return }
+        // 播放器 / 启动屏这些壳自己会落脚的轻路由永远不封。
+        if fragment.hasPrefix("player") || fragment.hasPrefix("app-splash") { return }
+        var table = UserDefaults.standard.dictionary(forKey: routeBanKey) as? [String: Double] ?? [:]
+        let now = Date().timeIntervalSince1970
+        table = table.filter { $0.value > now }
+        table[fragment] = now + routeBanSeconds
+        UserDefaults.standard.set(table, forKey: routeBanKey)
+        CrashLog.note("==== route banned for \(Int(routeBanSeconds))s: #\(fragment) ====")
+    }
+
+    /// 把「刚顶死进程的深链」编成一段 document-start 脚本。
+    ///
+    /// 为什么放在页面侧而不是导航策略里：SPA 的换页走的是 `location.hash` /
+    /// `history.pushState`，根本不经过 `decidePolicyFor`，`WKNavigationDelegate`
+    /// 看不到这些导航。脚本只做两件事：
+    /// 1. 拦掉目标命中封禁路由的 `pushState` / `replaceState`；
+    /// 2. 监听 `hashchange` / `popstate` 并在启动后几个时点复查 ——
+    ///    线上页会从自己的持久化状态里把「上次那个歌单」恢复出来，
+    ///    首屏那一刻 `#player` 是对的，几百毫秒后又被它自己跳回去。
+    /// 命中后统一落回 `#player`（不是首页：首页要重新拉全部脚本，内存更紧）。
+    static func routeGuardScript() -> String {
+        let now = Date().timeIntervalSince1970
+        let table = (UserDefaults.standard.dictionary(forKey: routeBanKey) as? [String: Double] ?? [:])
+            .filter { $0.value > now }
+        guard !table.isEmpty else { return "" }
+        let entries = table.map { fragment, until -> String in
+            let escaped = fragment
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+            return "[\"\(escaped)\",\(Int(until))]"
+        }
+        let list = "[" + entries.joined(separator: ",") + "]"
+        return """
+        (function(){
+          var banned = \(list);
+          var fallback = '#player';
+          var lastKick = 0;
+          function blocked(hash){
+            var h = String(hash || '');
+            if (h.charAt(0) === '#') { h = h.slice(1); }
+            if (!h) { return false; }
+            for (var i = 0; i < banned.length; i += 1) {
+              var frag = banned[i][0];
+              if (banned[i][1] <= Date.now()) { continue; }
+              if (h.slice(0, frag.length) === frag) { return true; }
+            }
+            return false;
+          }
+          function kick(){
+            try {
+              var h = location.hash || '';
+              if (!blocked(h)) { return; }
+              var now = Date.now();
+              if (now - lastKick < 400) { return; }
+              lastKick = now;
+              console.warn('[folia-shell] crash route blocked: ' + h);
+              try { history.replaceState(history.state, '', location.pathname + location.search + fallback); } catch (e) {}
+              try { location.hash = fallback; } catch (e) {}
+              try { window.dispatchEvent(new HashChangeEvent('hashchange')); } catch (e) {}
+            } catch (e) {}
+          }
+          function routeOf(url){
+            try { return (new URL(String(url), location.href).hash) || ''; } catch (e) { return ''; }
+          }
+          try {
+            var rawPush = history.pushState;
+            var rawReplace = history.replaceState;
+            history.pushState = function(state, title, url){
+              if (url && blocked(routeOf(url))) {
+                try { console.warn('[folia-shell] blocked pushState to crash route'); } catch (e) {}
+                return;
+              }
+              return rawPush.apply(this, arguments);
+            };
+            history.replaceState = function(state, title, url){
+              if (url && blocked(routeOf(url))) { return; }
+              return rawReplace.apply(this, arguments);
+            };
+          } catch (e) {}
+          window.addEventListener('hashchange', kick);
+          window.addEventListener('popstate', kick);
+          document.addEventListener('DOMContentLoaded', kick);
+          [0, 400, 1200, 2500, 5000].forEach(function(ms){ setTimeout(kick, ms); });
+        })();
+        """
     }
 
     static func markMemoryHeavy(_ url: URL) {
@@ -5761,6 +5973,9 @@ private final class AudioIntentRelay: NSObject, WKScriptMessageHandler {
                 container?.markAudibleIntent()
             } else if body == "intent-pause" {
                 container?.markPausedIntent()
+            } else if body == "intent-pause-user" {
+                // 页面直接点名「用户按的暂停」：不再靠手势龄去猜（见 `notifyUserPause`）。
+                container?.markUserPauseFromPage()
             }
         }
     }
