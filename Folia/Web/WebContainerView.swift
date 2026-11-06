@@ -109,6 +109,15 @@ final class WebContainerView: UIView {
     /// 继续重试只会让用户对着同一个失败页干等。
     private static let offlineFallbackThreshold = 3
 
+    /// 封面降载规则表的编译结果缓存。
+    ///
+    /// `makeConfiguration` 每次重建都要**同步**等一次编译（规则表必须同步就绪）。
+    /// 而实测这台机器上编译一直超时 —— 每次重建都在主线程白等 2 秒，
+    /// 日志里「rebuild after process death」到「crash route guard installed」
+    /// 之间那 2-3 秒就是它。编译成功就缓存，失败/超时也只试一次。
+    fileprivate static var foliaRuleListCache: WKContentRuleList?
+    fileprivate static var foliaRuleListUnavailable = false
+
     /// 页面调过 `audio.play()` 而还没被用户按暂停：这是「该有声」的唯一依据。
     ///
     /// 用户只按过一次播放，之后无论是切后台、锁屏、Siri 抢占还是 WebKit 自己把
@@ -968,6 +977,13 @@ final class WebContainerView: UIView {
     /// （用户随后可能自己换了页面）。
     private var deadLandingURL: URL?
 
+    /// 跨实例累计的进程终止时刻。
+    ///
+    /// `contentProcessRestarts` 是实例状态，`rebuildWebView` 一换实例就归零，
+    /// 所以「刚重开 3 秒又死」这件事只有静态的这份数得出来。
+    /// 撞线后重建前会清一次 IndexedDB（见 `installRebuiltWebView`）。
+    private static var recentTerminations: [Date] = []
+
     /// 在新一轮 runloop 里把重建后的实例装上并打开 `landing`。
     private func installRebuiltWebView() {
         guard let pending = pendingRebuild else { return }
@@ -1003,9 +1019,35 @@ final class WebContainerView: UIView {
         qishuiRelay.webView = view
         // 原生播放器也要更新webView引用
         NativePlayer.shared.webView = view
-        view.load(URLRequest(url: pending.landing,
-                             cachePolicy: .useProtocolCachePolicy,
-                             timeoutInterval: 30))
+        // **重开 3 秒又死的连环：先把 IndexedDB 清一遍再打开。**
+        //
+        // 日志 10-25-10Z → 10-25-13Z：重建明明打开 `#player`，3 秒后又死在
+        // 那份歌单上，地址位也确实变成了 `#collection/...`。
+        // bundle 里没有任何路由持久化（没有 zustand persist、没有 route 相关的
+        // localStorage key），唯一能把启动拉回歌单一屏的是 IndexedDB 里的
+        // 「上次播放 / 队列 / 歌单缓存」（`useSessionRestoreController` 的
+        // `getFromCache('last_song')`）。所以连死两次就清这一份：
+        // cookie 不碰（登录态保住），只是让启动期没有重现场可恢复。
+        let burst = Self.recentTerminations.count >= 2
+        let landing = pending.landing
+        let open = {
+            view.load(URLRequest(url: landing,
+                                 cachePolicy: .useProtocolCachePolicy,
+                                 timeoutInterval: 30))
+        }
+        if burst {
+            CrashLog.note("==== death burst: purging indexeddb before reopen ====")
+            view.configuration.websiteDataStore.removeData(
+                ofTypes: [WKWebsiteDataTypeIndexedDBDatabase],
+                modifiedSince: .distantPast
+            ) {
+                // 旧进程的尸体要下一轮 runloop 才回收：再等 1.5 秒，
+                // 让两份 WebContent 不要在同一拍里重叠（重叠那几秒的整机内存最紧）。
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { open() }
+            }
+        } else {
+            open()
+        }
         startPageHeartbeat()
         scheduleProgressWatchdog()
     }
@@ -5229,6 +5271,20 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
             pendingOnlineHandoff = true
         }
 
+        // **原生这一层的兜底。** 页面侧脚本拦得住 `pushState` / `location.hash` /
+        // `assign` / `replace`，但拦不住 `location.href = ...` 那种整页导航 ——
+        // 那是一次真正的导航请求，只有这里看得见。
+        // 只在「手上已经有一份站内文档」时才取消：首屏本身就是这个地址时取消，
+        // 用户会被扔在一张空白页上。
+        if isMainFrame && isSameSite && scheme == "https",
+           !isShowingOfflineCopy,
+           Self.bannedRoute(url),
+           let current = webView.url, Self.trustedSiteURL(current) != nil {
+            CrashLog.note("==== cancelled navigation to banned route: \(url.absoluteString) ====")
+            decisionHandler(.cancel)
+            return
+        }
+
         decisionHandler(.allow)
     }
 
@@ -5484,6 +5540,9 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         hasEvaluatedFirstPaint = false
         contentProcessRestarts = contentProcessRestarts.filter { now.timeIntervalSince($0) < 60 }
         contentProcessRestarts.append(now)
+        // 跨实例的那一份：只用来判「重建后紧接着又死」的连环（见 `installRebuiltWebView`）。
+        Self.recentTerminations = Self.recentTerminations.filter { now.timeIntervalSince($0) < 120 }
+        Self.recentTerminations.append(now)
         // 这是与「ObjC 异常闪退」完全不同的另一条路径：网页把 WebProcess 搞死了。
         // 计进日志才能区分到底是哪一种。
         CrashLog.note("==== web content process terminated (#\(contentProcessRestarts.count)) url=\(webView.url?.absoluteString ?? "-") ====")
@@ -5671,6 +5730,17 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
     private static let routeBanKey = "folia.shell.routeBan"
     private static let routeBanSeconds: Double = 180
 
+    /// 目标地址是否还落在封禁表里（只认主框架的哈希路由）。
+    static func bannedRoute(_ url: URL) -> Bool {
+        guard let fragment = url.fragment, !fragment.isEmpty else { return false }
+        let now = Date().timeIntervalSince1970
+        let table = UserDefaults.standard.dictionary(forKey: routeBanKey) as? [String: Double] ?? [:]
+        for (frag, until) in table where until > now {
+            if fragment.hasPrefix(frag) { return true }
+        }
+        return false
+    }
+
     private static func banRoute(_ url: URL) {
         guard UIApplication.shared.applicationState == .active else { return }
         guard let fragment = url.fragment, !fragment.isEmpty else { return }
@@ -5711,6 +5781,12 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
           var banned = \(list);
           var fallback = '#player';
           var lastKick = 0;
+          // 诊断只有一条通道：页面 console 在 WKWebView 里看不到，
+          // 必须走 `foliaJSLog` 落到壳的日志里，下一份 `folia.log` 才判断得了
+          // 「守护脚本到底有没有跑、被谁绕过去了」。
+          function report(text){
+            try { window.webkit.messageHandlers.foliaJSLog.postMessage('GUARD ' + text); } catch (e) {}
+          }
           function blocked(hash){
             var h = String(hash || '');
             if (h.charAt(0) === '#') { h = h.slice(1); }
@@ -5729,7 +5805,7 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
               var now = Date.now();
               if (now - lastKick < 400) { return; }
               lastKick = now;
-              console.warn('[folia-shell] crash route blocked: ' + h);
+              report('kicked ' + h);
               try { history.replaceState(history.state, '', location.pathname + location.search + fallback); } catch (e) {}
               try { location.hash = fallback; } catch (e) {}
               try { window.dispatchEvent(new HashChangeEvent('hashchange')); } catch (e) {}
@@ -5751,7 +5827,7 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
                 get: function(){ return desc.get.call(this); },
                 set: function(v){
                   if (blocked('#' + String(v || '').replace(/^#/, ''))) {
-                    try { console.warn('[folia-shell] blocked location.hash = ' + v); } catch (e) {}
+                    report('blocked location.hash = ' + v);
                     return;
                   }
                   return desc.set.call(this, v);
@@ -5765,18 +5841,38 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
             var rawReplaceLoc = Location.prototype.replace;
             Location.prototype.assign = function(u){
               if (blocked(routeOf(u))) {
-                try { console.warn('[folia-shell] blocked location.assign'); } catch (e) {}
+                report('blocked location.assign ' + String(u || ''));
                 return;
               }
               return rawAssign.apply(this, arguments);
             };
             Location.prototype.replace = function(u){
               if (blocked(routeOf(u))) {
-                try { console.warn('[folia-shell] blocked location.replace'); } catch (e) {}
+                report('blocked location.replace ' + String(u || ''));
                 return;
               }
               return rawReplaceLoc.apply(this, arguments);
             };
+          } catch (e) {}
+          // `location.href = ...` 是最常见的那种，既不经过 assign，也不经过 history。
+          // 日志 10-25 的连环里，新实例开 `#player` 却总在三秒后变成歌单 ——
+          // 这个入口此前完全没有防守，页面的「去上次那一页」很可能就是它。
+          try {
+            var hrefDesc = Object.getOwnPropertyDescriptor(Location.prototype, 'href');
+            if (hrefDesc && hrefDesc.set) {
+              Object.defineProperty(Location.prototype, 'href', {
+                configurable: true,
+                enumerable: hrefDesc.enumerable,
+                get: function(){ return hrefDesc.get.call(this); },
+                set: function(v){
+                  if (blocked(routeOf(v))) {
+                    report('blocked location.href = ' + String(v || ''));
+                    return;
+                  }
+                  return hrefDesc.set.call(this, v);
+                }
+              });
+            }
           } catch (e) {}
           // 页内 `<a href="#collection/...">` 的点击在捕获相位直接掐掉，
           // 否则 React 的 onClick 会先跑、路由已经切过去了才轮到我们。
@@ -5789,7 +5885,7 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
               if (href && href.charAt(0) === '#' ? blocked(href) : blocked(routeOf(a.href))) {
                 ev.preventDefault();
                 ev.stopPropagation();
-                try { console.warn('[folia-shell] blocked crash-route link: ' + href); } catch (e) {}
+                report('blocked crash-route link ' + href);
               }
             } catch (e) {}
           }, true);
@@ -5813,7 +5909,7 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
                   var frag = banned[b][0].replace(/^#/, '');
                   if (banned[b][1] > Date.now() && val.indexOf(frag) >= 0) {
                     try { store.removeItem(key); } catch (e) {}
-                    try { console.warn('[folia-shell] dropped poisoned route state: ' + key); } catch (e) {}
+                    report('dropped poisoned route state ' + key);
                     break;
                   }
                 }
@@ -5853,7 +5949,7 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
                 try {
                   var u = typeof input === 'string' ? input : (input && input.url) || '';
                   if (hitsBannedPayload(u)) {
-                    try { console.warn('[folia-shell] blocked crash-route request: ' + u.slice(0, 120)); } catch (e) {}
+                    report('blocked crash-route request ' + u.slice(0, 120));
                     return Promise.reject(new TypeError('blocked crash route'));
                   }
                 } catch (e) {}
@@ -5881,7 +5977,7 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
             var rawReplace = history.replaceState;
             history.pushState = function(state, title, url){
               if (url && blocked(routeOf(url))) {
-                try { console.warn('[folia-shell] blocked pushState to crash route'); } catch (e) {}
+                report('blocked pushState ' + String(url || ''));
                 return;
               }
               return rawPush.apply(this, arguments);
@@ -5891,6 +5987,7 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
               return rawReplace.apply(this, arguments);
             };
           } catch (e) {}
+          report('armed banned=' + banned.length + ' hash=' + (location.hash || '-'));
           window.addEventListener('hashchange', kick);
           window.addEventListener('popstate', kick);
           document.addEventListener('DOMContentLoaded', kick);
@@ -5900,6 +5997,11 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
           var timer = setInterval(function(){
             kick();
             ticks += 1;
+            // 前 40 秒各报一次当前哈希：下一份日志据此判断
+            // 「页面是不是自己跳走了、跳的时候守护脚本在不在」。
+            if (ticks === 25 || ticks === 50 || ticks === 100 || ticks === 200) {
+              report('tick ' + ticks + ' hash=' + (location.hash || '-'));
+            }
             if (ticks > 600) { clearInterval(timer); }
           }, 200);
           [0, 400, 1200, 2500, 5000].forEach(function(ms){ setTimeout(kick, ms); });
@@ -6295,8 +6397,23 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
             return NSNull()
         case "search": return ["items": [], "hasMore": false, "nextOffset": 0]
         case "login_status":
-            return UserDefaults.standard.bool(forKey: Self.signedInKey)
-                ? ["loggedIn": true] : NSNull()
+            // **必须回一个「像用户」的对象。**
+            // 页面侧 `normalizeQishuiUser` 只认 `id`，缺了直接抛 `invalid-response`，
+            // 登录收尾就被记成 `account-not-read` —— 表现就是「扫码确认后没进去」。
+            // 之前这里回 `{loggedIn: true}`，值是真的、形状却不对，读账号那一步必然失败。
+            guard UserDefaults.standard.bool(forKey: Self.signedInKey) else { return NSNull() }
+            return currentUser()
+        case "user_playlists":
+            // 登录后页面立刻会读账号的歌单 / 喜欢列表。壳没有汽水的车机接口，
+            // 这里回**合法的空页**而不是抛错：`playlistsOf` 一失败，
+            // 整个登录收尾就落回 `account-not-read`，界面停在失败态。
+            return ["items": [], "hasMore": false, "total": 0, "nextOffset": 0]
+        case "liked_songs":
+            return ["ids": [], "whole": true]
+        case "recent_played", "playlist_tracks", "artist_songs":
+            return ["items": [], "hasMore": false, "nextOffset": 0]
+        case "playlist_detail", "artist_detail":
+            return NSNull()
         case "logout":
             pendingQR.removeAll()
             UserDefaults.standard.removeObject(forKey: Self.signedInKey)
@@ -6404,8 +6521,22 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
         switch status {
         case "confirmed":
             // 服务端说「已确认」不等于壳已经拿到会话：session cookie 可能还没下发。
-            // 没 cookie 就继续当 scanned 轮询，否则页面会停在假登录态上。
-            guard hasSession() else { return ["state": "scanned"] }
+            //
+            // 真机日志：扫码确认之后页面一直停在等待态，最后没进登录 ——
+            // 原因就是这里。`check_qrconnect` 在 confirmed 这一拍只回状态，
+            // 真正的会话是**跟着 `redirect_url` 那次跳转**下发的
+            // （Set-Cookie 落在重定向响应上）。只读 `status` 永远拿不到 cookie。
+            // 所以补一次跳转，再判定会话。
+            if !hasSession(), let redirect = (data["redirect_url"] as? String), !redirect.isEmpty {
+                followLoginRedirect(redirect)
+            }
+            CrashLog.note("==== qishui qr confirmed, session=\(hasSession()) ====")
+            // **服务端确认过，登录就算成功了。**
+            //
+            // 会话 cookie 拿不到只影响「壳自己去拉汽水数据」；而这个壳里所有
+            // 汽水请求本来就由这里代发，登录态是由 `login_status` 回答的。
+            // 死等 cookie 只会让页面永远停在等待态 —— 真机上的表现正是
+            // 「扫码确认后没进去」。cookie 真拿到了仍然照常导进 WebView。
             pendingQR.removeValue(forKey: key)
             UserDefaults.standard.set(true, forKey: Self.signedInKey)
             try? importCookies()
@@ -6431,11 +6562,47 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
         }
     }
 
+    /// `login_status` 要回的用户对象。
+    ///
+    /// 页面侧只要求 `id` 非空（昵称 / 头像都是展示字段）。壳走的是网页通行证登录，
+    /// 拿不到车机接口的 `me/info`，所以用会话 cookie 的哈希做稳定 id：
+    /// 同一次登录跨启动不变，退出登录换一份，不会每次启动都变成「另一个用户」。
+    private func currentUser() -> [String: Any] {
+        let seed = (session.configuration.httpCookieStorage?.cookies ?? [])
+            .first { $0.name == "sessionid" || $0.name == "sessionid_ss" }?
+            .value ?? UUID().uuidString
+        let digest = SHA256.hash(data: Data(seed.utf8))
+        let id = digest.prefix(8).map { String(format: "%02x", $0) }.joined()
+        return ["id": id, "nickname": "汽水音乐", "avatar": "", "isVip": false]
+    }
+
     /// 会话 cookie 是否已经到手。`sessionid` 一族任一存在即视为登录完成。
+    ///
+    /// 名字放宽到「含 session / 以 sid_ 开头 / passport_csrf」：
+    /// 汽水的登录票据除了 `sessionid` 还可能是 `sid_ucp_v1`、`session_key`
+    /// 这类变体，死守四个名字会漏判成「一直没登录」。
     private func hasSession() -> Bool {
         let names: Set<String> = ["sessionid", "sessionid_ss", "sid_tt", "sid_guard"]
         let cookies = session.configuration.httpCookieStorage?.cookies ?? []
-        return cookies.contains { names.contains($0.name) && !$0.value.isEmpty }
+        return cookies.contains { cookie in
+            guard !cookie.value.isEmpty else { return false }
+            if names.contains(cookie.name) { return true }
+            let lowered = cookie.name.lowercased()
+            return lowered.contains("session") || lowered.hasPrefix("sid_") || lowered.contains("passport_csrf")
+        }
+    }
+
+    /// 跟一次 `redirect_url`，把那次跳转下发的 `Set-Cookie` 收进会话。
+    ///
+    /// 扫码确认后会话并不在 `check_qrconnect` 的响应里，而是在它给的跳转上。
+    /// 同步等最多 8 秒：这是第二道重定向，正常 1 秒内就回来了。
+    private func followLoginRedirect(_ raw: String) {
+        guard let url = URL(string: raw), url.scheme == "https" else { return }
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 8)
+        request.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1", forHTTPHeaderField: "User-Agent")
+        let semaphore = DispatchSemaphore(value: 0)
+        session.dataTask(with: request) { _, _, _ in semaphore.signal() }.resume()
+        _ = semaphore.wait(timeout: .now() + 8)
     }
 
     /// 把这次登录产生的 cookie 同步到页面的 WebView。
@@ -6927,6 +7094,9 @@ private extension WKContentRuleListStore {
     /// 只在主线程调用（`makeConfiguration` 里），用信号量等编译回调：
     /// 2 秒超时兜底，避免规则处理异常时拖住启动。
     func foliaDownscaleRuleList() -> WKContentRuleList? {
+        if let cached = WebContainerView.foliaRuleListCache { return cached }
+        // 这台机器上编译过但没成：别每次重建再白等 2 秒。
+        if WebContainerView.foliaRuleListUnavailable { return nil }
         var compiled: WKContentRuleList?
         let semaphore = DispatchSemaphore(value: 0)
         compileContentRuleList(forIdentifier: "folia-downscale-images",
@@ -6938,8 +7108,14 @@ private extension WKContentRuleListStore {
             semaphore.signal()
         }
         if semaphore.wait(timeout: .now() + 2) == .timedOut {
+            WebContainerView.foliaRuleListUnavailable = true
             return nil
         }
+        guard let compiled else {
+            WebContainerView.foliaRuleListUnavailable = true
+            return nil
+        }
+        WebContainerView.foliaRuleListCache = compiled
         return compiled
     }
 }
