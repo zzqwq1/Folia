@@ -5828,8 +5828,15 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
           var bannedIds = [];
           banned.forEach(function(item){
             if (item[1] <= Date.now()) { return; }
-            var m = /playlist\/(\d+)/.exec(item[0]);
-            if (m) { bannedIds.push(m[1]); }
+            var idx = item[0].indexOf('playlist/');
+            if (idx < 0) { return; }
+            var rest = item[0].slice(idx + 9);
+            var id = '';
+            for (var c = 0; c < rest.length; c += 1) {
+              var ch = rest.charAt(c);
+              if (ch >= '0' && ch <= '9') { id += ch; } else { break; }
+            }
+            if (id) { bannedIds.push(id); }
           });
           function hitsBannedPayload(url){
             var u = String(url || '');
