@@ -368,12 +368,6 @@ final class WebContainerView: UIView {
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
-        // 禁掉 Folia 首次启动必弹的「认识思索模式」引导层（见 `suppressPonderOnboardingScript`）。
-        userContent.addUserScript(WKUserScript(
-            source: Self.suppressPonderOnboardingScript,
-            injectionTime: .atDocumentStart,
-            forMainFrameOnly: true
-        ))
         // 刚把进程顶死过的深链：短时间内由页面侧拦截，别再让它自动跳回去。
         let routeGuard = Self.routeGuardScript()
         if !routeGuard.isEmpty {
@@ -440,54 +434,6 @@ final class WebContainerView: UIView {
         install();
         document.addEventListener('DOMContentLoaded', install);
         setTimeout(install, 400);
-      } catch (e) {}
-    })();
-    """
-
-    /// 禁掉「认识思索模式」首次引导弹层。
-    ///
-    /// 这个弹层（`UserGuideModal.tsx`）是 Folia 在用户第一次启动时必弹的教学界面，
-    /// 要用户点「思索当前页面 → 完成思索后才能继续」，然后才能回到正常播放器。
-    /// iOS 壳的首要目标是「打开就能听」，这套桌面端的引导流程在触屏上意义不大。
-    /// 做法：提前把 SPA 用来判「onboarding 已看过」的 localStorage key
-    /// `folia_last_seen_ponder_onboarding_version` 设成一个永远领先的版本号，
-    /// 这样 `useStartupExperienceGate` 就不会把 `isUserGuideModalOpen` 设成真。
-    static let suppressPonderOnboardingScript = """
-    (function(){
-      try {
-        // 直接写 localStorage，再把 zustand store 里的 isUserGuideModalOpen 也关掉——
-        // 单靠 store 在 SPA 初始化前可能已经被设上了。
-        try { localStorage.setItem('folia_last_seen_ponder_onboarding_version', '999999'); } catch(e){}
-        // zustand 的 store 在 window 上可能挂在 __zustand__SOMEKEY 上，
-        // 但更可靠的做法是在 DOM 出现后把 Modal 从 DOM 里摘掉。
-        function closeIt() {
-          try {
-            var modals = document.querySelectorAll('[data-ponder-guide="true"], [class*="PonderGuide"], [class*="ponder-guide"], [data-testid*="ponder"], [role="dialog"]');
-            for (var i = 0; i < modals.length; i++) {
-              modals[i].remove();
-            }
-            // 兜底：任何 z-index > 100 的遮罩层可能就是它，按文字判断。
-            var all = document.querySelectorAll('[class*="absolute"], [class*="fixed"]');
-            for (var j = 0; j < all.length; j++) {
-              var t = all[j].textContent || '';
-              if (t.indexOf('认识思索模式') >= 0 || t.indexOf('思索当前页面') >= 0 ||
-                  (t.indexOf('完成一次页面思索') >= 0 && t.indexOf('才能继续') >= 0)) {
-                all[j].remove();
-              }
-            }
-          } catch (e) {}
-        }
-        // 连点几次，覆盖 SPA 初始化的不同时机。
-        closeIt();
-        document.addEventListener('DOMContentLoaded', closeIt);
-        setTimeout(closeIt, 600);
-        setTimeout(closeIt, 1600);
-        setTimeout(closeIt, 3500);
-        // 用 MutationObserver 盯着，弹出来就摘掉。
-        var mo = new MutationObserver(function() { closeIt(); });
-        document.addEventListener('DOMContentLoaded', function() {
-          if (document.body) { mo.observe(document.body, { childList: true, subtree: true }); }
-        });
       } catch (e) {}
     })();
     """
