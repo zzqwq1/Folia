@@ -380,6 +380,14 @@ final class WebContainerView: UIView {
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
+        // 低内存画像：把站点自己的性能设置预置成最低档，并断掉 WebGL。
+        // 不依赖站点读 `__foliaLowMemory`（线上入口脚本没读），全部走站点
+        // 已有的 localStorage 设置键 + 优雅的 WebGL 失败回退路径。
+        userContent.addUserScript(WKUserScript(
+            source: Self.lowMemoryProfileScript(),
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
         // 刚把进程顶死过的深链：短时间内由页面侧拦截，别再让它自动跳回去。
         let routeGuard = Self.routeGuardScript()
         if !routeGuard.isEmpty {
@@ -5812,6 +5820,49 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         table[fragment] = now + routeBanSeconds
         UserDefaults.standard.set(table, forKey: routeBanKey)
         CrashLog.note("==== route banned for \(Int(routeBanSeconds))s: #\(fragment) ====")
+    }
+
+    /// 低内存画像：在页面任何脚本读 localStorage 之前（document-start），把站点自己的
+    /// 性能设置强制成最低档，并把 WebGL 断掉。
+    ///
+    /// 依据（folia(10).log）：首页 / 歌单 / `#player` / `#lattice` 全部死于 WebContent 内存超限，
+    /// 路由封禁只能善后、不能预防。站点源码（Folia-main）确认了两条原生降级路径：
+    /// 1. `visualizer_mode = 'still'` —— 纯 DOM 静态歌词视图（VisualizerStill.tsx），
+    ///    绕开 sonnet（three.js）/ tempera（pixi.js）这些 GPU 可视化模式；播放页两次死亡
+    ///    都精确落在开播后 2 秒，正是可视化渲染循环启动的时刻。
+    /// 2. Lattice 拼贴墙的歌词层是 pixi.js WebGL（createLatticeLyricRuntime），但它有
+    ///    设计好的失败路径：`onFailure` → 回退纯 DOM 标题。所以全局断掉 WebGL 后，
+    ///    拼贴墙降级为「海报 + 文字」而不是闪退。
+    /// 布尔设置按站点 `storagePrimitives` 的约定存 `'true'/'false'` 字符串。
+    static func lowMemoryProfileScript() -> String {
+        """
+        (function () {
+            'use strict';
+            var PROFILE = {
+                'visualizer_mode': 'still',
+                'random_visualizer_mode_per_song': 'false',
+                'visualizer_frame_rate': '60',
+                'visualizer_background_mode': 'common',
+                'disable_visualizer_vignette': 'true',
+                'disable_visualizer_geometric_background': 'true',
+                'visualizer_glow_blur_quantize': 'true'
+            };
+            try {
+                for (var key in PROFILE) {
+                    try { localStorage.setItem(key, PROFILE[key]); } catch (e) {}
+                }
+            } catch (e) {}
+            try {
+                var rawGetContext = HTMLCanvasElement.prototype.getContext;
+                HTMLCanvasElement.prototype.getContext = function (type, attrs) {
+                    if (type === 'webgl' || type === 'webgl2' || type === 'webgpu') {
+                        return null;
+                    }
+                    return rawGetContext.call(this, type, attrs);
+                };
+            } catch (e) {}
+        })();
+        """
     }
 
     /// 把「刚顶死进程的深链」编成一段 document-start 脚本。
