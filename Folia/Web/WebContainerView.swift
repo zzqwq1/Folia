@@ -104,10 +104,11 @@ final class WebContainerView: UIView {
 
     /// 连续失败几次判定为「线上真的不可用」，转而回退包内离线副本。
     ///
-    /// 取 3：一次可能是瞬时抖动（切网络的瞬间、TLS 握手超时），两次仍可能是弱网下的
-    /// 自带重试，三次连续失败基本可以确认是 DNS / 链路 / 劫持层面的持续故障，
-    /// 继续重试只会让用户对着同一个失败页干等。
-    private static let offlineFallbackThreshold = 3
+    /// 取 4：一次可能是瞬时抖动（切网络的瞬间、TLS 握手超时），两次仍可能是弱网下的
+    /// 自带重试；冷启动那几秒网络栈还在起，第三次失败也未必是真的连不上。
+    /// 四次连续失败（配合 2.5 秒间隔约 10 秒）基本可以确认是 DNS / 链路 / 劫持层面的
+    /// 持续故障，继续重试只会让用户对着同一个失败页干等。
+    private static let offlineFallbackThreshold = 4
 
     /// 封面降载规则表的编译结果缓存。
     ///
@@ -132,6 +133,13 @@ final class WebContainerView: UIView {
     private var foregroundObservation: Any?
     private var backgroundObservation: Any?
     private var networkObservation: Any?
+    /// 停在离线副本上时，定时探一下线上域名，通了就自动切回去。
+    ///
+    /// 冷启动那几秒 iOS 的网络栈常常还没就绪，连发几次 `-1009` 就会被打回离线副本；
+    /// 而离线包的启动遮罩不会自己摘 —— 用户看到的就是「卡在 Folia 加载界面」。
+    /// 不能让用户自己再点重试，也不能一直留在离线页。
+    private var onlineProbeTimer: Timer?
+    private var onlineProbeAttempts = 0
     /// 本次启动是否已经因为进程被回收而重建过 WebView。
     ///
     /// 只给「重建后立刻又挂」留一次保护位：第一次挂就换干净存储重建，
@@ -1431,9 +1439,59 @@ final class WebContainerView: UIView {
         stallRetries.removeAll()
         state.enterOfflineCopy()
         // 重建空窗期没有实例：那一路会自己重新加载，这里不能对 nil 调 `loadFileURL`。
+        // 探测要排在这条 guard 之前：没有实例的时候正是「最该等着回线上」的时候。
+        scheduleOnlineProbe()
         guard let container = webView else { return }
         container.loadFileURL(indexURL, allowingReadAccessTo: indexURL.deletingLastPathComponent())
         scheduleProgressWatchdog()
+    }
+
+    /// 离线副本上每隔几秒探一次线上，通了就自动切回去。
+    ///
+    /// 见 `onlineProbeTimer` 的说明：冷启动时的假性断网会被判成「线上不可用」，
+    /// 而离线页停在启动遮罩上，用户以为 App 卡死了。12 次 × 5 秒 ≈ 1 分钟足够覆盖
+    /// 用户从看加载界面到自己动手操作的那段时间。
+    private func scheduleOnlineProbe() {
+        onlineProbeTimer?.invalidate()
+        onlineProbeAttempts = 0
+        let timer = Timer(timeInterval: 5.0, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            guard self.isShowingOfflineCopy else {
+                timer.invalidate()
+                return
+            }
+            // 离线页正在出声（本地曲库）：换页会打断播放，这一拍先探，不切。
+            self.onlineProbeAttempts += 1
+            guard self.onlineProbeAttempts <= 12 else {
+                CrashLog.note("==== offline probe gave up after 12 tries ====")
+                timer.invalidate()
+                return
+            }
+            guard !self.wantsAudible else { return }
+            self.probeOnlineOnce()
+        }
+        onlineProbeTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func probeOnlineOnce() {
+        var request = URLRequest(url: Self.startURL)
+        request.httpMethod = "HEAD"
+        request.timeoutInterval = 5
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        let task = URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
+            guard let self else { return }
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 500
+            guard error == nil, status < 400 else { return }
+            DispatchQueue.main.async {
+                guard self.isShowingOfflineCopy, !self.wantsAudible else { return }
+                CrashLog.note("==== offline probe ok (status \(status)), hopping back online ====")
+                self.onlineProbeTimer?.invalidate()
+                self.onlineProbeTimer = nil
+                self.hardReload()
+            }
+        }
+        task.resume()
     }
 
     /// 回前台后确认页面还是活的。
@@ -5451,7 +5509,9 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         // 否则「进程刚被顶死 → 重建装好了新实例」与「两秒前的失败重载块」会叠在一起：
         // 新实例刚打开落脚点就被改写成首页，用户看到的就是回到加载界面。
         let armed = ObjectIdentifier(webView as AnyObject)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+        // 两秒半后再试：冷启动那几秒网络栈常常还没就绪，
+        // 间隔太密会把「正在起网」连判三次直接打回离线副本（`folia(8).log` 第 5-19 行）。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
             guard let self else { return }
             guard let current = self.webView, ObjectIdentifier(current as AnyObject) == armed else {
                 CrashLog.note("==== failed-nav retry dropped (webview replaced) ====")
@@ -5773,7 +5833,12 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
             let escaped = fragment
                 .replacingOccurrences(of: "\\", with: "\\\\")
                 .replacingOccurrences(of: "\"", with: "\\\"")
-            return "[\"\(escaped)\",\(Int(until))]"
+            // **必须是毫秒。** 页面侧比对的是 `Date.now()`（毫秒），
+            // 这里早先塞进去的是 `timeIntervalSince1970`（秒），
+            // 于是每一拍都被判成「早就过期」—— 守护脚本看着装上了，
+            // 实际一条都没拦住（`folia(8).log`：`GUARD armed banned=1`
+            // 之后再没有任何 blocked/kicked，页面照样跳回歌单）。
+            return "[\"\(escaped)\",\(Int(until * 1000))]"
         }
         let list = "[" + entries.joined(separator: ",") + "]"
         return """
@@ -5983,7 +6048,10 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
               return rawPush.apply(this, arguments);
             };
             history.replaceState = function(state, title, url){
-              if (url && blocked(routeOf(url))) { return; }
+              if (url && blocked(routeOf(url))) {
+                report('blocked replaceState ' + String(url || ''));
+                return;
+              }
               return rawReplace.apply(this, arguments);
             };
           } catch (e) {}
@@ -6355,12 +6423,18 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
         // 界面上就是「点了没反应」，所以这里不能有静默 return。
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
+            // 诊断：页面到底在要哪些接口。没有这行，日志里只有「登录成功」，
+            // 完全看不出「进不去」卡在哪一步。轮询的 check 太密，排除掉。
+            if action != "login_qr_check" {
+                CrashLog.note("==== qishui action=\(action) ====")
+            }
             let result: [String: Any]
             do {
                 result = ["ok": true, "data": try self.perform(action, params)]
             } catch let failure as Failure {
                 // 把后端原话留在日志里：界面上只看到「失败」，但下一次诊断报告能带出原因。
                 NSLog("[Qishui] %@ failed: %@ %@", action, failure.code, failure.message)
+                CrashLog.note("==== qishui \(action) failed: \(failure.code) \(failure.message) ====")
                 result = ["ok": false, "error": failure.payload]
             } catch {
                 NSLog("[Qishui] %@ failed: %@", action, String(describing: error))
@@ -6419,10 +6493,12 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
             UserDefaults.standard.removeObject(forKey: Self.signedInKey)
             return NSNull()
         default:
-            // `unavailable` 在页面侧是「这个音源不可用」，会把整个汽水入口置灰；
-            // 壳只是没实现某个读接口，不该让用户连登录都点不开。
-            throw Failure(code: "unsupported",
-                          message: "Qishui \(action) is not available on iOS")
+            // 登录成功之后，页面还会继续读首页推荐 / 排行榜 / 最近播放等接口。
+            // 壳里没有汽水的车机签名（P-256 CSR + ticket guard），给不出真数据，
+            // 但**抛错会让整个汽水入口显示为失败** —— 真机上的表现就是
+            // 「显示登录成功，却进不去」。回一个合法空页，至少能进去看到「暂无内容」。
+            CrashLog.note("==== qishui unsupported action=\(action), empty page ====")
+            return ["items": [], "hasMore": false, "nextOffset": 0]
         }
     }
 
