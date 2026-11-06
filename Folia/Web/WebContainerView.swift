@@ -1031,14 +1031,14 @@ final class WebContainerView: UIView {
         let burst = Self.recentTerminations.count >= 2
         let landing = pending.landing
         let open = {
-            view.load(URLRequest(url: landing,
-                                 cachePolicy: .useProtocolCachePolicy,
-                                 timeoutInterval: 30))
+            _ = view.load(URLRequest(url: landing,
+                                     cachePolicy: .useProtocolCachePolicy,
+                                     timeoutInterval: 30))
         }
         if burst {
             CrashLog.note("==== death burst: purging indexeddb before reopen ====")
             view.configuration.websiteDataStore.removeData(
-                ofTypes: [WKWebsiteDataTypeIndexedDBDatabase],
+                ofTypes: [WKWebsiteDataTypeIndexedDBDatabases],
                 modifiedSince: .distantPast
             ) {
                 // 旧进程的尸体要下一轮 runloop 才回收：再等 1.5 秒，
