@@ -5819,11 +5819,14 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
     /// 为什么放在页面侧而不是导航策略里：SPA 的换页走的是 `location.hash` /
     /// `history.pushState`，根本不经过 `decidePolicyFor`，`WKNavigationDelegate`
     /// 看不到这些导航。脚本只做两件事：
-    /// 1. 拦掉目标命中封禁路由的 `pushState` / `replaceState`；
-    /// 2. 监听 `hashchange` / `popstate` 并在启动后几个时点复查 ——
-    ///    线上页会从自己的持久化状态里把「上次那个歌单」恢复出来，
-    ///    首屏那一刻 `#player` 是对的，几百毫秒后又被它自己跳回去。
-    /// 命中后统一落回 `#player`（不是首页：首页要重新拉全部脚本，内存更紧）。
+    /// 1. 启动时清掉「名字像路由、值里又带死路由」的 localStorage / sessionStorage 项，
+    ///    断了 SPA 从持久化状态复活歌单的那条路；
+    /// 2. 监听 `hashchange` / `popstate` 并在启动后几个时点复查 —— 一旦发现当前 hash
+    ///    命中封禁路由，立刻 `replaceState` 改回 `#player` 并补发 `hashchange`，
+    ///    SPA 的路由监听者收到通知后自己把视图复位。
+    /// **不拦 pushState / location.hash / fetch / XHR / 点击**：那些拦截只能挡 URL 或网络，
+    /// 挡不住 SPA 内部 React state 的切换，结果就是「视图进歌单、URL 没变、数据被断 →
+    /// 歌单一片空白」，正是上一版用户报告的回归。
     static func routeGuardScript() -> String {
         let now = Date().timeIntervalSince1970
         let table = (UserDefaults.standard.dictionary(forKey: routeBanKey) as? [String: Double] ?? [:])
@@ -5879,81 +5882,16 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
           function routeOf(url){
             try { return (new URL(String(url), location.href).hash) || ''; } catch (e) { return ''; }
           }
-          // `location.hash = ...` 是绕开 `history` 的第三个入口。
-          // SPA 里大量「跳转到 xxx」就是这么写的：赋值瞬间 URL 就变了，
-          // `hashchange` 只来得及事后补救，歌单页已经开始渲染几百张封面。
-          // 能拦就拦在赋值这一拍（`Location.prototype.hash` 在 WebKit 上可重定义）。
-          try {
-            var desc = Object.getOwnPropertyDescriptor(Location.prototype, 'hash');
-            if (desc && desc.set) {
-              Object.defineProperty(Location.prototype, 'hash', {
-                configurable: true,
-                enumerable: desc.enumerable,
-                get: function(){ return desc.get.call(this); },
-                set: function(v){
-                  if (blocked('#' + String(v || '').replace(/^#/, ''))) {
-                    report('blocked location.hash = ' + v);
-                    return;
-                  }
-                  return desc.set.call(this, v);
-                }
-              });
-            }
-          } catch (e) {}
-          // `location.assign/replace` 同样能整页跳走，一并挡住。
-          try {
-            var rawAssign = Location.prototype.assign;
-            var rawReplaceLoc = Location.prototype.replace;
-            Location.prototype.assign = function(u){
-              if (blocked(routeOf(u))) {
-                report('blocked location.assign ' + String(u || ''));
-                return;
-              }
-              return rawAssign.apply(this, arguments);
-            };
-            Location.prototype.replace = function(u){
-              if (blocked(routeOf(u))) {
-                report('blocked location.replace ' + String(u || ''));
-                return;
-              }
-              return rawReplaceLoc.apply(this, arguments);
-            };
-          } catch (e) {}
-          // `location.href = ...` 是最常见的那种，既不经过 assign，也不经过 history。
-          // 日志 10-25 的连环里，新实例开 `#player` 却总在三秒后变成歌单 ——
-          // 这个入口此前完全没有防守，页面的「去上次那一页」很可能就是它。
-          try {
-            var hrefDesc = Object.getOwnPropertyDescriptor(Location.prototype, 'href');
-            if (hrefDesc && hrefDesc.set) {
-              Object.defineProperty(Location.prototype, 'href', {
-                configurable: true,
-                enumerable: hrefDesc.enumerable,
-                get: function(){ return hrefDesc.get.call(this); },
-                set: function(v){
-                  if (blocked(routeOf(v))) {
-                    report('blocked location.href = ' + String(v || ''));
-                    return;
-                  }
-                  return hrefDesc.set.call(this, v);
-                }
-              });
-            }
-          } catch (e) {}
-          // 页内 `<a href="#collection/...">` 的点击在捕获相位直接掐掉，
-          // 否则 React 的 onClick 会先跑、路由已经切过去了才轮到我们。
-          document.addEventListener('click', function(ev){
-            try {
-              var node = ev.target;
-              var a = node && node.closest ? node.closest('a[href]') : null;
-              if (!a) { return; }
-              var href = a.getAttribute('href') || '';
-              if (href && href.charAt(0) === '#' ? blocked(href) : blocked(routeOf(a.href))) {
-                ev.preventDefault();
-                ev.stopPropagation();
-                report('blocked crash-route link ' + href);
-              }
-            } catch (e) {}
-          }, true);
+          // **不拦任何导航入口。** 历史教训：
+          // 拦 `history.pushState` / `location.hash =` / `location.href =` / `<a>` 点击，
+          // 全都只能挡住 URL 这一层 —— SPA 内部的 React state 已经切到歌单视图了，
+          // 渲染照常发生，发的数据请求又被我们断掉，用户看到的就是「点进歌单一片空白」。
+          // 真正危险的「进程死后 SPA 自动复活歌单」由两件事接住：
+          // 1. 原生层的 `landing sources` 在重建时已经把落脚点降级到 `#player`；
+          // 2. 下面的 kick() 发现当前 hash 命中封禁就立刻把它改回 `#player`，
+          //    SPA 的 hashchange/popstate 监听者收到通知后自己会复位视图。
+          // 用户**主动**点歌单属于正常浏览，不该拦 —— 进程真死了，
+          // 原生会准确记下死在哪条路由，下次启动降级，而不是让用户连试都试不了。
           // 封禁期内的导航意图还会被 SPA 的持久化状态重新激活。
           // 只删「名字像路由/视图、值里又带死路由」的存储项 ——
           // 不碰播放队列与登录态，也不动 DOM（这两点上一个版本踩过坑）。
@@ -5981,80 +5919,10 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
               }
             });
           } catch (e) {}
-          // 封禁的路由还有第四种「复活」方式：页面本身不跳转，
-          // 只是把那个歌单的数据拉回来重新渲染。几百张封面正是把
-          // WebContent 内存顶满的直接原因，所以封禁期内一并掐掉它的数据请求。
-          // 判据只认封禁路由里 `playlist/<id>` 的数字 id（其余请求原样放行），
-          // 不碰别的接口，也不会影响已经缓存在内存里的播放队列。
-          var bannedIds = [];
-          banned.forEach(function(item){
-            if (item[1] <= Date.now()) { return; }
-            var idx = item[0].indexOf('playlist/');
-            if (idx < 0) { return; }
-            var rest = item[0].slice(idx + 9);
-            var id = '';
-            for (var c = 0; c < rest.length; c += 1) {
-              var ch = rest.charAt(c);
-              if (ch >= '0' && ch <= '9') { id += ch; } else { break; }
-            }
-            if (id) { bannedIds.push(id); }
-          });
-          function hitsBannedPayload(url){
-            var u = String(url || '');
-            if (!u) { return false; }
-            for (var i = 0; i < bannedIds.length; i += 1) {
-              if (u.indexOf(bannedIds[i]) >= 0) { return true; }
-            }
-            return blocked(routeOf(u));
-          }
-          if (bannedIds.length) {
-            try {
-              var rawFetch = window.fetch;
-              window.fetch = function(input, init){
-                try {
-                  var u = typeof input === 'string' ? input : (input && input.url) || '';
-                  if (hitsBannedPayload(u)) {
-                    report('blocked crash-route request ' + u.slice(0, 120));
-                    return Promise.reject(new TypeError('blocked crash route'));
-                  }
-                } catch (e) {}
-                return rawFetch.apply(this, arguments);
-              };
-            } catch (e) {}
-            try {
-              var rawOpen = XMLHttpRequest.prototype.open;
-              var rawSend = XMLHttpRequest.prototype.send;
-              XMLHttpRequest.prototype.open = function(method, url){
-                try { this.__foliaBlocked = hitsBannedPayload(url); } catch (e) {}
-                return rawOpen.apply(this, arguments);
-              };
-              XMLHttpRequest.prototype.send = function(){
-                if (this.__foliaBlocked) {
-                  try { this.abort(); } catch (e) {}
-                  return;
-                }
-                return rawSend.apply(this, arguments);
-              };
-            } catch (e) {}
-          }
-          try {
-            var rawPush = history.pushState;
-            var rawReplace = history.replaceState;
-            history.pushState = function(state, title, url){
-              if (url && blocked(routeOf(url))) {
-                report('blocked pushState ' + String(url || ''));
-                return;
-              }
-              return rawPush.apply(this, arguments);
-            };
-            history.replaceState = function(state, title, url){
-              if (url && blocked(routeOf(url))) {
-                report('blocked replaceState ' + String(url || ''));
-                return;
-              }
-              return rawReplace.apply(this, arguments);
-            };
-          } catch (e) {}
+          // **不拦数据请求、不拦 history.pushState/replaceState。**
+          // 这两层拦截都只能挡住 URL / 网络这一面，挡不住 SPA 内部 React state 的切换，
+          // 结果就是「用户点歌单 → URL 没变但视图变了 → 渲染需要的数据被我们断掉 → 空白」。
+          // 进程真死了由原生层的 `landing sources` 降级 + 这里的 kick() 收尾，足够了。
           report('armed banned=' + banned.length + ' hash=' + (location.hash || '-'));
           window.addEventListener('hashchange', kick);
           window.addEventListener('popstate', kick);
