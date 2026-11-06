@@ -151,11 +151,22 @@ final class NativePlayer: NSObject, WKScriptMessageHandler {
             self.sendEvent(type: "duration", duration: item.duration.seconds)
         }
 
-        // 定时回调播放进度
-        let interval = CMTime(seconds: 0.25, preferredTimescale: 600)
+        // 定时回调播放进度。
+        //
+        // 之前是 0.25s 一拍：每次回调都是一次 App → WebContent 的跨进程
+        // evaluateJavaScript，页面侧收到就推进 store、触发一帧重渲染
+        // （进度条 / 逐字歌词 / 可视化一起动）。4Hz 的持续渲染压力在
+        // 内存吃紧的机器上足以把 WebContent 顶死 —— folia(10).log 里
+        // `#player` 两次死亡都精确落在 "ready to play" 后约 2 秒。
+        //
+        // 页面适配层（ios-native-audio.js）本来就用 `Date.now()` 本地插值
+        // 进度，原生事件只是漂移校正点，1s 粒度足够；暂停时位置不变，
+        // 发出去纯属白唤醒页面，直接跳过。
+        let interval = CMTime(seconds: 1.0, preferredTimescale: 600)
         timeObserver = player?.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
             guard let self, time.isValid else { return }
-            self.sendEvent(type: "time", position: time.seconds, playing: self.isPlaying)
+            guard self.isPlaying else { return }
+            self.sendEvent(type: "time", position: time.seconds, playing: true)
         }
 
         // 监听播放结束
