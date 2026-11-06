@@ -17,12 +17,6 @@ final class WebShellState: ObservableObject {
     @Published private(set) var offlineReason: String?
     /// 现场细节（URL、UA、遮罩状态等），只有诊断需要时才有，显示在提示框下方。
     private(set) var failureDetail: String?
-    /// 提示层的补充说明（为什么停在重试页），nil 时用默认的联网提示文案。
-    private(set) var failureFootnote: String?
-
-    /// 「反复回收」状态：页面进程在短时间内被系统连续终止，壳主动停手不再自动重建，
-    /// 停在静态重试页上等用户点「重试」。这期间一切自动恢复路径（前台唤醒等）都要让路。
-    private(set) var awaitingManualRetry = false
 
     /// 当前是否跑在包内离线页上。
     ///
@@ -43,8 +37,6 @@ final class WebShellState: ObservableObject {
     func enterOfflineCopy() {
         isOfflineCopy = true
         failureDetail = nil
-        failureFootnote = nil
-        awaitingManualRetry = false
         offlineReason = "当前用的是离线版本，部分功能可能不可用"
     }
 
@@ -58,7 +50,6 @@ final class WebShellState: ObservableObject {
 
     func noteLoadFailure(_ code: Int, detail: String? = nil) {
         failureDetail = detail
-        failureFootnote = nil
         switch code {
         case -1009:
             offlineReason = "当前网络不可用"
@@ -82,27 +73,12 @@ final class WebShellState: ObservableObject {
     /// 所以不能复用网络错误码，否则用户会看到「当前网络不可用」这种误导性文案。
     func noteStalled(detail: String? = nil) {
         failureDetail = detail
-        failureFootnote = nil
         offlineReason = "页面没能启动起来"
-    }
-
-    /// 页面进程在短时间内被系统反复终止（内存压力）。
-    ///
-    /// 与网络失败不同：这时再自动重建只会立刻再死一轮（每次重建都要在压力里
-    /// 重新拉全量脚本、恢复播放现场）。壳停在静态重试页上——这个页面几乎不占
-    /// 内存，不会被系统盯上；等压力过去，用户点一次「重试」即可。
-    func noteRepeatedTermination(detail: String? = nil) {
-        failureDetail = detail
-        failureFootnote = "系统内存紧张时会直接停掉播放页。稍等几秒再点「重试」，成功率更高。"
-        awaitingManualRetry = true
-        offlineReason = "页面被系统反复回收"
     }
 
     func clearLoadFailure() {
         offlineReason = nil
         failureDetail = nil
-        failureFootnote = nil
-        awaitingManualRetry = false
     }
 }
 
@@ -344,6 +320,14 @@ final class AudioSessionController {
             info[MPNowPlayingInfoPropertyIsLiveStream] = false
             MPNowPlayingInfoCenter.default().nowPlayingInfo = info
         } else {
+            // **后台「该响」时不要把 Now Playing 关掉。**
+            //
+            // 锁屏 / 背面朝上 / 切后台时 WebKit 会真的按停媒体元素并让页面报一次 `paused`，
+            // 这一拍若把 `playbackRate` 写成 0，系统立刻撤掉「正在播放」卡片 ——
+            // 灵动岛、锁屏、控制中心全是同一份 `MPNowPlayingInfoCenter`，
+            // 用户看到的就是「退到后台灵动岛没了」，尽管两秒后保活又把声音放了回来。
+            // 判据用 `backgroundedAndPlaying`：进后台那一刻确实在响，就保持任务与速率。
+            guard !backgroundedAndPlaying else { return }
             // **结束后台任务不能挂在 Now Playing 上。**
             //
             // 早先是 `else if var info = ...nowPlayingInfo { endBackgroundTask() ... }`：

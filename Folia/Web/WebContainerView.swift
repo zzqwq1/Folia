@@ -36,11 +36,6 @@ final class WebContainerView: UIView {
     private var lastInsets: UIEdgeInsets = .zero
     /// 内容进程被回收的次数与时间窗，用来防止「重载→立刻再挂→再重载」的死循环。
     private var contentProcessRestarts: [Date] = []
-    /// 内容进程**终止**的时间窗（跨重建保留，不像 `contentProcessRestarts` 会被
-    /// `rebuildWebView` 清空）。90 秒内连死两次说明系统内存压力还没解除，
-    /// 这时每一次重建（新进程 + 全量 bundle + 恢复播放）都是下一次死亡的诱因。
-    /// 撞线就停在重试页等用户，不再自动起新进程。
-    private var terminationStrikes: [Date] = []
     /// 首屏卡住后的自动重试时间窗，同样用来限流。
     private var stallRetries: [Date] = []
 
@@ -1147,8 +1142,6 @@ final class WebContainerView: UIView {
         // 卡住重试的配额也要一起清掉：否则用户从离线副本点回线上后，
         // 上一轮攒下的 3 次 stall 记录会让首屏看门狗直接放弃重试。
         stallRetries.removeAll()
-        // 终止打击窗同样归零：用户点了「重试」就是明确指令，这一把必须真的重建。
-        terminationStrikes.removeAll()
         if webView == nil {
             // 重建还在异步路上：那一路已经会打 `startURL` 并挂上看门狗，这里不能再走一遍，
             // 否则会拿到两次并发加载。
@@ -1173,12 +1166,6 @@ final class WebContainerView: UIView {
     /// 仍没画面才换干净存储重建。`wakeReloadTried` 保证一轮里只会走一次原地重载。
     private func recoverAfterForegroundWake() {
         CrashLog.note("==== foreground wake: page not alive ====")
-        // 进程刚被系统反复回收过（终止打击撞线）：自动恢复只会在压力里再死一轮。
-        // 这时界面上是重试页，等用户点「重试」走 `hardReload` 即可。
-        guard !state.awaitingManualRetry else {
-            CrashLog.note("==== foreground wake: awaiting manual retry, stay parked ====")
-            return
-        }
         // 页面已经没了，任何「用户按了暂停」的现场都跟着没了；这里清掉，
         // 让重建后能按 `wantsAudible` 决定要不要续播。
         userPaused = false
@@ -5497,9 +5484,6 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         hasEvaluatedFirstPaint = false
         contentProcessRestarts = contentProcessRestarts.filter { now.timeIntervalSince($0) < 60 }
         contentProcessRestarts.append(now)
-        // 终止打击窗：跨重建累计，90 秒内的每一次进程终止都记在这里。
-        terminationStrikes = terminationStrikes.filter { now.timeIntervalSince($0) < 90 }
-        terminationStrikes.append(now)
         // 这是与「ObjC 异常闪退」完全不同的另一条路径：网页把 WebProcess 搞死了。
         // 计进日志才能区分到底是哪一种。
         CrashLog.note("==== web content process terminated (#\(contentProcessRestarts.count)) url=\(webView.url?.absoluteString ?? "-") ====")
@@ -5593,30 +5577,15 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         // 内存打满，重开一次就是再打满一次；而每次重建都会把页面换成 `#app-splash`，
         // 用户看到的正是「大退进歌单 → 回到加载界面」。
         //
-        // **90 秒内连死两次：停在重试页等用户，不再自动重建。**
+        // **重生一次就够，绝不把用户扔在一个点不动的死页面里。**
         //
-        // 日志 23-02-47/52Z：进程死亡 → 重建落 `#player` → 3 秒后又死。
-        // 系统内存压力没解除时，每一次重建都是「新进程 + 全量 bundle + 恢复播放」
-        // 再冲一次顶，重建本身就是下一次死亡的诱因。页面进程死了不等于 App 死了 ——
-        // 把这一拍停在静态重试页上（不再起 WebContent 进程），压力过去后用户
-        // 点一次「重试」（走 `hardReload`）就能回来。
-        // 封禁表与路由死亡记录在前面已经落盘，重试与下次冷启动都会绕开这条路由。
-        guard terminationStrikes.count < 2 else {
-            CrashLog.note("==== web content died \(terminationStrikes.count)x in 90s, parking on retry notice ====")
-            deadLandingURL = nil
-            state.noteRepeatedTermination(detail: landingCandidate?.absoluteString)
-            return
-        }
-
-        // 判据改为**落盘的那份路由死亡记录**（`noteRouteDeath`）。
-        //
-        // 原先用内存里的 `processDeaths.count >= 2`，实测从未成立：
-        // 日志 08-00-01Z 里同一份运行连死两次，两次都打印 `(#1)`，
-        // 而 `same route killed web process 2x` 一行都没出现 ——
-        // 说明这个数组在换实例时没有跨过去，等第二次永远是白等。
-        // 现在死亡那一刻就按路由写进 `UserDefaults`，重建时读得到，
-        // 降级动作放在 `rebuildWebView` 的 `landing` 里统一做，
-        // 不再有两条互相打架的路径。
+        // 曾经试过「90 秒内连死两次就停在重试页等用户」，实机反馈是那张页面
+        // 站在 WebContent 已死的空壳上，按钮点不动、也没有任何播放能力 ——
+        // 用户的原话是「这界面没啥用删了吧」。
+        // 现在回到「每次死亡都重建」，真正的止血放在两处：
+        // 1. 封禁期内的路由拦截补上 `location.hash` 赋值与 `location.assign/replace`
+        //    这两个绕过 `history` 的入口（见 `routeGuardScript`）；
+        // 2. 重建一律落 `#player`，不再把用户送回那个几百张封面的歌单页。
         CrashLog.note("==== rebuild after process death (\(deadPageURL?.absoluteString ?? "-")) ====")
         // **进歌单就把进程顶死：先减页面负载，再重建。**
         //
@@ -5769,6 +5738,137 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
           function routeOf(url){
             try { return (new URL(String(url), location.href).hash) || ''; } catch (e) { return ''; }
           }
+          // `location.hash = ...` 是绕开 `history` 的第三个入口。
+          // SPA 里大量「跳转到 xxx」就是这么写的：赋值瞬间 URL 就变了，
+          // `hashchange` 只来得及事后补救，歌单页已经开始渲染几百张封面。
+          // 能拦就拦在赋值这一拍（`Location.prototype.hash` 在 WebKit 上可重定义）。
+          try {
+            var desc = Object.getOwnPropertyDescriptor(Location.prototype, 'hash');
+            if (desc && desc.set) {
+              Object.defineProperty(Location.prototype, 'hash', {
+                configurable: true,
+                enumerable: desc.enumerable,
+                get: function(){ return desc.get.call(this); },
+                set: function(v){
+                  if (blocked('#' + String(v || '').replace(/^#/, ''))) {
+                    try { console.warn('[folia-shell] blocked location.hash = ' + v); } catch (e) {}
+                    return;
+                  }
+                  return desc.set.call(this, v);
+                }
+              });
+            }
+          } catch (e) {}
+          // `location.assign/replace` 同样能整页跳走，一并挡住。
+          try {
+            var rawAssign = Location.prototype.assign;
+            var rawReplaceLoc = Location.prototype.replace;
+            Location.prototype.assign = function(u){
+              if (blocked(routeOf(u))) {
+                try { console.warn('[folia-shell] blocked location.assign'); } catch (e) {}
+                return;
+              }
+              return rawAssign.apply(this, arguments);
+            };
+            Location.prototype.replace = function(u){
+              if (blocked(routeOf(u))) {
+                try { console.warn('[folia-shell] blocked location.replace'); } catch (e) {}
+                return;
+              }
+              return rawReplaceLoc.apply(this, arguments);
+            };
+          } catch (e) {}
+          // 页内 `<a href="#collection/...">` 的点击在捕获相位直接掐掉，
+          // 否则 React 的 onClick 会先跑、路由已经切过去了才轮到我们。
+          document.addEventListener('click', function(ev){
+            try {
+              var node = ev.target;
+              var a = node && node.closest ? node.closest('a[href]') : null;
+              if (!a) { return; }
+              var href = a.getAttribute('href') || '';
+              if (href && href.charAt(0) === '#' ? blocked(href) : blocked(routeOf(a.href))) {
+                ev.preventDefault();
+                ev.stopPropagation();
+                try { console.warn('[folia-shell] blocked crash-route link: ' + href); } catch (e) {}
+              }
+            } catch (e) {}
+          }, true);
+          // 封禁期内的导航意图还会被 SPA 的持久化状态重新激活。
+          // 只删「名字像路由/视图、值里又带死路由」的存储项 ——
+          // 不碰播放队列与登录态，也不动 DOM（这两点上一个版本踩过坑）。
+          try {
+            var routeKeyPattern = /route|view|nav|location|last|history|tab/i;
+            ['localStorage', 'sessionStorage'].forEach(function(name){
+              var store = window[name];
+              if (!store) { return; }
+              var keys = [];
+              for (var i = 0; i < store.length; i += 1) { keys.push(store.key(i)); }
+              for (var k = 0; k < keys.length; k += 1) {
+                var key = keys[k];
+                if (!key || !routeKeyPattern.test(key)) { continue; }
+                var val = null;
+                try { val = store.getItem(key); } catch (e) { continue; }
+                if (!val) { continue; }
+                for (var b = 0; b < banned.length; b += 1) {
+                  var frag = banned[b][0].replace(/^#/, '');
+                  if (banned[b][1] > Date.now() && val.indexOf(frag) >= 0) {
+                    try { store.removeItem(key); } catch (e) {}
+                    try { console.warn('[folia-shell] dropped poisoned route state: ' + key); } catch (e) {}
+                    break;
+                  }
+                }
+              }
+            });
+          } catch (e) {}
+          // 封禁的路由还有第四种「复活」方式：页面本身不跳转，
+          // 只是把那个歌单的数据拉回来重新渲染。几百张封面正是把
+          // WebContent 内存顶满的直接原因，所以封禁期内一并掐掉它的数据请求。
+          // 判据只认封禁路由里 `playlist/<id>` 的数字 id（其余请求原样放行），
+          // 不碰别的接口，也不会影响已经缓存在内存里的播放队列。
+          var bannedIds = [];
+          banned.forEach(function(item){
+            if (item[1] <= Date.now()) { return; }
+            var m = /playlist\/(\d+)/.exec(item[0]);
+            if (m) { bannedIds.push(m[1]); }
+          });
+          function hitsBannedPayload(url){
+            var u = String(url || '');
+            if (!u) { return false; }
+            for (var i = 0; i < bannedIds.length; i += 1) {
+              if (u.indexOf(bannedIds[i]) >= 0) { return true; }
+            }
+            return blocked(routeOf(u));
+          }
+          if (bannedIds.length) {
+            try {
+              var rawFetch = window.fetch;
+              window.fetch = function(input, init){
+                try {
+                  var u = typeof input === 'string' ? input : (input && input.url) || '';
+                  if (hitsBannedPayload(u)) {
+                    try { console.warn('[folia-shell] blocked crash-route request: ' + u.slice(0, 120)); } catch (e) {}
+                    return Promise.reject(new TypeError('blocked crash route'));
+                  }
+                } catch (e) {}
+                return rawFetch.apply(this, arguments);
+              };
+            } catch (e) {}
+            try {
+              var rawOpen = XMLHttpRequest.prototype.open;
+              var rawSend = XMLHttpRequest.prototype.send;
+              XMLHttpRequest.prototype.open = function(method, url){
+                try { this.__foliaBlocked = hitsBannedPayload(url); } catch (e) {}
+                return rawOpen.apply(this, arguments);
+              };
+              XMLHttpRequest.prototype.send = function(){
+                if (this.__foliaBlocked) {
+                  try { this.abort(); } catch (e) {}
+                  return;
+                }
+                return rawSend.apply(this, arguments);
+              };
+            } catch (e) {}
+          }
           try {
             var rawPush = history.pushState;
             var rawReplace = history.replaceState;
@@ -5787,6 +5887,14 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
           window.addEventListener('hashchange', kick);
           window.addEventListener('popstate', kick);
           document.addEventListener('DOMContentLoaded', kick);
+          // 只在封禁窗口内高频复查：SPA 恢复路由往往发生在加载完成后的十几秒里，
+          // 单靠几个固定时间点会漏掉。200ms × 600 拍 ≈ 2 分钟，之后自然停。
+          var ticks = 0;
+          var timer = setInterval(function(){
+            kick();
+            ticks += 1;
+            if (ticks > 600) { clearInterval(timer); }
+          }, 200);
           [0, 400, 1200, 2500, 5000].forEach(function(ms){ setTimeout(kick, ms); });
         })();
         """
@@ -6270,8 +6378,18 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
             pendingQR.removeValue(forKey: key)
             return ["state": "expired"]
         }
+        // `token` 同时放 query 与 body，`next` 也补进 query。
+        //
+        // 真机日志 `case=account-not-read ... code=3 message=缺少参数`：
+        // `get_qrcode` 成功（token 拿到了），紧接着第一次 `check_qrconnect`
+        // 就被服务端按「缺参数」拒了 —— 说明它要的参数不在我们发的位置上。
+        // 网页端两个位置都认，服务端校验只认 query 里的 `token`/`next`，
+        // 所以两边都带（重复参数不会报错），再留 body 兼容旧的签名校验。
         let json = try signedPost("/check_qrconnect/",
-                                  query: Self.deviceParams(),
+                                  query: Self.deviceParams() + [
+                                    ("next", "https://api.qishui.com"),
+                                    ("token", entry.token)
+                                  ],
                                   body: [("token", entry.token)])
         let data = json["data"] as? [String: Any] ?? [:]
         let status = ((data["status"] as? String) ?? "").lowercased()
