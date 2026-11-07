@@ -150,24 +150,9 @@ enum CacheSweeper {
     static func sweepOnColdLaunch() {
         guard !swept else { return }
         swept = true
-
-        // 清理范围刻意只到「HTTP 缓存」，**不动 Service Worker 与离线缓存**。
-        //
-        // 早先这里是「崩过就清 SW」，想的是「旧 SW 把进程拖死了」。实际相反：
-        // 线上站用 SW 做缓存优先，第二次启动几乎所有脚本都从本地拿，WebContent 进程
-        // 起得又快又稳；把 SW 清掉之后，下一个进程必须重新拉整站脚本与可视化引擎，
-        // 在内存最紧张的那一刻反而更容易被压死 —— 用户看到的就是
-        // 「大退重进还是闪退」，甚至比第一次更严重。
-        //
-        // 所以这里统一只清两层临时缓存；万一真的被脏数据卡住，
-        // 由 `WebContainerView` 在「一分钟内连挂三次」时改用 `nonPersistent` 存储兜底。
-        let types: Set<String> = [
-            WKWebsiteDataTypeMemoryCache,
-            WKWebsiteDataTypeDiskCache,
-        ]
-        WKWebsiteDataStore.default().removeData(ofTypes: types, modifiedSince: .distantPast) {
-            CrashLog.note("==== cold launch: cleared memory + disk cache ====")
-        }
+        // 极简壳：冷启动不再清任何缓存。让 Service Worker 和 HTTP 缓存
+        // 都做它本来就该做的事——第二次启动秒开。真的被脏数据卡住时，
+        // 用户手动杀进程重启即可，不需要壳替他做这个动作。
     }
 }
 
