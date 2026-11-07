@@ -5833,6 +5833,10 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
     /// 2. Lattice 拼贴墙的歌词层是 pixi.js WebGL（createLatticeLyricRuntime），但它有
     ///    设计好的失败路径：`onFailure` → 回退纯 DOM 标题。所以全局断掉 WebGL 后，
     ///    拼贴墙降级为「海报 + 文字」而不是闪退。
+    /// 3. 封面 URL 统一压到 300px：网易云 `?param=宽y高` 由 CDN 按需出图，改 URL 即可，
+    ///    无需站点配合。img.src 在 Setter 层拦（不产生二次请求），内联样式周期扫描兜底。
+    ///    folia(1).log 证明 WebGL 断掉后 #lattice 仍秒死 —— 真正顶死它的是海报墙的
+    ///    大图解码 + 合成层，这一条才是对症的。
     /// 布尔设置按站点 `storagePrimitives` 的约定存 `'true'/'false'` 字符串。
     static func lowMemoryProfileScript() -> String {
         """
@@ -5861,6 +5865,50 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
                     return rawGetContext.call(this, type, attrs);
                 };
             } catch (e) {}
+            // 封面降尺寸：网易云图片 URL 用 ?param=宽y高 控制大小，站点在大图位
+            // （播放页主图 / 拼贴墙 / 背景）会要到 512~1024，每张解码 1-4MB，
+            // 拼贴墙上百张就是几百 MB —— folia(1).log 里 #lattice 在 WebGL 已断的
+            // 情况下依然秒死，死的就是这面墙。超过 300 的一律等比缩到 300：
+            // 封面只是展示图，300 在手机上足够清晰，解码内存砍约 10 倍。
+            var shrink = function (u) {
+                if (typeof u !== 'string' || u.indexOf('param=') < 0) return u;
+                return u.replace(/([?&]param=)(\d+)y(\d+)/i, function (m, p, w, h) {
+                    w = +w; h = +h;
+                    if (w <= 300 && h <= 300) return m;
+                    if (w >= h) return p + '300y' + Math.max(1, Math.round(300 * h / w));
+                    return p + Math.max(1, Math.round(300 * w / h)) + 'y300';
+                });
+            };
+            try {
+                var srcDesc = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
+                if (srcDesc && srcDesc.set) {
+                    var rawSet = srcDesc.set;
+                    Object.defineProperty(HTMLImageElement.prototype, 'src', {
+                        get: srcDesc.get,
+                        set: function (v) { rawSet.call(this, shrink(v)); },
+                        configurable: true
+                    });
+                }
+            } catch (e) {}
+            // CSS 背景图 / 内联样式里的封面（播放页背景、部分墙面）周期扫一遍改写。
+            var swept = 0;
+            setInterval(function () {
+                try {
+                    var nodes = document.querySelectorAll('[style*="param="]');
+                    for (var i = 0; i < nodes.length; i += 1) {
+                        var el = nodes[i];
+                        var css = el.getAttribute('style');
+                        var next = shrink(css);
+                        if (next !== css) { el.setAttribute('style', next); swept += 1; }
+                    }
+                    var imgs = document.images;
+                    for (var j = 0; j < imgs.length; j += 1) {
+                        imgs[j].decoding = 'async';
+                        if (!imgs[j].loading) imgs[j].loading = 'lazy';
+                    }
+                } catch (e) {}
+            }, 3000);
+            try { console.log('LOWMEM armed webgl=off coverCap=300'); } catch (e) {}
         })();
         """
     }
