@@ -5872,7 +5872,7 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
             // 封面只是展示图，300 在手机上足够清晰，解码内存砍约 10 倍。
             var shrink = function (u) {
                 if (typeof u !== 'string' || u.indexOf('param=') < 0) return u;
-                return u.replace(/([?&]param=)(\d+)y(\d+)/i, function (m, p, w, h) {
+                return u.replace(/([?&]param=)(\\d+)y(\\d+)/i, function (m, p, w, h) {
                     w = +w; h = +h;
                     if (w <= 300 && h <= 300) return m;
                     if (w >= h) return p + '300y' + Math.max(1, Math.round(300 * h / w));
