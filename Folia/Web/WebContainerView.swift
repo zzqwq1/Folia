@@ -5829,11 +5829,14 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
     /// 上一版把 `visualizer_mode` 覆盖成 `still`、并且断掉 WebGL —— 那会直接把用户选的
     /// 歌词样式吃掉（「选了什么样式都是静止」），已经撤销。现在只做三件不改变观感的事：
     /// 1. 背景从默认 `latent`（每页都跑的 GPU 着色器，会反复把封面传成贴图）换成
-    ///    `common`（纯 DOM 几何背景）—— folia(2).log 的 `GPUQueue.copyExternalImageToTexture`
-    ///    报错就是 latent 背景在上传封面贴图。
-    /// 2. 封面 URL 尺寸：歌单 / 拼贴墙压到 120，其它页面 320。一张 1024 的封面解码后
+    ///    `common`（纯 DOM 几何背景），并按站点自己的开关停掉主页动态背景
+    ///    （`disable_home_dynamic_background`）—— folia(3).log 里 `/` 就是这么死的。
+    /// 2. 把 `window.devicePixelRatio` 锁到 2：three / pixi 按 dpr 分配画布，这台机器
+    ///    3x 的全屏画布显存是 2x 的 2.25 倍。歌词样式仍然按用户的选择渲染，只是画布
+    ///    小一档再由系统放大——这是四条 GPU 路由死亡记录（全部 audible=1）的主力对策。
+    /// 3. 封面 URL 尺寸：歌单 / 拼贴墙压到 120，其它页面 320。一张 1024 的封面解码后
     ///    是 4MB 常驻，几百张就是几百 MB；120 只有约 57KB。改 URL 即可，不需要站点配合。
-    /// 3. 所有图片出生即 `loading=lazy` + `decoding=async`（在 `src` 的 Setter 层设置，
+    /// 4. 所有图片出生即 `loading=lazy` + `decoding=async`（在 `src` 的 Setter 层设置，
     ///    不产生二次请求），不给一次铺满几百张的机会。
     /// 布尔设置按站点 `storagePrimitives` 的约定存 `'true'/'false'` 字符串。
     static func lowMemoryProfileScript() -> String {
@@ -5856,6 +5859,7 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
             var PROFILE = {
                 'visualizer_frame_rate': '60',
                 'visualizer_background_mode': 'common',
+                'disable_home_dynamic_background': 'true',
                 'disable_visualizer_vignette': 'true',
                 'disable_visualizer_geometric_background': 'true',
                 'visualizer_glow_blur_quantize': 'true'
@@ -5866,7 +5870,20 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
                 }
             } catch (e) {}
 
-            // **封面尺寸上限：这是歌单不再顶死进程的主力。**
+            // **画布分辨率：这一轮的主力。**
+            // folia(3).log 四条死亡记录全部 audible=1，也就是「可视化 / 背景动画在出画」
+            // 的时候死的：`#player`、`/`、`#lattice` 都是 GPU 路由。站点用 three / pixi
+            // 按 `window.devicePixelRatio`（这台机器 3x）分配画布；一块全屏 3x 画布的
+            // 显存 + 合成层是 2x 的 2.25 倍。把 dpr 锁到 2，画布按 2x 分配再由系统放大，
+            // 观感几乎无损（文字由 WebKit 自己按实际像素重绘），GPU 常驻内存砍一半以上。
+            try {
+                Object.defineProperty(window, 'devicePixelRatio', {
+                    get: function () { return 2; },
+                    configurable: true
+                });
+            } catch (e) {}
+
+            // **封面尺寸上限。**
             // 站点列表一次铺几百张封面，大图位会要到 512~1024：一张 1024 的封面解码后
             // 就是 4MB 常驻，几百张立刻几百 MB。网易云 CDN 用 `?param=宽y高` 出图，
             // 改 URL 就换尺寸，不需要站点配合。重路由（歌单 / 拼贴墙）压到 120（解码
@@ -5936,7 +5953,7 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
                     }
                 } catch (e) {}
             }, 3000);
-            report('armed bg=' + PROFILE['visualizer_background_mode'] + ' cap=' + capFor() + ' mode=user');
+            report('armed bg=' + PROFILE['visualizer_background_mode'] + ' cap=' + capFor() + ' dpr=2 mode=user');
         })();
         """
     }
