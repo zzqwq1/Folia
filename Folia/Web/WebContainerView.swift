@@ -5822,29 +5822,38 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         CrashLog.note("==== route banned for \(Int(routeBanSeconds))s: #\(fragment) ====")
     }
 
-    /// 低内存画像：在页面任何脚本读 localStorage 之前（document-start），把站点自己的
-    /// 性能设置强制成最低档，并把 WebGL 断掉。
+    /// 低内存画像：在页面任何脚本读 localStorage 之前（document-start），把站点
+    /// **看不见的性能项**调低，并把封面 URL 尺寸压下来。
     ///
-    /// 依据（folia(10).log）：首页 / 歌单 / `#player` / `#lattice` 全部死于 WebContent 内存超限，
-    /// 路由封禁只能善后、不能预防。站点源码（Folia-main）确认了两条原生降级路径：
-    /// 1. `visualizer_mode = 'still'` —— 纯 DOM 静态歌词视图（VisualizerStill.tsx），
-    ///    绕开 sonnet（three.js）/ tempera（pixi.js）这些 GPU 可视化模式；播放页两次死亡
-    ///    都精确落在开播后 2 秒，正是可视化渲染循环启动的时刻。
-    /// 2. Lattice 拼贴墙的歌词层是 pixi.js WebGL（createLatticeLyricRuntime），但它有
-    ///    设计好的失败路径：`onFailure` → 回退纯 DOM 标题。所以全局断掉 WebGL 后，
-    ///    拼贴墙降级为「海报 + 文字」而不是闪退。
-    /// 3. 封面 URL 统一压到 300px：网易云 `?param=宽y高` 由 CDN 按需出图，改 URL 即可，
-    ///    无需站点配合。img.src 在 Setter 层拦（不产生二次请求），内联样式周期扫描兜底。
-    ///    folia(1).log 证明 WebGL 断掉后 #lattice 仍秒死 —— 真正顶死它的是海报墙的
-    ///    大图解码 + 合成层，这一条才是对症的。
+    /// 依据（folia(2).log）：首页 / 歌单 / `#player` / `#lattice` 都死于 WebContent 内存超限。
+    /// 上一版把 `visualizer_mode` 覆盖成 `still`、并且断掉 WebGL —— 那会直接把用户选的
+    /// 歌词样式吃掉（「选了什么样式都是静止」），已经撤销。现在只做三件不改变观感的事：
+    /// 1. 背景从默认 `latent`（每页都跑的 GPU 着色器，会反复把封面传成贴图）换成
+    ///    `common`（纯 DOM 几何背景）—— folia(2).log 的 `GPUQueue.copyExternalImageToTexture`
+    ///    报错就是 latent 背景在上传封面贴图。
+    /// 2. 封面 URL 尺寸：歌单 / 拼贴墙压到 120，其它页面 320。一张 1024 的封面解码后
+    ///    是 4MB 常驻，几百张就是几百 MB；120 只有约 57KB。改 URL 即可，不需要站点配合。
+    /// 3. 所有图片出生即 `loading=lazy` + `decoding=async`（在 `src` 的 Setter 层设置，
+    ///    不产生二次请求），不给一次铺满几百张的机会。
     /// 布尔设置按站点 `storagePrimitives` 的约定存 `'true'/'false'` 字符串。
     static func lowMemoryProfileScript() -> String {
         """
         (function () {
             'use strict';
+            function report(text) {
+                try { window.webkit.messageHandlers.foliaJSLog.postMessage('LOWMEM ' + text); } catch (e) {}
+            }
+            // **只调「看不见的性能项」，不碰用户选过的样式。**
+            //
+            // 上一版把 `visualizer_mode` 写成 `still`（纯 DOM 静态歌词），用户反馈
+            // 「歌词样式选了后没变化、全是静止」—— 那是壳把选择器覆盖掉了，必须撤掉。
+            // 同理不再断 WebGL：断掉之后 GPU 可视化模式全部拿不到画布，用户看到的
+            // 也是「样式不生效」，而不是「降级」。
+            // 真正省内存且不改变观感的是背景：站点默认 `latent`（每页都跑的 GPU
+            // 着色器背景，会反复把封面传成贴图 —— folia(2).log 里那两条
+            // `GPUQueue.copyExternalImageToTexture` 就是它），换成 `common`
+            // （纯 DOM 几何背景）后每页的 GPU 常驻开销直接消失。
             var PROFILE = {
-                'visualizer_mode': 'still',
-                'random_visualizer_mode_per_song': 'false',
                 'visualizer_frame_rate': '60',
                 'visualizer_background_mode': 'common',
                 'disable_visualizer_vignette': 'true',
@@ -5856,42 +5865,60 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
                     try { localStorage.setItem(key, PROFILE[key]); } catch (e) {}
                 }
             } catch (e) {}
-            try {
-                var rawGetContext = HTMLCanvasElement.prototype.getContext;
-                HTMLCanvasElement.prototype.getContext = function (type, attrs) {
-                    if (type === 'webgl' || type === 'webgl2' || type === 'webgpu') {
-                        return null;
-                    }
-                    return rawGetContext.call(this, type, attrs);
-                };
-            } catch (e) {}
-            // 封面降尺寸：网易云图片 URL 用 ?param=宽y高 控制大小，站点在大图位
-            // （播放页主图 / 拼贴墙 / 背景）会要到 512~1024，每张解码 1-4MB，
-            // 拼贴墙上百张就是几百 MB —— folia(1).log 里 #lattice 在 WebGL 已断的
-            // 情况下依然秒死，死的就是这面墙。超过 300 的一律等比缩到 300：
-            // 封面只是展示图，300 在手机上足够清晰，解码内存砍约 10 倍。
-            var shrink = function (u) {
-                if (typeof u !== 'string' || u.indexOf('param=') < 0) return u;
-                return u.replace(/([?&]param=)(\\d+)y(\\d+)/i, function (m, p, w, h) {
-                    w = +w; h = +h;
-                    if (w <= 300 && h <= 300) return m;
-                    if (w >= h) return p + '300y' + Math.max(1, Math.round(300 * h / w));
-                    return p + Math.max(1, Math.round(300 * w / h)) + 'y300';
-                });
+
+            // **封面尺寸上限：这是歌单不再顶死进程的主力。**
+            // 站点列表一次铺几百张封面，大图位会要到 512~1024：一张 1024 的封面解码后
+            // 就是 4MB 常驻，几百张立刻几百 MB。网易云 CDN 用 `?param=宽y高` 出图，
+            // 改 URL 就换尺寸，不需要站点配合。重路由（歌单 / 拼贴墙）压到 120（解码
+            // 约 57KB，几百张也只有十几 MB），其它页面压到 320（手机上看足够清晰）。
+            var capFor = function () {
+                var h = String(location.hash || '');
+                if (h.indexOf('collection') >= 0 || h.indexOf('lattice') >= 0) { return 120; }
+                return 320;
             };
+            var shrink = function (u) {
+                if (typeof u !== 'string') { return u; }
+                var i = u.indexOf('param=');
+                if (i < 0) { return u; }
+                var start = i + 6;
+                var y = u.indexOf('y', start);
+                if (y < 0 || y - start > 5) { return u; }
+                var end = y + 1;
+                while (end < u.length) {
+                    var c = u.charCodeAt(end);
+                    if (c < 48 || c > 57) { break; }
+                    end += 1;
+                }
+                var w = parseInt(u.slice(start, y), 10);
+                var h = parseInt(u.slice(y + 1, end), 10);
+                if (!w || !h) { return u; }
+                var cap = capFor();
+                if (w <= cap && h <= cap) { return u; }
+                var nw, nh;
+                if (w >= h) { nw = cap; nh = Math.max(1, Math.round(cap * h / w)); }
+                else { nh = cap; nw = Math.max(1, Math.round(cap * w / h)); }
+                return u.slice(0, start) + nw + 'y' + nh + u.slice(end);
+            };
+            // 在 `src` 的 Setter 层降尺寸 + 出生即懒加载，不产生二次请求。
             try {
                 var srcDesc = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
                 if (srcDesc && srcDesc.set) {
                     var rawSet = srcDesc.set;
                     Object.defineProperty(HTMLImageElement.prototype, 'src', {
                         get: srcDesc.get,
-                        set: function (v) { rawSet.call(this, shrink(v)); },
+                        set: function (v) {
+                            try {
+                                if (!this.getAttribute('loading')) { this.setAttribute('loading', 'lazy'); }
+                                if (!this.getAttribute('decoding')) { this.setAttribute('decoding', 'async'); }
+                            } catch (e) {}
+                            rawSet.call(this, shrink(v));
+                        },
                         configurable: true
                     });
                 }
             } catch (e) {}
             // CSS 背景图 / 内联样式里的封面（播放页背景、部分墙面）周期扫一遍改写。
-            var swept = 0;
+            var sweeps = 0;
             setInterval(function () {
                 try {
                     var nodes = document.querySelectorAll('[style*="param="]');
@@ -5899,16 +5926,17 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
                         var el = nodes[i];
                         var css = el.getAttribute('style');
                         var next = shrink(css);
-                        if (next !== css) { el.setAttribute('style', next); swept += 1; }
+                        if (next !== css) { el.setAttribute('style', next); sweeps += 1; }
                     }
                     var imgs = document.images;
                     for (var j = 0; j < imgs.length; j += 1) {
-                        imgs[j].decoding = 'async';
-                        if (!imgs[j].loading) imgs[j].loading = 'lazy';
+                        var img = imgs[j];
+                        if (!img.getAttribute('decoding')) { img.setAttribute('decoding', 'async'); }
+                        if (!img.getAttribute('loading')) { img.setAttribute('loading', 'lazy'); }
                     }
                 } catch (e) {}
             }, 3000);
-            try { console.log('LOWMEM armed webgl=off coverCap=300'); } catch (e) {}
+            report('armed bg=' + PROFILE['visualizer_background_mode'] + ' cap=' + capFor() + ' mode=user');
         })();
         """
     }
