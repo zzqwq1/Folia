@@ -286,12 +286,23 @@ final class WebContainerView: UIView {
     /// 这样保活轮询后续几拍仍会带着这条判据，直到页面自己重新出声。
     private var preemptedByOtherApp = false
 
+    /// 系统内存告警。日志里有没有这一条，是区分「真的被内存顶死」和
+    /// 「WebKit 自己崩」的关键证据：有告警 → 继续压内存；一条都没有 → 换方向。
+    private var memoryWarningObservation: Any?
+
     init(state: WebShellState) {
         self.state = state
         super.init(frame: .zero)
         // 会话控制器回前台要判断「通路到底断没断」，只有容器能跨进程问页面的播放时钟。
         AudioSessionController.shared.container = self
         setUp()
+        memoryWarningObservation = NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            CrashLog.note("==== app memory warning ====")
+        }
     }
 
     @available(*, unavailable)
@@ -5859,10 +5870,11 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
     /// 另外回收已从文档摘除的 WebGL 上下文（学自参考包 `scale.js`）。
     /// 布尔设置按站点 `storagePrimitives` 的约定存 `'true'/'false'` 字符串。
     static func lowMemoryProfileScript() -> String {
-        // iPhone 包把画布分辨率压到 1.5（参考包压到 1；这里留半档锐度，
-        // 观感不至于糊成一团），iPad 包压到 2（iPad 屏大、内存也大，2 已经够省）。
+        // iPhone 包压到 1：这与参考包 IOS-Folia-3.0.4 的最终选择一致（它的注释写明
+        // 「DPR 1 已经超过屏幕物理分辨率」，再高只会在旋转 / 重建合成层时把显存翻倍）。
+        // iPad 包压到 2（iPad 屏大、内存也大，2 已经够省，再低就真的糊了）。
         let aggressive = ShellProfile.current == .aggressive
-        let dpr = aggressive ? "1.5" : "2"
+        let dpr = aggressive ? "1" : "2"
         let heavyCap = aggressive ? "120" : "320"
         let profileDict = aggressive
             ? "{'visualizer_frame_rate':'60','visualizer_background_mode':'common','disable_home_dynamic_background':'true','disable_visualizer_vignette':'true','disable_visualizer_geometric_background':'true','visualizer_glow_blur_quantize':'true'}"
@@ -5891,8 +5903,9 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
 
             // **画布分辨率。**
             // 站点里的 three / pixi 按 `window.devicePixelRatio` 分配画布。这台机器真实
-            // dpr 是 3，一块全屏画布的显存 + 合成层是 2 的 2.25 倍。锁到 \(dpr) 之后画布
-            // 按低一档分配，再由系统放大；UI 文字仍由 WebKit 按物理像素重绘，不会变糊。
+            // dpr 是 3，一块全屏画布的显存 + 合成层是 1 的数倍，回前台重建合成层时最容易
+            // 顶死。锁到 \(dpr) 之后画布按该值分配，再由系统放大；UI 文字仍由 WebKit
+            // 按物理像素重绘，不会变糊。
             try {
                 Object.defineProperty(window, 'devicePixelRatio', {
                     get: function () { return \(dpr); },
@@ -5904,8 +5917,16 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
             // Pixi / three 销毁画布时不总会释放 GL 上下文，每进一次可视化 / 拼贴墙就多一个，
             // 十几个之后 WebContent 就被系统回收。参考包的判据很保守：只回收「已经从文档里
             // 摘掉、且曾经挂上去过」的画布，正在出画的那块绝不动，避免把渲染搞坏。
+            var glQueue = [];
+            var glLiveCount = function () {
+                if (!glQueue) { return 0; }
+                var n = 0;
+                for (var i = 0; i < glQueue.length; i += 1) {
+                    if (glQueue[i] && glQueue[i].canvas && glQueue[i].canvas.isConnected) { n += 1; }
+                }
+                return n;
+            };
             try {
-                var glQueue = [];
                 var pruneGl = function (keep) {
                     glQueue.slice().forEach(function (entry) {
                         if (entry.canvas.isConnected) { entry.wasConnected = true; return; }
@@ -5996,8 +6017,52 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
                     });
                 }
             } catch (e) {}
-            // CSS 背景图 / 内联样式里的封面（播放页背景、部分墙面）周期扫一遍改写。
+            // **CSS 背景图必须在下发请求之前就改写。**
+            //
+            // 站点大量用 `style.backgroundImage` 铺封面（歌单行、拼贴墙、播放页背景）。
+            // 上一版只靠 3 秒一轮的 `[style*="param="]` 扫描 —— 那等于先让浏览器按
+            // 1024 的原图请求、解码（一张就是 4MB），3 秒后才换成小图：峰值早就到了。
+            // 页面上几百行时，这就是「进歌单两秒内进程被回收」最合理的解释。
+            // 现在在 `CSSStyleDeclaration` 的写入层截住，请求发出前就已经是 \(heavyCap) / 320。
+            var cssShrink = function (v) {
+                return typeof v === 'string' && v.indexOf('param=') >= 0 ? shrink(v) : v;
+            };
+            try {
+                var rawSetProperty = CSSStyleDeclaration.prototype.setProperty;
+                CSSStyleDeclaration.prototype.setProperty = function (name, value, priority) {
+                    if (typeof value === 'string' && value.indexOf('param=') >= 0) {
+                        value = shrink(value);
+                    }
+                    return rawSetProperty.call(this, name, value, priority);
+                };
+            } catch (e) {}
+            try {
+                var imageProps = ['background', 'backgroundImage', 'borderImage', 'maskImage'];
+                for (var pi = 0; pi < imageProps.length; pi += 1) {
+                    (function (prop) {
+                        var desc = Object.getOwnPropertyDescriptor(CSSStyleDeclaration.prototype, prop);
+                        if (!desc || !desc.set) { return; }
+                        Object.defineProperty(CSSStyleDeclaration.prototype, prop, {
+                            get: desc.get,
+                            set: function (v) { desc.set.call(this, cssShrink(v)); },
+                            configurable: true
+                        });
+                    })(imageProps[pi]);
+                }
+            } catch (e) {}
+            // 兜底：走 `setAttribute('style', ...)` / innerHTML 铺进来的背景图。
+            // 每 15 秒一轮，只处理还带着 param= 的元素（被改写过的不再命中）。
+            var styleScanTick = 0;
             setInterval(function () {
+                styleScanTick += 1;
+                if (styleScanTick % 3 !== 0) { return; }
+                try {
+                    // **心跳**：每 15 秒报一次页面规模，进程死之前的最后一条就是现场。
+                    report('hb dom=' + document.getElementsByTagName('*').length
+                        + ' img=' + document.images.length
+                        + ' cv=' + document.getElementsByTagName('canvas').length
+                        + ' gl=' + glLiveCount());
+                } catch (e) {}
                 try {
                     var nodes = document.querySelectorAll('[style*="param="]');
                     for (var i = 0; i < nodes.length; i += 1) {
@@ -6013,7 +6078,7 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
                         if (!img.getAttribute('loading')) { img.setAttribute('loading', 'lazy'); }
                     }
                 } catch (e) {}
-            }, 3000);
+            }, 5000);
             report('armed profile=\(profileName) dpr=\(dpr) caps=' + capFor() + ' mode=user');
         })();
         """
