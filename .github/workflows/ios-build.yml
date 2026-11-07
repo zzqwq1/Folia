@@ -11,7 +11,7 @@ permissions:
 jobs:
   build:
     runs-on: macos-15
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -49,7 +49,11 @@ jobs:
           xcodegen generate
           ls -d Folia.xcodeproj
 
-      - name: Build (unsigned)
+      # 同一个工程打两次包：
+      # ① iPhone 包走默认的 aggressive 画像（压 dpr、关 GPU 背景、狠压封面）；
+      # ② iPad 包用 PROFILE_IPAD 编译条件切到 light 画像（只压封面 / 懒加载 / 回收 GL，
+      #    保留站点默认背景与全部动效 —— 用户要求「不用做太多优化，不然会很丑」）。
+      - name: Build iPhone (unsigned)
         run: |
           set -o pipefail
           xcodebuild \
@@ -58,29 +62,49 @@ jobs:
             -configuration Release \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
-            -derivedDataPath "$GITHUB_WORKSPACE/build" \
+            -derivedDataPath "$GITHUB_WORKSPACE/build-iphone" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGN_ENTITLEMENTS="" \
-            build 2>&1 | tee /tmp/xcodebuild.log
+            build 2>&1 | tee /tmp/xcodebuild-iphone.log
+
+      - name: Build iPad (unsigned, light profile)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project "Folia.xcodeproj" \
+            -scheme "Folia" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$GITHUB_WORKSPACE/build-ipad" \
+            SWIFT_ACTIVE_COMPILATION_CONDITIONS=PROFILE_IPAD \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            build 2>&1 | tee /tmp/xcodebuild-ipad.log
 
       - name: Show errors on failure
         if: failure()
         run: |
-          echo "=== ERROR LINES ==="
-          grep -nE "error:" /tmp/xcodebuild.log | head -n 80 || true
-          echo "=== END ==="
+          for log in /tmp/xcodebuild-iphone.log /tmp/xcodebuild-ipad.log; do
+            echo "=== ERROR LINES ($log) ==="
+            grep -nE "error:" "$log" | head -n 80 || true
+          done
 
-      - name: Upload compiler log
+      - name: Upload compiler logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: xcodebuild-log
-          path: /tmp/xcodebuild.log
+          name: xcodebuild-logs
+          path: |
+            /tmp/xcodebuild-iphone.log
+            /tmp/xcodebuild-ipad.log
           if-no-files-found: warn
 
-      - name: Store compiler log on branch
+      - name: Store compiler logs on branch
         if: always()
         continue-on-error: true
         run: |
@@ -88,10 +112,14 @@ jobs:
           {
             echo "sha: ${GITHUB_SHA}"
             echo "run: ${GITHUB_RUN_ID}"
-            echo "=== ERROR LINES ==="
-            grep -nE "error:" /tmp/xcodebuild.log | head -n 80 || true
-            echo "=== TAIL 300 ==="
-            tail -n 300 /tmp/xcodebuild.log || true
+            echo "=== IPHONE ERROR LINES ==="
+            grep -nE "error:" /tmp/xcodebuild-iphone.log | head -n 80 || true
+            echo "=== IPHONE TAIL 300 ==="
+            tail -n 300 /tmp/xcodebuild-iphone.log || true
+            echo "=== IPAD ERROR LINES ==="
+            grep -nE "error:" /tmp/xcodebuild-ipad.log | head -n 80 || true
+            echo "=== IPAD TAIL 300 ==="
+            tail -n 300 /tmp/xcodebuild-ipad.log || true
           } > ci-logs/last-build.txt
           git checkout --orphan ci-log-tmp
           git rm -rq --cached . || true
@@ -100,44 +128,52 @@ jobs:
             commit -q -m "ci: compiler log ${GITHUB_SHA}"
           git push -q -f origin ci-log-tmp:ci-log
 
-      - name: Wrap into IPA
+      - name: Wrap into IPAs
         run: |
           set -e
-          cd "$GITHUB_WORKSPACE/build/Build/Products/Release-iphoneos"
-          rm -rf Payload
-          mkdir -p Payload
-          cp -R Folia.app Payload/
-          zip -qry Folia-Web-unsigned.ipa Payload
-          ls -lh Folia-Web-unsigned.ipa
-          echo "app bundle: $(du -sh Folia.app)"
-          test -f Payload/Folia.app/www/index.html
-          test -f Payload/Folia.app/Assets.car
-          /usr/libexec/PlistBuddy -c "Print :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconName" Payload/Folia.app/Info.plist
-          /usr/libexec/PlistBuddy -c "Print :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles" Payload/Folia.app/Info.plist
-          /usr/libexec/PlistBuddy -c "Print :CFBundleIcons~ipad:CFBundlePrimaryIcon:CFBundleIconFiles" Payload/Folia.app/Info.plist
-          ls -lh Payload/Folia.app/Assets.car
-          echo "start url:"
-          strings Payload/Folia.app/Folia | grep -F "https://app.folia-api.top/" | head -n 3
-          test -n "$(strings Payload/Folia.app/Folia | grep -F 'https://app.folia-api.top/' || true)"
+          wrap () {
+            local derived="$1"
+            local name="$2"
+            cd "$GITHUB_WORKSPACE/$derived/Build/Products/Release-iphoneos"
+            rm -rf Payload
+            mkdir -p Payload
+            cp -R Folia.app Payload/
+            zip -qry "$name.ipa" Payload
+            ls -lh "$name.ipa"
+            echo "$name app bundle: $(du -sh Folia.app)"
+            test -f Payload/Folia.app/www/index.html
+            test -f Payload/Folia.app/Assets.car
+            echo "version: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Payload/Folia.app/Info.plist) / $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' Payload/Folia.app/Info.plist)"
+            /usr/libexec/PlistBuddy -c "Print :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconName" Payload/Folia.app/Info.plist
+            /usr/libexec/PlistBuddy -c "Print :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles" Payload/Folia.app/Info.plist
+            /usr/libexec/PlistBuddy -c "Print :CFBundleIcons~ipad:CFBundlePrimaryIcon:CFBundleIconFiles" Payload/Folia.app/Info.plist
+            test -n "$(strings Payload/Folia.app/Folia | grep -F 'https://app.folia-api.top/' || true)"
+          }
+          wrap build-iphone "iPhone-Folia-2.1.5"
+          wrap build-ipad "iPad-Folia-2.1.5"
 
-      - name: Dump compiled icon
-        run: |
-          xcrun assetutil --info "$GITHUB_WORKSPACE/build/Build/Products/Release-iphoneos/Folia.app/Assets.car" | grep -nE '"Name"|"Scale"|"PixelWidth"|"PixelHeight"|"Idiom"' | head -n 60 || true
-
-      - name: Upload IPA artifact
+      - name: Upload iPhone IPA
         uses: actions/upload-artifact@v4
         with:
-          name: Folia-Web-unsigned-ipa
-          path: build/Build/Products/Release-iphoneos/Folia-Web-unsigned.ipa
+          name: iPhone-Folia-2.1.5-ipa
+          path: build-iphone/Build/Products/Release-iphoneos/iPhone-Folia-2.1.5.ipa
           if-no-files-found: error
 
-      - name: Publish IPA to branch
+      - name: Upload iPad IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: iPad-Folia-2.1.5-ipa
+          path: build-ipad/Build/Products/Release-iphoneos/iPad-Folia-2.1.5.ipa
+          if-no-files-found: error
+
+      - name: Publish IPAs to branch
         run: |
-          cp build/Build/Products/Release-iphoneos/Folia-Web-unsigned.ipa "$GITHUB_WORKSPACE/Folia-Web-unsigned.ipa"
+          cp build-iphone/Build/Products/Release-iphoneos/iPhone-Folia-2.1.5.ipa "$GITHUB_WORKSPACE/iPhone-Folia-2.1.5.ipa"
+          cp build-ipad/Build/Products/Release-iphoneos/iPad-Folia-2.1.5.ipa "$GITHUB_WORKSPACE/iPad-Folia-2.1.5.ipa"
           cd "$GITHUB_WORKSPACE"
           git checkout --orphan ipa-tmp
           git rm -rq --cached . || true
-          git add -f Folia-Web-unsigned.ipa
+          git add -f iPhone-Folia-2.1.5.ipa iPad-Folia-2.1.5.ipa
           git -c user.name=ci-bot -c user.email=ci-bot@users.noreply.github.com \
             commit -q -m "ipa: ${GITHUB_SHA}"
           git push -q -f origin ipa-tmp:ipa

@@ -5822,25 +5822,53 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         CrashLog.note("==== route banned for \(Int(routeBanSeconds))s: #\(fragment) ====")
     }
 
+    /// 两种壳画像，编译期决定（同一个 workflow 打两次包）。
+    ///
+    /// - `aggressive`（iPhone 包）：按参考包 IOS-Folia-3.0.4 的做法压渲染分辨率、
+    ///   限 WebGL 上下文数、关掉每页常驻的 GPU 背景。牺牲一点画布锐度换稳定。
+    /// - `light`（iPad 包）：iPad 内存更大，只做「不改变观感」的几项（封面尺寸、
+    ///   懒加载、GL 上下文回收），保留站点默认背景与全部动效。
+    enum ShellProfile {
+        case aggressive
+        case light
+
+        static var current: ShellProfile {
+            #if PROFILE_IPAD
+            return .light
+            #else
+            return .aggressive
+            #endif
+        }
+    }
+
     /// 低内存画像：在页面任何脚本读 localStorage 之前（document-start），把站点
     /// **看不见的性能项**调低，并把封面 URL 尺寸压下来。
     ///
-    /// 依据（folia(2).log）：首页 / 歌单 / `#player` / `#lattice` 都死于 WebContent 内存超限。
-    /// 上一版把 `visualizer_mode` 覆盖成 `still`、并且断掉 WebGL —— 那会直接把用户选的
-    /// 歌词样式吃掉（「选了什么样式都是静止」），已经撤销。现在只做三件不改变观感的事：
+    /// 依据：首页 / 歌单 / `#player` / `#lattice` 都死于 WebContent 内存超限，且四条死亡
+    /// 记录全部 `audible=1`（播放中 GPU 出画时死）。上一版把 `visualizer_mode` 覆盖成
+    /// `still`、并且断掉 WebGL —— 那会直接把用户选的歌词样式吃掉（「选了什么样式都是
+    /// 静止」），已经撤销。现在只做三种不改变观感的事：
     /// 1. 背景从默认 `latent`（每页都跑的 GPU 着色器，会反复把封面传成贴图）换成
     ///    `common`（纯 DOM 几何背景），并按站点自己的开关停掉主页动态背景
-    ///    （`disable_home_dynamic_background`）—— folia(3).log 里 `/` 就是这么死的。
-    /// 2. 把 `window.devicePixelRatio` 锁到 2：three / pixi 按 dpr 分配画布，这台机器
-    ///    3x 的全屏画布显存是 2x 的 2.25 倍。歌词样式仍然按用户的选择渲染，只是画布
-    ///    小一档再由系统放大——这是四条 GPU 路由死亡记录（全部 audible=1）的主力对策。
-    /// 3. 封面 URL 尺寸：歌单 / 拼贴墙压到 120，其它页面 320。一张 1024 的封面解码后
-    ///    是 4MB 常驻，几百张就是几百 MB；120 只有约 57KB。改 URL 即可，不需要站点配合。
-    /// 4. 所有图片出生即 `loading=lazy` + `decoding=async`（在 `src` 的 Setter 层设置，
-    ///    不产生二次请求），不给一次铺满几百张的机会。
+    ///    （`disable_home_dynamic_background`）。**只有 iPhone 画像做这一步**，
+    ///    iPad 画像保留站点默认背景与全部动效（用户要求「不用做太多优化，不然会很丑」）。
+    /// 2. 把 `window.devicePixelRatio` 压到画像给定值：three / pixi 按 dpr 分配画布，
+    ///    3x 的全屏画布显存是 1.5x 的数倍。歌词样式仍按用户的选择渲染，只是画布小一档。
+    /// 3. 封面 URL 尺寸（歌单 / 拼贴墙更狠）+ 出生即 `loading=lazy` / `decoding=async`，
+    ///    不给一次铺满几百张大图的机会。改 URL 即可，不需要站点配合。
+    /// 另外回收已从文档摘除的 WebGL 上下文（学自参考包 `scale.js`）。
     /// 布尔设置按站点 `storagePrimitives` 的约定存 `'true'/'false'` 字符串。
     static func lowMemoryProfileScript() -> String {
-        """
+        // iPhone 包把画布分辨率压到 1.5（参考包压到 1；这里留半档锐度，
+        // 观感不至于糊成一团），iPad 包压到 2（iPad 屏大、内存也大，2 已经够省）。
+        let aggressive = ShellProfile.current == .aggressive
+        let dpr = aggressive ? "1.5" : "2"
+        let heavyCap = aggressive ? "120" : "320"
+        let profileDict = aggressive
+            ? "{'visualizer_frame_rate':'60','visualizer_background_mode':'common','disable_home_dynamic_background':'true','disable_visualizer_vignette':'true','disable_visualizer_geometric_background':'true','visualizer_glow_blur_quantize':'true'}"
+            : "{}"
+        let profileName = aggressive ? "iphone" : "ipad"
+        return """
         (function () {
             'use strict';
             function report(text) {
@@ -5850,47 +5878,81 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
             //
             // 上一版把 `visualizer_mode` 写成 `still`（纯 DOM 静态歌词），用户反馈
             // 「歌词样式选了后没变化、全是静止」—— 那是壳把选择器覆盖掉了，必须撤掉。
-            // 同理不再断 WebGL：断掉之后 GPU 可视化模式全部拿不到画布，用户看到的
+            // 同理不断 WebGL：断掉之后 GPU 可视化模式全部拿不到画布，用户看到的
             // 也是「样式不生效」，而不是「降级」。
-            // 真正省内存且不改变观感的是背景：站点默认 `latent`（每页都跑的 GPU
-            // 着色器背景，会反复把封面传成贴图 —— folia(2).log 里那两条
-            // `GPUQueue.copyExternalImageToTexture` 就是它），换成 `common`
-            // （纯 DOM 几何背景）后每页的 GPU 常驻开销直接消失。
-            var PROFILE = {
-                'visualizer_frame_rate': '60',
-                'visualizer_background_mode': 'common',
-                'disable_home_dynamic_background': 'true',
-                'disable_visualizer_vignette': 'true',
-                'disable_visualizer_geometric_background': 'true',
-                'visualizer_glow_blur_quantize': 'true'
-            };
+            // iPhone 包额外把默认的 `latent` GPU 背景（每页都在跑、反复把封面传成贴图）
+            // 换成 `common`（纯 DOM 几何背景），并停掉主页动态背景 —— iPad 包不动这些。
+            var PROFILE = \(profileDict);
             try {
                 for (var key in PROFILE) {
                     try { localStorage.setItem(key, PROFILE[key]); } catch (e) {}
                 }
             } catch (e) {}
 
-            // **画布分辨率：这一轮的主力。**
-            // folia(3).log 四条死亡记录全部 audible=1，也就是「可视化 / 背景动画在出画」
-            // 的时候死的：`#player`、`/`、`#lattice` 都是 GPU 路由。站点用 three / pixi
-            // 按 `window.devicePixelRatio`（这台机器 3x）分配画布；一块全屏 3x 画布的
-            // 显存 + 合成层是 2x 的 2.25 倍。把 dpr 锁到 2，画布按 2x 分配再由系统放大，
-            // 观感几乎无损（文字由 WebKit 自己按实际像素重绘），GPU 常驻内存砍一半以上。
+            // **画布分辨率。**
+            // 站点里的 three / pixi 按 `window.devicePixelRatio` 分配画布。这台机器真实
+            // dpr 是 3，一块全屏画布的显存 + 合成层是 2 的 2.25 倍。锁到 \(dpr) 之后画布
+            // 按低一档分配，再由系统放大；UI 文字仍由 WebKit 按物理像素重绘，不会变糊。
             try {
                 Object.defineProperty(window, 'devicePixelRatio', {
-                    get: function () { return 2; },
+                    get: function () { return \(dpr); },
                     configurable: true
                 });
+            } catch (e) {}
+
+            // **WebGL 上下文回收（学自参考包 IOS-Folia-3.0.4 的 scale.js）。**
+            // Pixi / three 销毁画布时不总会释放 GL 上下文，每进一次可视化 / 拼贴墙就多一个，
+            // 十几个之后 WebContent 就被系统回收。参考包的判据很保守：只回收「已经从文档里
+            // 摘掉、且曾经挂上去过」的画布，正在出画的那块绝不动，避免把渲染搞坏。
+            try {
+                var glQueue = [];
+                var pruneGl = function (keep) {
+                    glQueue.slice().forEach(function (entry) {
+                        if (entry.canvas.isConnected) { entry.wasConnected = true; return; }
+                        if (entry.canvas !== keep && entry.wasConnected) {
+                            try {
+                                var ext = entry.ctx.getExtension('WEBGL_lose_context');
+                                if (ext) { ext.loseContext(); }
+                            } catch (e) {}
+                            var idx = glQueue.indexOf(entry);
+                            if (idx >= 0) { glQueue.splice(idx, 1); }
+                        }
+                    });
+                };
+                var rawGl = HTMLCanvasElement.prototype.getContext;
+                HTMLCanvasElement.prototype.getContext = function (type) {
+                    var ctx = rawGl.apply(this, arguments);
+                    if (ctx && String(type).indexOf('webgl') === 0) {
+                        var known = false;
+                        for (var gi = 0; gi < glQueue.length; gi += 1) {
+                            if (glQueue[gi].ctx === ctx) { known = true; break; }
+                        }
+                        if (!known) {
+                            pruneGl(this);
+                            glQueue.push({ canvas: this, ctx: ctx, wasConnected: Boolean(this.isConnected) });
+                            var canvasRef = this;
+                            setTimeout(function () { pruneGl(canvasRef); }, 0);
+                        }
+                    }
+                    return ctx;
+                };
+                try {
+                    new MutationObserver(function () {
+                        for (var mi = 0; mi < glQueue.length; mi += 1) {
+                            if (glQueue[mi].canvas.isConnected) { glQueue[mi].wasConnected = true; }
+                        }
+                    }).observe(document.documentElement, { childList: true, subtree: true });
+                } catch (e) {}
             } catch (e) {}
 
             // **封面尺寸上限。**
             // 站点列表一次铺几百张封面，大图位会要到 512~1024：一张 1024 的封面解码后
             // 就是 4MB 常驻，几百张立刻几百 MB。网易云 CDN 用 `?param=宽y高` 出图，
-            // 改 URL 就换尺寸，不需要站点配合。重路由（歌单 / 拼贴墙）压到 120（解码
-            // 约 57KB，几百张也只有十几 MB），其它页面压到 320（手机上看足够清晰）。
+            // 改 URL 就换尺寸，不需要站点配合。重路由（歌单 / 拼贴墙）压到 \(heavyCap)，
+            // 其它页面压到 320。
             var capFor = function () {
                 var h = String(location.hash || '');
-                if (h.indexOf('collection') >= 0 || h.indexOf('lattice') >= 0) { return 120; }
+                if (h.indexOf('collection') >= 0 || h.indexOf('lattice') >= 0) { return \(heavyCap); }
                 return 320;
             };
             var shrink = function (u) {
@@ -5935,7 +5997,6 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
                 }
             } catch (e) {}
             // CSS 背景图 / 内联样式里的封面（播放页背景、部分墙面）周期扫一遍改写。
-            var sweeps = 0;
             setInterval(function () {
                 try {
                     var nodes = document.querySelectorAll('[style*="param="]');
@@ -5943,7 +6004,7 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
                         var el = nodes[i];
                         var css = el.getAttribute('style');
                         var next = shrink(css);
-                        if (next !== css) { el.setAttribute('style', next); sweeps += 1; }
+                        if (next !== css) { el.setAttribute('style', next); }
                     }
                     var imgs = document.images;
                     for (var j = 0; j < imgs.length; j += 1) {
@@ -5953,7 +6014,7 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
                     }
                 } catch (e) {}
             }, 3000);
-            report('armed bg=' + PROFILE['visualizer_background_mode'] + ' cap=' + capFor() + ' dpr=2 mode=user');
+            report('armed profile=\(profileName) dpr=\(dpr) caps=' + capFor() + ' mode=user');
         })();
         """
     }
