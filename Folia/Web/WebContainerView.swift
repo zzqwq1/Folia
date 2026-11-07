@@ -1129,6 +1129,16 @@ final class WebContainerView: UIView {
 
     private func pageHeartbeatTick() {
         guard let webView else { return }
+        // **后台不算卡死。**
+        //
+        // 进后台后 WebKit 会挂起该页的脚本执行，`evaluateJavaScript` 的回调十几秒都不回来。
+        // 上一版因此把一次正常的后台停留记成「页面无响应 20 秒」，然后在后台把整个
+        // WebView 重建 —— 用户切回来看到的就是加载界面（folia(6).log 16:08:36 那一笔，
+        // 前一行正是 `background capture idle`）。只有 App 在前台，回调不来才算真卡死。
+        guard UIApplication.shared.applicationState == .active else {
+            hbLastBeat = Date()
+            return
+        }
         // 页面还没提交过任何文档（首屏加载中）时不计时：那时卡在网络上很正常。
         guard lastCommittedURL != nil else {
             hbLastBeat = Date()
@@ -5603,6 +5613,18 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
             Self.recordRouteDeath(dead)
             CrashLog.note("==== route death recorded: \(dead.absoluteString) ====")
         }
+        // **进程死过一次，就先关掉 WebGL。**
+        //
+        // folia(6).log 的现场：首页心跳是 `cv=0 gl=0`（一块画布都没有）活了 40 秒；
+        // 一进歌单 / 一进 `#player`，2 秒内进程就被回收 —— 那两秒里唯一新增的重东西
+        // 就是可视化器创建的第一块 GL 画布。参考包 IOS-Folia-3.0.4 的实测结论也是
+        // 「关掉 WebGL 后回收次数为 0」。所以这里不做永久关闭：被回收一次后，
+        // 接下来 15 分钟让页面不建 GL，先保证 App 能用；窗口过去后自动恢复，
+        // 歌词样式回到用户选的那个。
+        if ShellProfile.current == .aggressive {
+            UserDefaults.standard.set(Date().timeIntervalSince1970 + 900, forKey: Self.webglOffUntilKey)
+            CrashLog.note("==== webgl off for 15 minutes (after termination) ====")
+        }
         // 重建时要用它当落脚点（见 `rebuildWebView` 里 `landing` 的优先级）。
         // 用带兜底的 `landingCandidate`：`webView.url` 为空时它是保活采到的那一份。
         deadLandingURL = landingCandidate
@@ -5833,6 +5855,9 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         CrashLog.note("==== route banned for \(Int(routeBanSeconds))s: #\(fragment) ====")
     }
 
+    /// 「崩溃后先关 WebGL」的截止时间（Unix 秒）。iPhone 包专用。
+    private static let webglOffUntilKey = "folia.shell.webglOffUntil"
+
     /// 两种壳画像，编译期决定（同一个 workflow 打两次包）。
     ///
     /// - `aggressive`（iPhone 包）：按参考包 IOS-Folia-3.0.4 的做法压渲染分辨率、
@@ -5880,6 +5905,9 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
             ? "{'visualizer_frame_rate':'60','visualizer_background_mode':'common','disable_home_dynamic_background':'true','disable_visualizer_vignette':'true','disable_visualizer_geometric_background':'true','visualizer_glow_blur_quantize':'true'}"
             : "{}"
         let profileName = aggressive ? "iphone" : "ipad"
+        // 被回收过一次 → 15 分钟内不再建 GL 上下文（见 `webViewWebContentProcessDidTerminate`）。
+        let glOffUntil = UserDefaults.standard.double(forKey: Self.webglOffUntilKey)
+        let glBlocked = aggressive && Date().timeIntervalSince1970 < glOffUntil
         return """
         (function () {
             'use strict';
@@ -5900,6 +5928,24 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
                     try { localStorage.setItem(key, PROFILE[key]); } catch (e) {}
                 }
             } catch (e) {}
+
+            // **崩溃后 15 分钟内不建 WebGL 上下文。**
+            //
+            // folia(6).log：首页（`cv=0 gl=0`，一块画布都没有）活了 40 秒；一进歌单 /
+            // 一进 `#player`，2 秒内进程就被回收。那两秒里唯一新增的重东西就是可视化器
+            // 建的那块 GL 画布。参考包 IOS-Folia-3.0.4 的实测记录也是「关掉 WebGL 后
+            // 回收次数为 0」。所以被回收过一次之后先关 15 分钟，保住可用性；
+            // 窗口过了自动恢复，不会像上一版那样把歌词样式永久吃掉。
+            var GL_BLOCKED = \(glBlocked ? "true" : "false");
+            if (GL_BLOCKED) {
+                try {
+                    var rawBlockedGetContext = HTMLCanvasElement.prototype.getContext;
+                    HTMLCanvasElement.prototype.getContext = function (type) {
+                        if (String(type).indexOf('webgl') === 0) { return null; }
+                        return rawBlockedGetContext.apply(this, arguments);
+                    };
+                } catch (e) {}
+            }
 
             // **画布分辨率。**
             // 站点里的 three / pixi 按 `window.devicePixelRatio` 分配画布。这台机器真实
@@ -6079,7 +6125,7 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
                     }
                 } catch (e) {}
             }, 5000);
-            report('armed profile=\(profileName) dpr=\(dpr) caps=' + capFor() + ' mode=user');
+            report('armed profile=\(profileName) dpr=\(dpr) caps=' + capFor() + ' mode=user gl=' + (GL_BLOCKED ? 'off' : 'on'));
         })();
         """
     }
