@@ -313,6 +313,79 @@ final class WebContainerView: UIView {
         fatalError("init(coder:) has not been implemented")
     }
 
+    // MARK: - 前台内存回落（iPhone 专用）
+
+    /// 一次回落只允许占用一小会儿前台时间，且两次之间至少隔 20 秒。
+    /// 日志里进程死亡都在「页面刚起来 / 正在铺封面」那几秒，这时回落等于打断首屏；
+    /// 而死亡的真正原因是**死亡之前**已经涨上去的内存，回落晚 20 秒完全不耽误。
+    private var reliefTickInFlight = false
+    private var lastReliefTickAt: Date = .distantPast
+    private var reliefPasses = 0
+    /// 内存水位遥测的节拍（每 30 秒一条）。
+    private var memLogTicks = 0
+
+    /// 前台周期性把 WebContent 的内存还回去。
+    ///
+    /// folia(15)/(16) 的现场一致：`gl=off`、`caps=96` 都上了，**首页**的 DOM 仍在
+    /// 几百毫秒里从 500 涨到 700+，随后进程没有死循环、没有异常，就是被 jetsam。
+    /// 这说明剩下的内存不在「我们要不要建 GL 上下文」这一层 —— 它在 WebKit 自己的
+    /// 缓存层：解析过的资源、解码过的位图、SPA 摘掉但还没回收的图层。
+    /// 页面侧脚本管不到这一层，只有原生能收：
+    ///   - `WKWebsiteDataStore.removeData(ofTypes:for: [WKWebsiteDataTypeMemoryCache])`
+    ///     清掉内存里的资源缓存（不动磁盘缓存、不动 cookie / localStorage / IndexedDB）；
+    ///   - 再让页面把 `<img>` 重新挂一遍，逼 WebKit 把已解码但没在用的位图释放。
+    /// 参考包（IOS-Folia-3.x）同样是在前台按低水位维护，而不是等死亡后再重建。
+    private func runForegroundReliefTick() {
+        guard ShellProfile.current == .aggressive else { return }
+        guard !reliefTickInFlight, UIApplication.shared.applicationState == .active else { return }
+        guard Date().timeIntervalSince(lastReliefTickAt) >= 20 else { return }
+        guard let container = webView else { return }
+
+        reliefTickInFlight = true
+        lastReliefTickAt = Date()
+        reliefPasses += 1
+        let pass = reliefPasses
+
+        let js = """
+        (function(){
+          try {
+            var imgs = document.images, n = 0, dropped = 0;
+            for (var i = 0; i < imgs.length; i += 1) {
+              var img = imgs[i];
+              if (!img.isConnected) { continue; }
+              n += 1;
+              var r = img.getBoundingClientRect();
+              var onScreen = r.bottom > -240 && r.top < (window.innerHeight + 240);
+              if (onScreen || !img.getAttribute('src')) { continue; }
+              if (img.getAttribute('data-folia-park') === '1') { continue; }
+              img.setAttribute('data-folia-park-src', img.getAttribute('src') || '');
+              img.setAttribute('data-folia-park', '1');
+              try { img.src = 'data:image/gif;base64,R0lGODlhAQABAAAAACw='; } catch (e) {}
+              dropped += 1;
+            }
+            return n + '/' + dropped + '/' + document.getElementsByTagName('*').length;
+          } catch (e) { return '-'; }
+        })();
+        """
+        let finish = { [weak self] (info: String) in
+            guard let self else { return }
+            WKWebsiteDataStore.default().removeData(
+                ofTypes: [WKWebsiteDataTypeMemoryCache],
+                modifiedSince: Date(timeIntervalSince1970: 0)
+            ) {
+                self.reliefTickInFlight = false
+                if pass <= 2 || pass % 10 == 0 {
+                    CrashLog.note("==== fg relief pass \(pass) \(info) memcache purged ====")
+                }
+                let pid = container.value(forKey: "processIdentifier") as? Int ?? -1
+                CrashLog.note("==== fg mem web=\(pid) \(Self.memoryLogLine()) ====")
+            }
+        }
+        container.evaluateJavaScript(js) { result, _ in
+            finish((result as? String) ?? "-")
+        }
+    }
+
     // MARK: - WebView
 
     /// 构造一份 WebView 配置。`setUp()` 与 `rebuildWebView()` 共用。
@@ -731,9 +804,16 @@ final class WebContainerView: UIView {
         // WebContent 被回收的真正原因（jetsam 还是 WebKit 自崩）壳拿不到，
         // 应用自身的 footprint 与系统剩余额度是唯一能拿到的旁证 ——
         // 下一份日志里把死亡时间戳对上这条曲线，就能判断是不是内存顶死。
+        // 5 秒节拍：前 5 拍交给 `runForegroundReliefTick`（内部 20 秒限流），
+        // 第 6 拍顺带写一条水位。
         memLogTimer?.invalidate()
-        memLogTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in
-            CrashLog.note(Self.memoryLogLine())
+        memLogTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            self.runForegroundReliefTick()
+            self.memLogTicks += 1
+            if self.memLogTicks % 6 == 0 {
+                CrashLog.note(Self.memoryLogLine())
+            }
         }
 
         observeLifecycle()
@@ -6185,6 +6265,19 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
                         + ' gl=' + glLiveCount());
                 } catch (e) {}
                 try {
+                    // **补回被回落收掉的封面。**
+                    // 原生前台回落（`runForegroundReliefTick`）会把屏幕外的 `<img>`
+                    // 换成 1px 占位并记下原地址；回到视口附近必须换回来，否则
+                    // 用户往回翻就是一片空白。
+                    var parked = document.querySelectorAll('img[data-folia-park="1"]');
+                    for (var p = 0; p < parked.length; p += 1) {
+                        var pimg = parked[p];
+                        var pr = pimg.getBoundingClientRect();
+                        if (pr.bottom < -400 || pr.top > (window.innerHeight + 400)) { continue; }
+                        var orig = pimg.getAttribute('data-folia-park-src');
+                        pimg.removeAttribute('data-folia-park');
+                        if (orig) { try { pimg.src = orig; } catch (e) {} }
+                    }
                     var nodes = document.querySelectorAll('[style*="param="]');
                     for (var i = 0; i < nodes.length; i += 1) {
                         var el = nodes[i];

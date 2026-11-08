@@ -211,9 +211,9 @@
   <div id="donate-card">
     <div class="donate-title">给 Ex 赞赏</div>
     <div class="donate-version">
-      <span>当前版本 <b id="donate-version-num">2.2.0</b></span>
+      <span>当前版本 <b id="donate-version-num">2.2.1</b></span>
       <span>·</span>
-      <span>最新版本 <b id="donate-latest-num">2.2.0</b></span>
+      <span>最新版本 <b id="donate-latest-num">2.2.1</b></span>
       <a id="donate-get-latest" href="javascript:void(0)">获取</a>
     </div>
     <div class="donate-row">
@@ -235,8 +235,8 @@
 <script>
 // 版本号唯一来源：下面的赞赏弹窗和更新公告脚本都读这两个值，避免多处版本号不一致。
 // FOLIA_VERSION = 本 App 当前版本；FOLIA_LATEST_VERSION = 最新可下载版本。
-var FOLIA_VERSION = '2.2.0';
-var FOLIA_LATEST_VERSION = '2.2.0';
+var FOLIA_VERSION = '2.2.1';
+var FOLIA_LATEST_VERSION = '2.2.1';
 (function(){
   try {
     var p = new URLSearchParams(window.location.search);
@@ -280,8 +280,8 @@ var FOLIA_LATEST_VERSION = '2.2.0';
 <!-- ========== 版本更新公告（每个版本只弹一次） ========== -->
 <div id="update-mask" style="display:none;position:fixed;inset:0;z-index:2147483500;background:rgba(0,0,0,.62);backdrop-filter:blur(14px);align-items:center;justify-content:center;padding:20px">
   <div style="width:100%;max-width:340px;background:#fff;border-radius:22px;padding:24px 22px 18px;box-shadow:0 24px 60px rgba(0,0,0,.35);text-align:center;color:#111">
-    <div style="font-size:17px;font-weight:700;letter-spacing:.2px">🎉 Folia 2.2.0 新版本</div>
-    <p style="margin:14px 0 0;font-size:14px;line-height:1.7;color:#333">最新 <b style="color:#ff4d6d">2.2.0</b> 版本已发布，请及时下载！</p>
+    <div style="font-size:17px;font-weight:700;letter-spacing:.2px">🎉 Folia 2.2.1 新版本</div>
+    <p style="margin:14px 0 0;font-size:14px;line-height:1.7;color:#333">最新 <b style="color:#ff4d6d">2.2.1</b> 版本已发布，请及时下载！</p>
     <p style="margin:10px 0 0;font-size:12px;color:#999">点击下方按钮前往夸克网盘下载</p>
     <div style="margin-top:18px;display:flex;gap:10px">
       <button id="update-open-quark" style="flex:1;border:0;border-radius:999px;padding:11px 0;font-size:14px;font-weight:600;color:#fff;background:linear-gradient(135deg,#ff7e9d,#ff4d6d);cursor:pointer">立即更新</button>
@@ -291,8 +291,8 @@ var FOLIA_LATEST_VERSION = '2.2.0';
 </div>
 <script>
 (function () {
-  var LATEST = (typeof FOLIA_LATEST_VERSION === 'string' && FOLIA_LATEST_VERSION) || '2.2.0';
-  var CUR = (typeof FOLIA_VERSION === 'string' && FOLIA_VERSION) || '2.2.0';
+  var LATEST = (typeof FOLIA_LATEST_VERSION === 'string' && FOLIA_LATEST_VERSION) || '2.2.1';
+  var CUR = (typeof FOLIA_VERSION === 'string' && FOLIA_VERSION) || '2.2.1';
   if (CUR === LATEST) return;
 
   var KEY = 'folia.update.seen.' + LATEST;
