@@ -6913,12 +6913,17 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
     private var nativeQRTicks = 0
 
     private func startNativeQRPoll(token: String) {
-        nativeQRTimer?.invalidate()
-        nativeQRTimer = nil
-        nativeQRToken = token
-        nativeQRTicks = 0
-        CrashLog.note("==== qishui native poll started ====")
-        scheduleNativeQRPoll()
+        // timer/token 这些位只在主线程上动（schedule/stop 都被钉回主线程），
+        // 这里可能从 workQueue 被调到，同样回主线程，避免跨线程竞争。
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.nativeQRTimer?.invalidate()
+            self.nativeQRTimer = nil
+            self.nativeQRToken = token
+            self.nativeQRTicks = 0
+            CrashLog.note("==== qishui native poll started ====")
+            self.scheduleNativeQRPoll()
+        }
     }
 
     /// **一拍一排，而不是 `Timer(repeats: true)`。**
