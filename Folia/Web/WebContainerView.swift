@@ -37,6 +37,11 @@ final class WebContainerView: UIView {
     private var lastInsets: UIEdgeInsets = .zero
     /// 内容进程被回收的次数与时间窗，用来防止「重载→立刻再挂→再重载」的死循环。
     private var contentProcessRestarts: [Date] = []
+    /// in-place 重开后要补装的路由守卫（落脚点哈希）。
+    ///
+    /// 旧 WebView 出生时装的是「不钉」脚本，document-start 注入改不了它；
+    /// 只能在重开落地的 didFinish 时机用 evaluateJavaScript 补装。
+    private var pendingPinFragment: String?
     /// 首屏卡住后的自动重试时间窗，同样用来限流。
     private var stallRetries: [Date] = []
 
@@ -5519,6 +5524,19 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         installAudioKeeper()
         installLoginHelpers()
         scheduleHelpVersionPatch()
+        // **in-place 重开后的路由守卫在这里补装。**
+        //
+        // 旧 WebView 出生时装的是「不钉」脚本，进程死了又原地重开时，
+        // document-start 注入改不了既有的 userContentController 装载
+        // （会随每次 reload 叠加）。只能在文档落地的这一刻把守卫种进页面：
+        // SPA 的路由恢复发生在 React 挂载后（进程重启后至少几秒），
+        // didFinish 时机完全来得及压住它。
+        if let pin = pendingPinFragment {
+            pendingPinFragment = nil
+            let js = Self.pinnedLandingScript(pin)
+            webView.evaluateJavaScript(js, completionHandler: nil)
+            CrashLog.note("==== in-place pin guard armed (#\(pin)) ====")
+        }
         // 页面加载完补一次会话激活，覆盖「之前被来电/其他播放器降级」的情况。
         //
         // 播放中不碰：正在出声时 `setActive(true)` 会把 WebKit 的媒体元素按停一次，
@@ -5697,13 +5715,41 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
                 self.rebuildWebView(resumeAudio: false, cleanStore: false)
                 return
             }
-            if let url = Self.trustedSiteURL(webView.url)
+            // **in-place 重开也要摆脱死前的坏路由，且重开后补装守卫。**
+            //
+            // folia(14).log 14:24:22：第一次死亡在首页 `/`，in-place reload 后
+            // 页面从 localStorage 把路由恢复回歌单（14:24:26 死在
+            // `#collection/.../playlist/...`）—— 旧 WebView 出生时装的是
+            // 「不钉」脚本，document-start 注入改不了它，reload 之后 SPA 的
+            // 路由恢复照旧发生。结果就是：in-place 重开把用户一次次送回
+            // 撑死进程的那一屏，攒够两次才轮到熔断重建。
+            //
+            // 死前 URL 有哈希就退到播放器（和熔断的 stableFallback 同判据）；
+            // 死前在首页就只能留在首页 —— 首页本身的恢复只能靠重开后补装
+            // 的守卫压住：SPA 的路由恢复发生在 React 挂载之后（进程重启后
+            // 至少几秒），didFinish 时机补装完全来得及。
+            let deadURL = Self.trustedSiteURL(webView.url)
                 ?? Self.trustedSiteURL(self.lastVisibleURL)
-                ?? Self.trustedSiteURL(self.lastCommittedURL) {
+                ?? Self.trustedSiteURL(self.lastCommittedURL)
+            let pin: String?
+            if let dead = deadURL, let fallback = Self.stableFallback(from: dead) {
+                CrashLog.note("==== in-place reopen downgraded to \(fallback.absoluteString) ====")
+                pin = fallback.fragment
+                webView.load(URLRequest(url: fallback))
+            } else if let url = deadURL {
+                // 死在首页时 fragment 为 nil —— 但首页恰恰要钉「空哈希」：
+                // folia(14) 里 14:22:26 死在 `/`，重开后页面把路由恢复到歌单，
+                // 14:24:26 死在歌单路由。空串走 pinnedLandingScript 的
+                // 「钉空哈希」分支，守卫同样生效。
+                pin = url.fragment ?? ""
                 webView.load(URLRequest(url: url))
             } else {
+                pin = nil
                 webView.reload()
             }
+            guard let pin else { return }
+            // 守卫跟着这次重开走：页面一 didFinish 就装上，钉住落脚点 6 秒。
+            self.pendingPinFragment = pin
         }
         if ShellProfile.current == .aggressive {
             Self.setGLBlockCookie { reopen() }
@@ -7189,24 +7235,22 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
 
         let box = ResponseBox()
         let done = DispatchSemaphore(value: 0)
-        // **扫码轮询的请求必须短超时。**
+        // **所有汽水请求都要短超时。**
         //
-        // folia(13).log 13:19:52 / 13:20:22：两次 `native poll error, retrying`
-        // 间隔正好 30 秒 —— 轮询 3 秒一拍，但每拍请求要等 `semaphore.wait(30s)`
-        // 全额超时才放弃。用户在手机上点了确认之后，最快也要 30 秒才能轮询到
-        // confirmed（碰上网络挂起就是永远轮询不到）。会话 5 分钟过期，
-        // 30 秒一拍的轮询等于把整个登录窗口烧光。8 秒足够一次正常的
-        // check_qrconnect 往返；失败 3 秒后重试，重试本身就有容错。
-        if path == "/check_qrconnect/" {
-            request.timeoutInterval = 8
-        }
+        // folia(14).log 14:16:26：页面启动后第一发 `login_status` 挂满 30 秒，
+        // 登录 UI 直接卡死在「查询登录态」上 —— 后续的 login_qr_key /
+        // login_qr_create（出二维码那两步）一次都没发出来。folia(13) 里
+        // check_qrconnect 也一样挂 30 秒。汽水全部走这个函数，统一降到
+        // 10 秒：慢网下第一发可能失败，但页面会立刻拿到 network 错误并
+        // 走自己的重试/重渲染，而不是把用户晾在转圈上。
+        request.timeoutInterval = 10
         session.dataTask(with: request) { data, response, error in
             box.data = data
             box.response = response as? HTTPURLResponse
             box.error = error
             done.signal()
         }.resume()
-        _ = done.wait(timeout: .now() + (path == "/check_qrconnect/" ? 10 : 30))
+        _ = done.wait(timeout: .now() + 12)
         if let error = box.error {
             throw Failure(code: "network", message: error.localizedDescription,
                           upstream: (error as NSError).code.description)
