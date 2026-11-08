@@ -5640,15 +5640,21 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         let deathLoop = contentProcessRestarts.count >= 2
         contentProcessRestarts.append(now)
         if deathLoop {
-            CrashLog.note("==== death loop (2+ terminations in 60s), landing on home ====")
+            CrashLog.note("==== death loop (2+ terminations in 60s), rebuilding with clean store ====")
         }
-        // iPhone 画像：先把「15 分钟内禁 WebGL」写进 cookie，**写完再重开页面**。
-        // 页面侧 document-start 脚本从 cookie 读截止时间 —— 必须先写 cookie 后 load，
-        // 否则新文档拿到的是旧值。
+        // **死亡熔断不再「落地首页」：换干净存储重建 WebView。**
+        //
+        // folia(10).log（10:13:32~10:13:56）证明落地首页救不了：24 秒里死了 5 次，
+        // 落地首页后 2 秒内又死 —— 坏状态不在地址栏里，而在 **sessionStorage**
+        // （SPA 路由恢复用的 store 存 UI 进程侧，WebContent 死了不清除，重载后
+        // 页面读它把路由又恢复回歌单）。原地 load 只是让同一份坏状态再活一次。
+        // `rebuildWebView(cleanStore: true)` 换 `.nonPersistent()` 存储 + 新进程池，
+        // sessionStorage / 缓存全部清零，页面从零启动；`recoveringFromCrash`
+        // 保证这只影响本轮、成功加载后即恢复默认存储，不会带进下次启动。
         let reopen = { [weak self, weak webView] in
             guard let self = self, let webView = webView else { return }
             if deathLoop {
-                webView.load(URLRequest(url: Self.startURL))
+                self.rebuildWebView(resumeAudio: false, cleanStore: true)
                 return
             }
             if let url = Self.trustedSiteURL(webView.url)
@@ -6653,6 +6659,17 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
         pendingQR[token] = QRSession(token: token,
                                      image: image,
                                      expires: Date().addingTimeInterval(300))
+        // **原生自驱动轮询：页面死了也有人接住「已扫码确认」。**
+        //
+        // folia(10).log：整份日志只有 login_status，从头到尾没有一条
+        // `qr check state=...` —— 页面侧 qr key 存 JS 内存，WebContent 每 3~7 秒
+        // 死一次，key 随进程丢失，页面重启后不再轮询；扫码成功（服务端状态）
+        // 永远没人来问，`signedInKey` 永远不置位 —— 用户看到的就是
+        // 「另一台设备显示登录成功，Folia 没进去」。
+        // 现在壳自己按 3 秒一拍查这个 token，confirmed 时置位 + 收 cookie
+        // （UserDefaults / URLSession 仓都是持久的，不随页面进程死而丢）；
+        // 页面下一次 login_status 就能捡起登录态。
+        startNativeQRPoll(token: token)
         return ["key": token]
     }
 
@@ -6697,6 +6714,41 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
             throw Failure(code: "unavailable", message: "QR session expired")
         }
         return ["imageUrl": entry.image]
+    }
+
+    /// 原生自驱动的扫码轮询。页面侧（`login_qr_check`）照常可用，这里只是兜底：
+    /// WebContent 进程死亡循环时页面轮询断了流，由壳把它接回来。
+    private var nativeQRTimer: Timer?
+
+    private func startNativeQRPoll(token: String) {
+        nativeQRTimer?.invalidate()
+        let timer = Timer(timeInterval: 3, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let signedIn = UserDefaults.standard.bool(forKey: Self.signedInKey)
+            guard pendingQR[token] != nil, !signedIn else {
+                self.nativeQRTimer?.invalidate()
+                self.nativeQRTimer = nil
+                return
+            }
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                guard let self else { return }
+                // 页面同拍轮询时 `checkQR`（含去重的 waiting 日志）照旧；
+                // 原生自驱动这一路直接走 inner，避免双份日志。
+                guard let result = try? self.checkQRInner(key: token),
+                      let state = (result as? [String: Any])?["state"] as? String else { return }
+                if state == "confirmed" || state == "expired" || state == "scanned" {
+                    CrashLog.note("==== qishui native poll state=\(state) ====")
+                }
+                if state == "confirmed" || state == "expired" {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.nativeQRTimer?.invalidate()
+                        self?.nativeQRTimer = nil
+                    }
+                }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        nativeQRTimer = timer
     }
 
     /// 轮询观测层：check 的结果平时不进日志（太密），但状态变化必须可见 ——
