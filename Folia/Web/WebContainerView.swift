@@ -6,6 +6,7 @@ import AVFoundation
 import CoreImage
 import CryptoKit
 import UniformTypeIdentifiers
+import os
 
 /// 承载官方网页版的 WKWebView 容器。
 ///
@@ -284,6 +285,8 @@ final class WebContainerView: UIView {
     /// 系统内存告警。日志里有没有这一条，是区分「真的被内存顶死」和
     /// 「WebKit 自己崩」的关键证据：有告警 → 继续压内存；一条都没有 → 换方向。
     private var memoryWarningObservation: Any?
+    /// 内存水位遥测定时器（每 30 秒一条 `mem` 日志）。
+    private var memLogTimer: Timer?
 
     init(state: WebShellState) {
         self.state = state
@@ -709,6 +712,15 @@ final class WebContainerView: UIView {
                 self?.handleRemoteCommand(action)
             }
 
+        // 内存水位遥测：每 30 秒一条 `mem app=… avail=…`。
+        // WebContent 被回收的真正原因（jetsam 还是 WebKit 自崩）壳拿不到，
+        // 应用自身的 footprint 与系统剩余额度是唯一能拿到的旁证 ——
+        // 下一份日志里把死亡时间戳对上这条曲线，就能判断是不是内存顶死。
+        memLogTimer?.invalidate()
+        memLogTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in
+            CrashLog.note(Self.memoryLogLine())
+        }
+
         observeLifecycle()
         observeNetwork()
 
@@ -719,6 +731,23 @@ final class WebContainerView: UIView {
                 self?.recoverAudioPath(reason: "panel-closed")
                 self?.driveBackgroundVideo()
             }
+    }
+
+    /// 应用进程内存水位（phys_footprint）与系统剩余额度（os_proc_available_memory），单位 MB。
+    private static func memoryLogLine() -> String {
+        let availMB = Int(os_proc_available_memory() / 1048576)
+        var footprintMB = -1
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+        let kr = withUnsafeMutablePointer(to: &info) { infoPtr in
+            infoPtr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { intPtr in
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), intPtr, &count)
+            }
+        }
+        if kr == KERN_SUCCESS {
+            footprintMB = Int(info.phys_footprint / 1048576)
+        }
+        return "==== mem app=\(footprintMB)mb avail=\(availMB)mb ===="
     }
 
     /// 把当前 WebView 整个换掉：新配置、新存储、新进程池。
@@ -5577,11 +5606,29 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         didReachFirstPaint = false
         hasEvaluatedFirstPaint = false
         collectTerminationContext()
+        // **60 秒内死两次以上，重载落回首页，不再落回死前那一页。**
+        //
+        // 自救机器退役之后，如果某个页面本身就会把进程顶死（folia(8).log：
+        // gl=off 的情况下进歌单 3 秒内还是死），原地重载就是「死 → 回同一页 →
+        // 再死」的死循环。第二次往后的死亡直接落首页：登录、搜索、扫码都在
+        // 首页，App 保持可用；用户想再进那个页面可以自己再点。单次死亡
+        // （后台被系统回收这种一次性事件）不受影响，照常回原页。
+        let now = Date()
+        contentProcessRestarts = contentProcessRestarts.filter { now.timeIntervalSince($0) < 60 }
+        let deathLoop = contentProcessRestarts.count >= 2
+        contentProcessRestarts.append(now)
+        if deathLoop {
+            CrashLog.note("==== death loop (2+ terminations in 60s), landing on home ====")
+        }
         // iPhone 画像：先把「15 分钟内禁 WebGL」写进 cookie，**写完再重开页面**。
         // 页面侧 document-start 脚本从 cookie 读截止时间 —— 必须先写 cookie 后 load，
         // 否则新文档拿到的是旧值。
         let reopen = { [weak self, weak webView] in
             guard let self = self, let webView = webView else { return }
+            if deathLoop {
+                webView.load(URLRequest(url: Self.startURL))
+                return
+            }
             if let url = Self.trustedSiteURL(webView.url)
                 ?? Self.trustedSiteURL(self.lastVisibleURL)
                 ?? Self.trustedSiteURL(self.lastCommittedURL) {
@@ -6439,6 +6486,9 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
         let token: String
         let image: String
         let expires: Date
+        /// 观测用：这个 token 的轮询是否已经打过一条 waiting 日志（只打第一条，
+        /// 避免 2-3 秒一拍的轮询把日志刷爆）。
+        var loggedWaiting = false
     }
 
     private var pendingQR: [String: QRSession] = [:]
@@ -6627,7 +6677,22 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
         return ["imageUrl": entry.image]
     }
 
+    /// 轮询观测层：check 的结果平时不进日志（太密），但状态变化必须可见 ——
+    /// 「另一台设备显示登录成功，这边永远等待」这种现场，没有这条日志就分不出
+    /// 是「页面没在轮询」还是「轮询一直 waiting」。waiting 只打每个 token 的第一条。
     private func checkQR(key: String) throws -> Any {
+        let result = try checkQRInner(key: key)
+        let state = (result as? [String: Any])?["state"] as? String ?? "?"
+        if state != "waiting" {
+            CrashLog.note("==== qishui qr check state=\(state) ====")
+        } else if !(pendingQR[key]?.loggedWaiting ?? true) {
+            pendingQR[key]?.loggedWaiting = true
+            CrashLog.note("==== qishui qr check state=waiting (first) ====")
+        }
+        return result
+    }
+
+    private func checkQRInner(key: String) throws -> Any {
         guard let entry = pendingQR[key] else { return ["state": "expired"] }
         if Date() > entry.expires {
             pendingQR.removeValue(forKey: key)
@@ -7037,6 +7102,8 @@ private final class QishuiSigner {
     private var queue: [(id: String, url: String)] = []
     private var seq = 0
     private let lock = NSLock()
+    /// 空闲自毁定时器：签名器是一个独立的 WebContent 进程，不用时白占内存。
+    private var idleTimer: Timer?
 
     /// 给 `url` 补上 `a_bogus`，返回补齐后的完整 URL。
     ///
@@ -7061,6 +7128,7 @@ private final class QishuiSigner {
                 done.signal()
             }
             self.dispatch(id: id, url: url)
+            self.armIdleRetire()
         }
         if done.wait(timeout: .now() + 20) == .timedOut {
             throw SignError(message: "signer timeout")
@@ -7085,6 +7153,25 @@ private final class QishuiSigner {
     private func take(id: String) -> ((Result<String, SignError>) -> Void)? {
         lock.lock(); defer { lock.unlock() }
         return waiting.removeValue(forKey: id)
+    }
+
+    /// 120 秒没有新的签名请求就把签名 WebView 整个放掉。
+    ///
+    /// 签名器是第二个 WebContent 进程：SDK 页面挂在那儿哪怕完全不动，
+    /// 也常驻几十 MB。汽水的请求是突发性的（登录那几下、搜歌那几下），
+    /// 空闲时段占着毫无意义；下一次 `sign()` 会按需重建（几百毫秒的 SDK 装载）。
+    /// 定时器在每次签名发出时重置，所以它不可能在请求还在飞行时触发
+    /// （签名同步等待最多 20 秒，远小于 120 秒）。
+    private func armIdleRetire() {
+        idleTimer?.invalidate()
+        idleTimer = Timer.scheduledTimer(withTimeInterval: 120, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.webView = nil
+            self.loaded = false
+            self.booted = false
+            self.idleTimer = nil
+            CrashLog.note("==== qishui signer retired after 120s idle ====")
+        }
     }
 
     /// 建 WebView 并加载本地页面。只做一次。
