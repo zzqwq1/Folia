@@ -397,10 +397,10 @@ final class WebContainerView: UIView {
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
-        // 基础实例不钉路由（`nil`）：页面自己切到哪一屏是页面的自由。
-        // 只有 `rebuildWebView` 重建时才把落脚点钉死，见那条注入了 fragment 的调用。
+        // 基础实例（普通冷启动）不钉路由：页面自己切到哪一屏是页面的自由。
+        // 只有 `rebuildWebView` 重建时才把落脚点钉死（见 rebuildWebView 里的注入）。
         userContent.addUserScript(WKUserScript(
-            source: Self.pinnedLandingScript(nil),
+            source: Self.pinnedLandingScriptDisabled(),
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
@@ -1108,7 +1108,7 @@ final class WebContainerView: UIView {
                                      timeoutInterval: 30))
         }
         if burst {
-            CrashLog.note("==== death burst: purging indexeddb before reopen ====")
+            CrashLog.note("==== death burst: purging indexeddb before reopen (terminations=\(Self.recentTerminations.count)) ====")
             view.configuration.websiteDataStore.removeData(
                 ofTypes: [WKWebsiteDataTypeIndexedDBDatabases],
                 modifiedSince: .distantPast
@@ -1119,6 +1119,13 @@ final class WebContainerView: UIView {
             }
         } else {
             open()
+        }
+        // **这一轮死亡连击到此为止：账本清零，下一段安静期重新数。**
+        //
+        // 不清的话，「60 秒内死 2 次」的账会一直挂着，下次任何一次正常重建
+        // （比如看门狗误判）都会再触发一遍 IndexedDB 清洗。
+        if Self.recentTerminations.count >= 2 {
+            Self.recentTerminations.removeAll()
         }
         startPageHeartbeat()
         scheduleProgressWatchdog()
@@ -5658,6 +5665,21 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         contentProcessRestarts = contentProcessRestarts.filter { now.timeIntervalSince($0) < 60 }
         let deathLoop = contentProcessRestarts.count >= 2
         contentProcessRestarts.append(now)
+        // **跨实例的死亡账本要在这里记。**
+        //
+        // folia(13).log 的现场：13:20:41 → 13:20:47 → 13:20:50 连死三次，
+        // 前两次 `reloading in place`（不换实例），第三次才走死亡熔断重建。
+        // 而 `installRebuiltWebView` 里的 `death burst: purging indexeddb`
+        // 读的是 `Self.recentTerminations` —— 这个数组**从来没有人写入过**，
+        // 所以永远为空、`burst` 永远为假、IndexedDB 永远不会被清。
+        // 结果就是：重建落脚明明是 `/`，页面启动后照旧从 IndexedDB 的
+        // `last_song` / 队列缓存把路由恢复回歌单，再死一次。
+        // 这里把时刻按全局账本记一份（60 秒窗口，与 contentProcessRestarts 同判据），
+        // 重建那边才数得出「这一轮到底连死几次」。
+        Self.recentTerminations = Self.recentTerminations.filter {
+            now.timeIntervalSince($0) < 60
+        }
+        Self.recentTerminations.append(now)
         if deathLoop {
             CrashLog.note("==== death loop (2+ terminations in 60s), rebuilding (persistent store kept) ====")
         }
@@ -6116,36 +6138,59 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
     /// 页面在启动的头几秒把持久化过的路由恢复了回去，而那一屏正是把进程顶死的那一屏。
     /// 原生层把落脚点算得再准，只要页面能自己改回去就白算。
     static func pinnedLandingScript(_ fragment: String?) -> String {
-        guard let fragment, !fragment.isEmpty else {
-            return """
-            (function(){ try { window.__foliaPinnedRoute = ''; } catch (e) {} })();
-            """
+        // **落脚点「没有哈希」也要钉**：钉的是「空 hash」，不是「什么都不钉」。
+        //
+        // folia(13).log 13:20:50：重建落脚 `https://app.folia-api.top/`（无哈希），
+        // 13:20:52 死亡地址又变回 `#collection/online/netease/playlist/14400331811`。
+        // 上一版这里对 nil 直接返回空脚本 —— 死亡熔断重建恰恰多数落在无哈希首页，
+        // 于是「钉路由」在最需要它的场景下完全不生效。
+        // 普通冷启动才允许真的「什么都不钉」（传 Optional.none 之外的哨兵做不到，
+        // 所以用单独的 `pinnedLandingScript(enabled:)`）。
+        let want: String
+        if let fragment, !fragment.isEmpty {
+            let escaped = fragment
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+            want = "#\(escaped)"
+        } else {
+            want = ""
         }
-        let escaped = fragment
+        let escapedWant = want
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
         return """
         (function(){
-          var want = "#\(escaped)";
+          var want = "\(escapedWant)";
           try { window.__foliaPinnedRoute = want; } catch (e) {}
-          var done = false;
+          var deadline = Date.now() + 6000;
           function pin(){
             try {
-              if (done) { return; }
-              if (location.hash === want) { done = true; return; }
-              history.replaceState(history.state, '', location.pathname + location.search + want);
+              if (Date.now() > deadline) { return; }
+              if (location.hash === want) { return; }
+              history.replaceState(history.state, '', location.pathname + location.search + (want || location.hash));
             } catch (e) {}
           }
           pin();
-          // React 挂载前后各复查几拍：页面的路由恢复通常在首屏脚本跑完后才发生。
-          var left = 20;
+          // **复查窗口 6 秒，不带 done 标记。**
+          //
+          // 上一版的 `done`（hash 一旦等于 want 就停）在最常见的场景下是反的：
+          // 页面的路由恢复是「先落在壳钉的地址上、几秒后 SPA 再把它改走」，
+          // done 一置位就再也守不住。改为整个启动窗口内持续钉，
+          // 代价只是启动头 6 秒里用户点不进别的路由 —— 闪退现场这 6 秒
+          // 本来就是加载期，用户点什么都在等。
           var timer = setInterval(function(){
             pin();
-            left -= 1;
-            if (done || left <= 0) { clearInterval(timer); }
-          }, 150);
+            if (Date.now() > deadline) { clearInterval(timer); }
+          }, 200);
           try { window.addEventListener('load', pin); } catch (e) {}
         })();
+        """
+    }
+
+    /// 普通冷启动用：真的什么都不钉，页面路由完全自由。
+    static func pinnedLandingScriptDisabled() -> String {
+        """
+        (function(){ try { window.__foliaPinnedRoute = ''; } catch (e) {} })();
         """
     }
 
@@ -6875,10 +6920,22 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
                     // 发现登录成功。这里主动触发一次存储事件，页面侧的
                     // qishui shim 监听到后立刻重查登录态、收尾进主界面。
                     if state == "confirmed", let view = self.webView {
-                        let js = """
-                        try { localStorage.setItem('folia_qishui_signed_in', String(Date.now())); } catch (e) {}
-                        """
-                        view.evaluateJavaScript(js, completionHandler: nil)
+                        // **确认后用 reload 收尾，而不是写 localStorage。**
+                        //
+                        // 之前的方案是 `localStorage.setItem('folia_qishui_signed_in', …)`，
+                        // 指望页面侧监听 storage 事件 —— 但 WebKit 里同页面的
+                        // storage 写入根本不触发本页的 storage 事件（那只跨文档），
+                        // 页面侧也从未装过任何读这个 key 的逻辑，等于纯空转。
+                        // 页面此刻停在「等待扫码」界面，它自己的轮询早被
+                        // login_qr_cancel 断了，没有任何事件会把它拉出来。
+                        //
+                        // reload 是最朴素也最可靠的收尾：页面重启时第一件事
+                        // 就是 `login_status`，壳这边 signedInKey 已置位、
+                        // `login_status` 会回 `currentUser()`（合法形状），
+                        // 登录收尾由页面自己的启动流程完成。cookie 若已拿到
+                        // 也随 importCookies 进了 WebView 存储，一并生效。
+                        CrashLog.note("==== qishui confirmed: reloading page to finish login ====")
+                        view.reload()
                     }
                     return
                 }
@@ -7132,13 +7189,24 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
 
         let box = ResponseBox()
         let done = DispatchSemaphore(value: 0)
+        // **扫码轮询的请求必须短超时。**
+        //
+        // folia(13).log 13:19:52 / 13:20:22：两次 `native poll error, retrying`
+        // 间隔正好 30 秒 —— 轮询 3 秒一拍，但每拍请求要等 `semaphore.wait(30s)`
+        // 全额超时才放弃。用户在手机上点了确认之后，最快也要 30 秒才能轮询到
+        // confirmed（碰上网络挂起就是永远轮询不到）。会话 5 分钟过期，
+        // 30 秒一拍的轮询等于把整个登录窗口烧光。8 秒足够一次正常的
+        // check_qrconnect 往返；失败 3 秒后重试，重试本身就有容错。
+        if path == "/check_qrconnect/" {
+            request.timeoutInterval = 8
+        }
         session.dataTask(with: request) { data, response, error in
             box.data = data
             box.response = response as? HTTPURLResponse
             box.error = error
             done.signal()
         }.resume()
-        _ = done.wait(timeout: .now() + 30)
+        _ = done.wait(timeout: .now() + (path == "/check_qrconnect/" ? 10 : 30))
         if let error = box.error {
             throw Failure(code: "network", message: error.localizedDescription,
                           upstream: (error as NSError).code.description)
