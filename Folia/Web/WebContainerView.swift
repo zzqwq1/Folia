@@ -5577,16 +5577,23 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         didReachFirstPaint = false
         hasEvaluatedFirstPaint = false
         collectTerminationContext()
-        if ShellProfile.current == .aggressive {
-            UserDefaults.standard.set(Date().timeIntervalSince1970 + 900, forKey: Self.webglOffUntilKey)
-            CrashLog.note("==== webgl off for 15 minutes (after termination) ====")
+        // iPhone 画像：先把「15 分钟内禁 WebGL」写进 cookie，**写完再重开页面**。
+        // 页面侧 document-start 脚本从 cookie 读截止时间 —— 必须先写 cookie 后 load，
+        // 否则新文档拿到的是旧值。
+        let reopen = { [weak self, weak webView] in
+            guard let self = self, let webView = webView else { return }
+            if let url = Self.trustedSiteURL(webView.url)
+                ?? Self.trustedSiteURL(self.lastVisibleURL)
+                ?? Self.trustedSiteURL(self.lastCommittedURL) {
+                webView.load(URLRequest(url: url))
+            } else {
+                webView.reload()
+            }
         }
-        if let url = Self.trustedSiteURL(webView.url)
-            ?? Self.trustedSiteURL(lastVisibleURL)
-            ?? Self.trustedSiteURL(lastCommittedURL) {
-            webView.load(URLRequest(url: url))
+        if ShellProfile.current == .aggressive {
+            Self.setGLBlockCookie { reopen() }
         } else {
-            webView.reload()
+            reopen()
         }
     }
 
@@ -5677,8 +5684,31 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         CrashLog.note("==== route banned for \(Int(routeBanSeconds))s: #\(fragment) ====")
     }
 
-    /// 「崩溃后先关 WebGL」的截止时间（Unix 秒）。iPhone 包专用。
-    private static let webglOffUntilKey = "folia.shell.webglOffUntil"
+    /// 「崩溃后先关 WebGL」的截止时间，存 cookie（毫秒时间戳，页面侧用 `Date.now()` 比）。
+    /// iPhone 包专用。用 cookie 而不是把它烤进 document-start 用户脚本：
+    /// 用户脚本在 WebView 创建时就定型了，进程被回收后只是对同一实例 load 新地址，
+    /// 脚本不会重新生成 —— 烤进去的值永远是启动那一刻的状态（folia(7).log 实锤：
+    /// `webgl off for 15 minutes` 打出来之后，页面侧仍然 `armed ... gl=on`）。
+    /// cookie 走 `httpCookieStore`，跨文档生效，且保证在新文档的启动脚本运行前就位。
+    private static let glOffCookieName = "folia_gl_off_until"
+
+    private static func setGLBlockCookie(completion: @escaping () -> Void) {
+        let untilMs = Int(Date().timeIntervalSince1970 * 1000) + 15 * 60 * 1000
+        guard let cookie = HTTPCookie(properties: [
+            .domain: "." + siteHost,
+            .path: "/",
+            .name: glOffCookieName,
+            .value: String(untilMs),
+            .expires: Date().addingTimeInterval(960),
+        ]) else {
+            completion()
+            return
+        }
+        WKWebsiteDataStore.default().httpCookieStore.setCookie(cookie) {
+            CrashLog.note("==== webgl off for 15 minutes (cookie set) ====")
+            completion()
+        }
+    }
 
     /// 两种壳画像，编译期决定（同一个 workflow 打两次包）。
     ///
@@ -5727,9 +5757,6 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
             ? "{'visualizer_frame_rate':'60','visualizer_background_mode':'common','disable_home_dynamic_background':'true','disable_visualizer_vignette':'true','disable_visualizer_geometric_background':'true','visualizer_glow_blur_quantize':'true'}"
             : "{}"
         let profileName = aggressive ? "iphone" : "ipad"
-        // 被回收过一次 → 15 分钟内不再建 GL 上下文（见 `webViewWebContentProcessDidTerminate`）。
-        let glOffUntil = UserDefaults.standard.double(forKey: Self.webglOffUntilKey)
-        let glBlocked = aggressive && Date().timeIntervalSince1970 < glOffUntil
         return """
         (function () {
             'use strict';
@@ -5758,7 +5785,21 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
             // 建的那块 GL 画布。参考包 IOS-Folia-3.0.4 的实测记录也是「关掉 WebGL 后
             // 回收次数为 0」。所以被回收过一次之后先关 15 分钟，保住可用性；
             // 窗口过了自动恢复，不会像上一版那样把歌词样式永久吃掉。
-            var GL_BLOCKED = \(glBlocked ? "true" : "false");
+            // **每次文档启动时从 cookie 现读截止时间。**
+            // cookie 由壳在进程被回收时写入（见 setGLBlockCookie），15 分钟内新建文档
+            // 都会拿到它。
+            var GL_BLOCKED = false;
+            try {
+                var cookieParts = (document.cookie || '').split(';');
+                for (var ci = 0; ci < cookieParts.length; ci++) {
+                    var eq = cookieParts[ci].indexOf('=');
+                    if (eq < 0) { continue; }
+                    if (cookieParts[ci].slice(0, eq).trim() === 'folia_gl_off_until') {
+                        GL_BLOCKED = Date.now() < parseInt(cookieParts[ci].slice(eq + 1), 10);
+                        break;
+                    }
+                }
+            } catch (e) {}
             if (GL_BLOCKED) {
                 try {
                     var rawBlockedGetContext = HTMLCanvasElement.prototype.getContext;
