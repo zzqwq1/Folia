@@ -5754,8 +5754,16 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
             // 守卫跟着这次重开走：页面一 didFinish 就装上，钉住落脚点 6 秒。
             self.pendingPinFragment = pin
         }
+        // **熔断走 relief 档 cookie（GL 关 2h + 降压），普通死亡仍走 15 分钟档。**
+        //
+        // folia(15).log：`gl=off` 下首页 DOM 持续增长仍被 jetsam 三连杀 ——
+        // 死亡已经连击成串，光关 GL 救不回来，必须整页再降一档。
         if ShellProfile.current == .aggressive {
-            Self.setGLBlockCookie { reopen() }
+            if deathLoop {
+                Self.setGLReliefCookies { reopen() }
+            } else {
+                Self.setGLBlockCookie { reopen() }
+            }
         } else {
             reopen()
         }
@@ -5857,19 +5865,49 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
     private static let glOffCookieName = "folia_gl_off_until"
 
     private static func setGLBlockCookie(completion: @escaping () -> Void) {
-        let untilMs = Int(Date().timeIntervalSince1970 * 1000) + 15 * 60 * 1000
+        setGLBlockCookie(until: Date().addingTimeInterval(15 * 60), completion: completion)
+    }
+
+    /// 死亡熔断（60 秒内连死 2+）后写的那一档：GL 关得更久，并让页面进入
+    /// 「封面帽 96 + 回收脱离文档图片」的降压档。cookie 半衰同窗口。
+    ///
+    /// folia(15).log 的现场：登录后停在首页（`url=/`，`gl=off`），DOM 522→727
+    /// 持续增长，3 秒连死三次 → 熔断清 IndexedDB → 重开首页。`gl=off` 下首页
+    /// 仍然被 jetsam，说明这台低端机上 15 分钟窗口 + caps=120 不够 ——
+    /// 熔断这一档把窗口拉到 2 小时，并叠加 relief 档让页面整体更省。
+    private static let glReliefCookieName = "folia_relief_until"
+
+    private static func setGLReliefCookies(completion: @escaping () -> Void) {
+        let until = Date().addingTimeInterval(2 * 60 * 60)
+        setGLBlockCookie(until: until) {
+            guard let cookie = HTTPCookie(properties: [
+                .domain: "." + siteHost,
+                .path: "/",
+                .name: glReliefCookieName,
+                .value: String(Int(until.timeIntervalSince1970 * 1000)),
+                .expires: until,
+            ]) else { completion(); return }
+            WKWebsiteDataStore.default().httpCookieStore.setCookie(cookie) {
+                CrashLog.note("==== relief mode armed for 2h (caps=96 img reclaim on) ====")
+                completion()
+            }
+        }
+    }
+
+    private static func setGLBlockCookie(until deadline: Date, completion: @escaping () -> Void) {
+        let untilMs = Int(deadline.timeIntervalSince1970 * 1000)
         guard let cookie = HTTPCookie(properties: [
             .domain: "." + siteHost,
             .path: "/",
             .name: glOffCookieName,
             .value: String(untilMs),
-            .expires: Date().addingTimeInterval(960),
+            .expires: deadline.addingTimeInterval(60),
         ]) else {
             completion()
             return
         }
         WKWebsiteDataStore.default().httpCookieStore.setCookie(cookie) {
-            CrashLog.note("==== webgl off for 15 minutes (cookie set) ====")
+            CrashLog.note("==== webgl off until \(deadline) (cookie set) ====")
             completion()
         }
     }
@@ -5953,14 +5991,18 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
             // cookie 由壳在进程被回收时写入（见 setGLBlockCookie），15 分钟内新建文档
             // 都会拿到它。
             var GL_BLOCKED = false;
+            var RELIEF = false;
             try {
                 var cookieParts = (document.cookie || '').split(';');
                 for (var ci = 0; ci < cookieParts.length; ci++) {
                     var eq = cookieParts[ci].indexOf('=');
                     if (eq < 0) { continue; }
-                    if (cookieParts[ci].slice(0, eq).trim() === 'folia_gl_off_until') {
-                        GL_BLOCKED = Date.now() < parseInt(cookieParts[ci].slice(eq + 1), 10);
-                        break;
+                    var cname = cookieParts[ci].slice(0, eq).trim();
+                    var cval = parseInt(cookieParts[ci].slice(eq + 1), 10);
+                    if (cname === 'folia_gl_off_until') {
+                        if (Date.now() < cval) { GL_BLOCKED = true; }
+                    } else if (cname === 'folia_relief_until') {
+                        if (Date.now() < cval) { RELIEF = true; }
                     }
                 }
             } catch (e) {}
@@ -6045,6 +6087,12 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
             // 改 URL 就换尺寸，不需要站点配合。重路由（歌单 / 拼贴墙）压到 \(heavyCap)，
             // 其它页面压到 320。
             var capFor = function () {
+                // **relief 档：帽子整体再压一档。**
+                //
+                // folia(15).log：普通档（重路由 120 / 其它 320）+ gl=off 下，
+                // 首页 DOM 仍持续增长到被 jetsam。熔断后的两小时里把帽子降到
+                // 96 / 160，观感略糊但保命；窗口过了自动回普通档。
+                if (RELIEF) { return 96; }
                 var h = String(location.hash || '');
                 if (h.indexOf('collection') >= 0 || h.indexOf('lattice') >= 0) { return \(heavyCap); }
                 return 320;
@@ -6150,9 +6198,27 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
                         if (!img.getAttribute('decoding')) { img.setAttribute('decoding', 'async'); }
                         if (!img.getAttribute('loading')) { img.setAttribute('loading', 'lazy'); }
                     }
+                    // **relief 档：回收已脱离文档的图片。**
+                    //
+                    // SPA 换路由时旧屏的 <img> 节点被 React 摘掉，但 JS 引用
+                    // （组件闭包 / 缓存数组）还挂着，解码后的位图进不了 GC。
+                    // 离屏图 `src` 置 1px 占位，WebKit 随之释放原位图；
+                    // 回到文档里的不动。仅 relief 窗口内启用，正常档零成本。
+                    if (RELIEF) {
+                        var reclaimed = 0;
+                        for (var k = 0; k < imgs.length; k += 1) {
+                            var rimg = imgs[k];
+                            if (rimg.isConnected || !rimg.getAttribute('src')) { continue; }
+                            if (rimg.getAttribute('data-folia-relief') === '1') { continue; }
+                            rimg.setAttribute('data-folia-relief', '1');
+                            try { rimg.src = 'data:image/gif;base64,R0lGODlhAQABAAAAACw='; } catch (e) {}
+                            reclaimed += 1;
+                        }
+                        if (reclaimed) { report('relief reclaimed=' + reclaimed); }
+                    }
                 } catch (e) {}
             }, 5000);
-            report('armed profile=\(profileName) dpr=\(dpr) caps=' + capFor() + ' mode=user gl=' + (GL_BLOCKED ? 'off' : 'on'));
+            report('armed profile=\(profileName) dpr=\(dpr) caps=' + capFor() + ' mode=user gl=' + (GL_BLOCKED ? 'off' : 'on') + (RELIEF ? ' relief=on' : ''));
         })();
         """
     }

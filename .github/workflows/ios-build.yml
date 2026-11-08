@@ -1,4 +1,4 @@
-name: Build unsigned IPA
+﻿name: Build unsigned IPA
 
 on:
   push:
@@ -149,31 +149,31 @@ jobs:
             /usr/libexec/PlistBuddy -c "Print :CFBundleIcons~ipad:CFBundlePrimaryIcon:CFBundleIconFiles" Payload/Folia.app/Info.plist
             test -n "$(strings Payload/Folia.app/Folia | grep -F 'https://app.folia-api.top/' || true)"
           }
-          wrap build-iphone "iPhone-Folia-2.1.5"
-          wrap build-ipad "iPad-Folia-2.1.5"
+          wrap build-iphone "iPhone-Folia-2.2.0"
+          wrap build-ipad "iPad-Folia-2.2.0"
 
       - name: Upload iPhone IPA
         uses: actions/upload-artifact@v4
         with:
-          name: iPhone-Folia-2.1.5-ipa
-          path: build-iphone/Build/Products/Release-iphoneos/iPhone-Folia-2.1.5.ipa
+          name: iPhone-Folia-2.2.0-ipa
+          path: build-iphone/Build/Products/Release-iphoneos/iPhone-Folia-2.2.0.ipa
           if-no-files-found: error
 
       - name: Upload iPad IPA
         uses: actions/upload-artifact@v4
         with:
-          name: iPad-Folia-2.1.5-ipa
-          path: build-ipad/Build/Products/Release-iphoneos/iPad-Folia-2.1.5.ipa
+          name: iPad-Folia-2.2.0-ipa
+          path: build-ipad/Build/Products/Release-iphoneos/iPad-Folia-2.2.0.ipa
           if-no-files-found: error
 
       - name: Publish IPAs to branch
         run: |
-          cp build-iphone/Build/Products/Release-iphoneos/iPhone-Folia-2.1.5.ipa "$GITHUB_WORKSPACE/iPhone-Folia-2.1.5.ipa"
-          cp build-ipad/Build/Products/Release-iphoneos/iPad-Folia-2.1.5.ipa "$GITHUB_WORKSPACE/iPad-Folia-2.1.5.ipa"
+          cp build-iphone/Build/Products/Release-iphoneos/iPhone-Folia-2.2.0.ipa "$GITHUB_WORKSPACE/iPhone-Folia-2.2.0.ipa"
+          cp build-ipad/Build/Products/Release-iphoneos/iPad-Folia-2.2.0.ipa "$GITHUB_WORKSPACE/iPad-Folia-2.2.0.ipa"
           cd "$GITHUB_WORKSPACE"
           git checkout --orphan ipa-tmp
           git rm -rq --cached . || true
-          git add -f iPhone-Folia-2.1.5.ipa iPad-Folia-2.1.5.ipa
+          git add -f iPhone-Folia-2.2.0.ipa iPad-Folia-2.2.0.ipa
           git -c user.name=ci-bot -c user.email=ci-bot@users.noreply.github.com \
             commit -q -m "ipa: ${GITHUB_SHA}"
           git push -q -f origin ipa-tmp:ipa
