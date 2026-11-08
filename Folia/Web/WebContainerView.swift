@@ -397,6 +397,13 @@ final class WebContainerView: UIView {
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
+        // 基础实例不钉路由（`nil`）：页面自己切到哪一屏是页面的自由。
+        // 只有 `rebuildWebView` 重建时才把落脚点钉死，见那条注入了 fragment 的调用。
+        userContent.addUserScript(WKUserScript(
+            source: Self.pinnedLandingScript(nil),
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
         // 刚把进程顶死过的深链：短时间内由页面侧拦截，别再让它自动跳回去。
         let routeGuard = Self.routeGuardScript()
         if !routeGuard.isEmpty {
@@ -967,6 +974,17 @@ final class WebContainerView: UIView {
             Self.forgetVisibleRoute(history)
         }
         CrashLog.note("==== landing sources: committed=\(lastCommittedURL?.absoluteString ?? "-") visible=\(lastVisibleURL?.absoluteString ?? "-") dead=\(deadLandingURL?.absoluteString ?? "-") → \(landing.absoluteString) ====")
+        // **重建的落脚点必须是「壳说了算」。**
+        //
+        // 计算出来的 `landing` 只是壳想打开的那一屏；页面在启动头几秒会把
+        // 持久化过的路由恢复回去（folia(12).log：12:48:51 重建打开的是 `/`，
+        // 12:48:55 死亡地址又变回同一个歌单）。所以把这一屏直接编进 document-start
+        // 脚本钉住，而不是指望页面老实待着。
+        config.userContentController.addUserScript(WKUserScript(
+            source: Self.pinnedLandingScript(landing.fragment),
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
         deadLandingURL = nil
 
         didReachFirstPaint = false
@@ -6087,6 +6105,50 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         return ""
     }
 
+    /// 把「这一次启动壳要落在哪一屏」钉进 `location.hash`。
+    ///
+    /// 只钉**启动那一刻**：`fragment` 为 nil 时脚本什么都不做，页面自己切路由
+    /// 照旧。传进来的那一屏一定经过 `rebuildWebView` 的降级计算（死路由已剔除），
+    /// 所以钉住它不会把用户送回刚顶死进程的歌单。
+    ///
+    /// 为什么需要它：`folia(12).log` 12:48:51 壳是带着 `/` 重建的，12:48:55 的
+    /// 死亡地址却已经变回 `#collection/online/netease/playlist/14400331811` ——
+    /// 页面在启动的头几秒把持久化过的路由恢复了回去，而那一屏正是把进程顶死的那一屏。
+    /// 原生层把落脚点算得再准，只要页面能自己改回去就白算。
+    static func pinnedLandingScript(_ fragment: String?) -> String {
+        guard let fragment, !fragment.isEmpty else {
+            return """
+            (function(){ try { window.__foliaPinnedRoute = ''; } catch (e) {} })();
+            """
+        }
+        let escaped = fragment
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return """
+        (function(){
+          var want = "#\(escaped)";
+          try { window.__foliaPinnedRoute = want; } catch (e) {}
+          var done = false;
+          function pin(){
+            try {
+              if (done) { return; }
+              if (location.hash === want) { done = true; return; }
+              history.replaceState(history.state, '', location.pathname + location.search + want);
+            } catch (e) {}
+          }
+          pin();
+          // React 挂载前后各复查几拍：页面的路由恢复通常在首屏脚本跑完后才发生。
+          var left = 20;
+          var timer = setInterval(function(){
+            pin();
+            left -= 1;
+            if (done || left <= 0) { clearInterval(timer); }
+          }, 150);
+          try { window.addEventListener('load', pin); } catch (e) {}
+        })();
+        """
+    }
+
     /// 退役前 routeGuardScript 的完整实现，保留参考但不再被调用。
     /// （函数体原样保留在仓库历史里，线上不再注入这段脚本。）
     private static func routeGuardScriptLegacy() -> String {
@@ -6610,6 +6672,14 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
             // 扫码会话反正 5 分钟自动过期，这里只记日志、不删，
             // 让壳的轮询一直跑到 confirmed / expired 为止。
             CrashLog.note("==== qishui login_qr_cancel ignored (keep polling) ====")
+            // 取消指令只当噪音，但**必须保证自驱动轮询还在跑**：
+            // 页面要么带着 key 来（那就绑到这条会话），要么干脆不带
+            //（那就续上手上唯一那条未结算的会话）。
+            let key = (params["key"] as? String).flatMap { pendingQR[$0] != nil ? $0 : nil }
+                ?? pendingQR.keys.first
+            if let key, nativeQRToken != key {
+                startNativeQRPoll(token: key)
+            }
             return NSNull()
         case "search": return ["items": [], "hasMore": false, "nextOffset": 0]
         case "login_status":
@@ -6632,6 +6702,7 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
             return NSNull()
         case "logout":
             pendingQR.removeAll()
+            stopNativeQRPoll(reason: "logout")
             UserDefaults.standard.removeObject(forKey: Self.signedInKey)
             return NSNull()
         default:
@@ -6729,53 +6800,106 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
     /// WebContent 进程死亡循环时页面轮询断了流，由壳把它接回来。
     private var nativeQRTimer: Timer?
 
+    /// 轮询用的一次性定时器拍数（每拍 3 秒）。每拍都重新排一发，
+    /// 不依赖「发出去的那一发回调一定会回来」。
+    private var nativeQRToken: String?
+    private var nativeQRTicks = 0
+
     private func startNativeQRPoll(token: String) {
         nativeQRTimer?.invalidate()
-        let timer = Timer(timeInterval: 3, repeats: true) { [weak self] _ in
+        nativeQRTimer = nil
+        nativeQRToken = token
+        nativeQRTicks = 0
+        CrashLog.note("==== qishui native poll started ====")
+        scheduleNativeQRPoll()
+    }
+
+    /// **一拍一排，而不是 `Timer(repeats: true)`。**
+    ///
+    /// folia(12).log 的现场：12:46:45 最后一拍 `native poll state=scanned`，
+    /// 之后 2 分半钟再无任何 `native poll`，直到进程重启。`login_qr_cancel`
+    /// 已经被忽略、会话也还在 `pendingQR` 里，唯一剩下的可能是重复定时器
+    /// 在某一拍之后不再触发（投递到的 runloop / 进程状态一变就静默失效，
+    /// 而 `nativeQRTimer` 仍非 nil，之后没有任何人再把它拉起来）。
+    /// 改成每拍结束都重新 `asyncAfter` 排下一发：只要会话在，
+    /// 序列就会一直自续，任何单拍丢失都能在 3 秒后自愈。
+    private func scheduleNativeQRPoll() {
+        nativeQRTimer?.invalidate()
+        let timer = Timer(timeInterval: 3, repeats: false) { [weak self] _ in
+            self?.nativeQRPollTick()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        nativeQRTimer = timer
+    }
+
+    private func stopNativeQRPoll(reason: String) {
+        nativeQRTimer?.invalidate()
+        nativeQRTimer = nil
+        nativeQRToken = nil
+        nativeQRTicks = 0
+        CrashLog.note("==== qishui native poll stopped (\(reason)) ====")
+    }
+
+    private func nativeQRPollTick() {
+        guard let token = nativeQRToken else { return }
+        let signedIn = UserDefaults.standard.bool(forKey: Self.signedInKey)
+        guard pendingQR[token] != nil, !signedIn else {
+            stopNativeQRPoll(reason: signedIn ? "signed-in" : "session-gone")
+            return
+        }
+        nativeQRTicks += 1
+        DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
-            let signedIn = UserDefaults.standard.bool(forKey: Self.signedInKey)
-            guard pendingQR[token] != nil, !signedIn else {
-                self.nativeQRTimer?.invalidate()
-                self.nativeQRTimer = nil
-                return
-            }
-            DispatchQueue.global(qos: .utility).async { [weak self] in
+            // 页面同拍轮询时 `checkQR`（含去重的 waiting 日志）照旧；
+            // 原生自驱动这一路直接走 inner，避免双份日志。
+            let result = try? self.checkQRInner(key: token)
+            let state = (result as? [String: Any])?["state"] as? String
+            DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                // 页面同拍轮询时 `checkQR`（含去重的 waiting 日志）照旧；
-                // 原生自驱动这一路直接走 inner，避免双份日志。
-                guard let result = try? self.checkQRInner(key: token),
-                      let state = (result as? [String: Any])?["state"] as? String else { return }
+                // 失败也照常续下一拍：`scanned` 到 `confirmed` 之间任何一次
+                // 网络抖动都不该把整条轮询带走（会话 5 分钟才过期）。
+                guard let state else {
+                    CrashLog.note("==== qishui native poll error, retrying ====")
+                    self.scheduleNativeQRPoll()
+                    return
+                }
                 if state == "confirmed" || state == "expired" || state == "scanned" {
                     CrashLog.note("==== qishui native poll state=\(state) ====")
                 }
                 if state == "confirmed" || state == "expired" {
-                    DispatchQueue.main.async { [weak self] in
-                        self?.nativeQRTimer?.invalidate()
-                        self?.nativeQRTimer = nil
-                        // **确认登录后立刻把页面从「等待扫码」界面里拉出来。**
-                        //
-                        // 页面自己的轮询已经被取消指令断了流；如果不通知它，
-                        // 它要等下一次 login_status（往往是重启 / 闪退之后）才能
-                        // 发现登录成功。这里主动触发一次存储事件，页面侧的
-                        // qishui shim 监听到后立刻重查登录态、收尾进主界面。
-                        if state == "confirmed", let view = self?.webView {
-                            let js = """
-                            try { localStorage.setItem('folia_qishui_signed_in', String(Date.now())); } catch (e) {}
-                            """
-                            view.evaluateJavaScript(js, completionHandler: nil)
-                        }
+                    self.stopNativeQRPoll(reason: state)
+                    // **确认登录后立刻把页面从「等待扫码」界面里拉出来。**
+                    //
+                    // 页面自己的轮询已经被取消指令断了流；如果不通知它，
+                    // 它要等下一次 login_status（往往是重启 / 闪退之后）才能
+                    // 发现登录成功。这里主动触发一次存储事件，页面侧的
+                    // qishui shim 监听到后立刻重查登录态、收尾进主界面。
+                    if state == "confirmed", let view = self.webView {
+                        let js = """
+                        try { localStorage.setItem('folia_qishui_signed_in', String(Date.now())); } catch (e) {}
+                        """
+                        view.evaluateJavaScript(js, completionHandler: nil)
                     }
+                    return
                 }
+                self.scheduleNativeQRPoll()
             }
         }
-        RunLoop.main.add(timer, forMode: .common)
-        nativeQRTimer = timer
     }
 
     /// 轮询观测层：check 的结果平时不进日志（太密），但状态变化必须可见 ——
     /// 「另一台设备显示登录成功，这边永远等待」这种现场，没有这条日志就分不出
     /// 是「页面没在轮询」还是「轮询一直 waiting」。waiting 只打每个 token 的第一条。
     private func checkQR(key: String) throws -> Any {
+        // **页面只要还在问，就说明会话还活着 —— 顺手把原生自驱动接回来。**
+        //
+        // folia(12).log：`login_qr_cancel` 之后页面的轮询断了，壳这边的轮询也
+        // 在同一次操作里没了声。谁先停的分布清，那就别赌：页面每问一次
+        // `login_qr_check`，壳就确保自驱动轮询在线。页面停了没关系，壳还在问；
+        // 页面在问就更不影响（两条轮询都只是读同一个 token 的状态）。
+        if nativeQRToken != token, pendingQR[token] != nil {
+            startNativeQRPoll(token: token)
+        }
         let result = try checkQRInner(key: key)
         let state = (result as? [String: Any])?["state"] as? String ?? "?"
         if state != "waiting" {
