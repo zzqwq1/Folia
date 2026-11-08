@@ -422,6 +422,9 @@ final class WebContainerView: UIView {
         userContent.add(qishuiRelay, name: "foliaQishui")
         // 注册原生播放器桥
         NativePlayer.shared.webView = nil
+        // 原生播放器自己只动 AVPlayer，完全不碰壳的意图系统：用户走 cmd=pause 时
+        // `userPaused` 永不置真，进后台后保活按 `wantsAudible=true` 把歌放回去。
+        NativePlayer.shared.container = self
         userContent.add(NativePlayer.shared, name: "foliaPlayer")
         config.userContentController = userContent
         return config
@@ -2511,6 +2514,15 @@ final class WebContainerView: UIView {
         // 再走探测。不补的话 `recoverAudioPath` 顶层守卫会把整条恢复链拦掉，
         // 而保活已经是唯一还在跑的恢复路径了。
         if !wantsAudible {
+            // **用户亲手按过暂停，绝不把「该响」再立起来。**
+            //
+            // folia(6).log 16:09:45 用户按暂停（`paused by user (page button)`，
+            // `userPaused=true`、`wantsAudible=false`），16:09:50 一进后台，
+            // 恢复链走到这里时 `userPaused` 还在（顶层 `guard !userPaused` 看的是它），
+            // 而下面的 `resumeAudio` 没有再看一次 —— 于是页面已经停住、
+            // 原生播放器（AVPlayer，独立进程）却被页面的 play 入口重新叫醒，
+            // 用户听到的就是「暂停后退出后台，歌又自己放起来」。
+            guard !userPaused else { return }
             wantsAudible = true
             AudioSessionController.shared.updatePlaybackState(true)
             CrashLog.note("==== audible intent restored (\(reason)) ====")
@@ -3332,6 +3344,14 @@ final class WebContainerView: UIView {
     private var lastResumeAttempt: Date?
 
     private func resumeAudio(reason: String) {
+        // **用户已经亲手收手，谁都别再把歌放回去。**
+        //
+        // 调用方里 `recoverAudioPathPass` 与保活的守卫都看了 `userPaused`，
+        // 但进后台那条链（`enforcePlaybackIfNeeded(reason: "background")` → 这里）
+        // 中间的 `!wantsAudible` 分支会在 `userPaused=true` 时直接放行；
+        // 而原生 AVPlayer 独立于 WebContent 进程在放，页面一次 play 入口
+        // 就足以把它叫醒 —— 这是「暂停后退出后台继续播放」的最后一道缝。
+        guard !userPaused else { return }
         // **节流：6 秒内最多补放一次。**
         //
         // `resumeAudio` 现在真的能调起页面播放了（之前 `__foliaMediaCommand`

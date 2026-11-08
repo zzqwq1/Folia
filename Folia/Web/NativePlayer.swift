@@ -42,6 +42,12 @@ final class NativePlayer: NSObject, WKScriptMessageHandler {
 
     /// 弱引用webView，用于回调JS
     weak var webView: WKWebView?
+    /// 弱引用容器：原生播放器只动 AVPlayer，壳的「用户已收手」意图必须由它同步。
+    ///
+    /// 没有这条时，用户走 cmd=pause 暂停之后 `WebContainerView.userPaused` 永不置真，
+    /// 进后台时保活按 `wantsAudible=true` 把歌重新放起来 ——
+    /// 用户听到的就是「暂停后退出后台，歌又自己唱」。
+    weak var container: WebContainerView?
 
     override init() {
         super.init()
@@ -181,12 +187,14 @@ final class NativePlayer: NSObject, WKScriptMessageHandler {
     private func handlePlay() {
         player?.play()
         isPlaying = true
+        container?.markAudibleIntent()
         sendEvent(type: "state", playing: true)
     }
 
     private func handlePause() {
         player?.pause()
         isPlaying = false
+        container?.markPausedIntent(reason: "native-pause")
         sendEvent(type: "state", playing: false)
     }
 
