@@ -6679,6 +6679,14 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
 
     private var pendingQR: [String: QRSession] = [:]
 
+    /// **汽水全部工作串行化。**
+    ///
+    /// `perform` / `nativeQRPollTick` 都碰 `pendingQR`（Swift Dictionary 并发修改
+    /// 直接崩），而页面可以同时发多个 `qishuiRequest`（启动那几拍
+    /// `login_status` 与 `login_qr_key` 就是重叠的），原生轮询又插一脚。
+    /// 全部收敛到这一条串行队列：天然互斥，不用给每次字典访问加锁。
+    private let workQueue = DispatchQueue(label: "folia.qishui", qos: .userInitiated)
+
     weak var webView: WKWebView?
 
     private let session: URLSession = {
@@ -6712,7 +6720,10 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
         let params = body["params"] as? [String: Any] ?? [:]
         // 每次调用都必须回一条结果。页面侧抛异常时整个 Promise 永久挂起，
         // 界面上就是「点了没反应」，所以这里不能有静默 return。
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        // **串行队列替代并发队列**：perform 里要读写 pendingQR，与原生轮询、
+        // 并发的多个页面调用互斥才安全（Dictionary 并发写是崩溃，不是告警）。
+        // userInitiated 的 QoS 不变，只是不再并行。
+        self.workQueue.async { [weak self] in
             guard let self else { return }
             // 诊断：页面到底在要哪些接口。没有这行，日志里只有「登录成功」，
             // 完全看不出「进不去」卡在哪一步。轮询的 check 太密，排除掉。
@@ -6919,79 +6930,89 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
     /// 而 `nativeQRTimer` 仍非 nil，之后没有任何人再把它拉起来）。
     /// 改成每拍结束都重新 `asyncAfter` 排下一发：只要会话在，
     /// 序列就会一直自续，任何单拍丢失都能在 3 秒后自愈。
+    ///
+    /// **`RunLoop` 只能在持有它的线程上操作。** 这里曾从后台线程被调到
+    /// （`DispatchQueue.global` 的回调里直接 `scheduleNativeQRPoll`），
+    /// 跨线程 `RunLoop.main.add` 不保证生效 —— 轮询就是从这里静默断流的。
+    /// 定时器一律回主线程排；网络那部分则进 `workQueue`。
     private func scheduleNativeQRPoll() {
-        nativeQRTimer?.invalidate()
-        let timer = Timer(timeInterval: 3, repeats: false) { [weak self] _ in
-            self?.nativeQRPollTick()
+        let schedule: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.nativeQRTimer?.invalidate()
+            let timer = Timer(timeInterval: 3, repeats: false) { [weak self] _ in
+                self?.nativeQRPollTick()
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            self.nativeQRTimer = timer
         }
-        RunLoop.main.add(timer, forMode: .common)
-        nativeQRTimer = timer
+        if Thread.isMainThread { schedule() } else { DispatchQueue.main.async(execute: schedule) }
     }
 
     private func stopNativeQRPoll(reason: String) {
-        nativeQRTimer?.invalidate()
-        nativeQRTimer = nil
-        nativeQRToken = nil
-        nativeQRTicks = 0
-        CrashLog.note("==== qishui native poll stopped (\(reason)) ====")
+        let stop: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.nativeQRTimer?.invalidate()
+            self.nativeQRTimer = nil
+            self.nativeQRToken = nil
+            self.nativeQRTicks = 0
+            CrashLog.note("==== qishui native poll stopped (\(reason)) ====")
+        }
+        if Thread.isMainThread { stop() } else { DispatchQueue.main.async(execute: stop) }
     }
 
     private func nativeQRPollTick() {
-        guard let token = nativeQRToken else { return }
-        let signedIn = UserDefaults.standard.bool(forKey: Self.signedInKey)
-        guard pendingQR[token] != nil, !signedIn else {
-            stopNativeQRPoll(reason: signedIn ? "signed-in" : "session-gone")
-            return
-        }
-        nativeQRTicks += 1
-        DispatchQueue.global(qos: .utility).async { [weak self] in
+        workQueue.async { [weak self] in
             guard let self else { return }
+            guard let token = self.nativeQRToken else { return }
+            let signedIn = UserDefaults.standard.bool(forKey: Self.signedInKey)
+            guard self.pendingQR[token] != nil, !signedIn else {
+                self.stopNativeQRPoll(reason: signedIn ? "signed-in" : "session-gone")
+                return
+            }
+            self.nativeQRTicks += 1
             // 页面同拍轮询时 `checkQR`（含去重的 waiting 日志）照旧；
             // 原生自驱动这一路直接走 inner，避免双份日志。
             let result = try? self.checkQRInner(key: token)
             let state = (result as? [String: Any])?["state"] as? String
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                // 失败也照常续下一拍：`scanned` 到 `confirmed` 之间任何一次
-                // 网络抖动都不该把整条轮询带走（会话 5 分钟才过期）。
-                guard let state else {
-                    CrashLog.note("==== qishui native poll error, retrying ====")
-                    self.scheduleNativeQRPoll()
-                    return
-                }
-                if state == "confirmed" || state == "expired" || state == "scanned" {
-                    CrashLog.note("==== qishui native poll state=\(state) ====")
-                }
-                if state == "confirmed" || state == "expired" {
-                    self.stopNativeQRPoll(reason: state)
-                    // **确认登录后立刻把页面从「等待扫码」界面里拉出来。**
-                    //
-                    // 页面自己的轮询已经被取消指令断了流；如果不通知它，
-                    // 它要等下一次 login_status（往往是重启 / 闪退之后）才能
-                    // 发现登录成功。这里主动触发一次存储事件，页面侧的
-                    // qishui shim 监听到后立刻重查登录态、收尾进主界面。
-                    if state == "confirmed", let view = self.webView {
-                        // **确认后用 reload 收尾，而不是写 localStorage。**
-                        //
-                        // 之前的方案是 `localStorage.setItem('folia_qishui_signed_in', …)`，
-                        // 指望页面侧监听 storage 事件 —— 但 WebKit 里同页面的
-                        // storage 写入根本不触发本页的 storage 事件（那只跨文档），
-                        // 页面侧也从未装过任何读这个 key 的逻辑，等于纯空转。
-                        // 页面此刻停在「等待扫码」界面，它自己的轮询早被
-                        // login_qr_cancel 断了，没有任何事件会把它拉出来。
-                        //
-                        // reload 是最朴素也最可靠的收尾：页面重启时第一件事
-                        // 就是 `login_status`，壳这边 signedInKey 已置位、
-                        // `login_status` 会回 `currentUser()`（合法形状），
-                        // 登录收尾由页面自己的启动流程完成。cookie 若已拿到
-                        // 也随 importCookies 进了 WebView 存储，一并生效。
-                        CrashLog.note("==== qishui confirmed: reloading page to finish login ====")
-                        view.reload()
-                    }
-                    return
-                }
+            // 失败也照常续下一拍：`scanned` 到 `confirmed` 之间任何一次
+            // 网络抖动都不该把整条轮询带走（会话 5 分钟才过期）。
+            guard let state else {
+                CrashLog.note("==== qishui native poll error, retrying ====")
                 self.scheduleNativeQRPoll()
+                return
             }
+            if state == "confirmed" || state == "expired" || state == "scanned" {
+                CrashLog.note("==== qishui native poll state=\(state) ====")
+            }
+            if state == "confirmed" || state == "expired" {
+                self.stopNativeQRPoll(reason: state)
+                // **确认登录后立刻把页面从「等待扫码」界面里拉出来。**
+                //
+                // 页面自己的轮询已经被取消指令断了流；如果不通知它，
+                // 它要等下一次 login_status（往往是重启 / 闪退之后）才能
+                // 发现登录成功。这里主动触发一次存储事件，页面侧的
+                // qishui shim 监听到后立刻重查登录态、收尾进主界面。
+                if state == "confirmed", let view = self.webView {
+                    // **确认后用 reload 收尾，而不是写 localStorage。**
+                    //
+                    // 之前的方案是 `localStorage.setItem('folia_qishui_signed_in', …)`，
+                    // 指望页面侧监听 storage 事件 —— 但 WebKit 里同页面的
+                    // storage 写入根本不触发本页的 storage 事件（那只跨文档），
+                    // 页面侧也从未装过任何读这个 key 的逻辑，等于纯空转。
+                    // 页面此刻停在「等待扫码」界面，它自己的轮询早被
+                    // login_qr_cancel 断了，没有任何事件会把它拉出来。
+                    //
+                    // reload 是最朴素也最可靠的收尾：页面重启时第一件事
+                    // 就是 `login_status`，壳这边 signedInKey 已置位、
+                    // `login_status` 会回 `currentUser()`（合法形状），
+                    // 登录收尾由页面自己的启动流程完成。cookie 若已拿到
+                    // 也随 importCookies 进了 WebView 存储，一并生效。
+                    CrashLog.note("==== qishui confirmed: reloading page to finish login ====")
+                    DispatchQueue.main.async { view.reload() }
+                }
+                return
+            }
+            self.scheduleNativeQRPoll()
         }
     }
 
