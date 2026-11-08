@@ -6897,8 +6897,8 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
         // 在同一次操作里没了声。谁先停的分布清，那就别赌：页面每问一次
         // `login_qr_check`，壳就确保自驱动轮询在线。页面停了没关系，壳还在问；
         // 页面在问就更不影响（两条轮询都只是读同一个 token 的状态）。
-        if nativeQRToken != token, pendingQR[token] != nil {
-            startNativeQRPoll(token: token)
+        if nativeQRToken != key, pendingQR[key] != nil {
+            startNativeQRPoll(token: key)
         }
         let result = try checkQRInner(key: key)
         let state = (result as? [String: Any])?["state"] as? String ?? "?"
