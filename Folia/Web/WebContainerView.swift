@@ -2110,7 +2110,8 @@ final class WebContainerView: UIView {
     // MARK: - 后台保活
 
     /// 页面调过 play，且用户没有亲手暂停 —— 这就是「该有声」。
-    fileprivate func markAudibleIntent() {
+    /// NativePlayer 原生播放器在收到 cmd=play 时也会走这里同步意图。
+    func markAudibleIntent() {
         // **用户亲手按了播放，这一轮「离开过 App」的账就到此为止。**
         //
         // 早先刻意不清它，理由是「离开过是事实」。但事实已经用完 —— 用户现在的
@@ -2158,7 +2159,8 @@ final class WebContainerView: UIView {
     /// - Parameter reason: 非 nil 表示这条暂停是**原生自己发起的**（锁屏 / 耳机 /
     ///   控制中心的远程命令），不需要再问页面二次确认 —— 用户明确按了按钮，
     ///   页面自报的 `intent-pause` 只是回执。页面自发上报时传 nil，走原来的确认链。
-    fileprivate func markPausedIntent(reason: String? = nil) {
+    ///   NativePlayer 收到 cmd=pause 时也会走这里同步意图（reason="native-pause"）。
+    func markPausedIntent(reason: String? = nil) {
         guard UIApplication.shared.applicationState == .active else { return }
         // 刚进后台、正被别家 App 抢占的那一拍：页面收到的 pause 是系统掐的，不是用户收手。
         //
