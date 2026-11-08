@@ -5712,6 +5712,9 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         let reopen = { [weak self, weak webView] in
             guard let self = self, let webView = webView else { return }
             if deathLoop {
+                // 熔断走重建：新实例的钉路由走 document-start 注入
+                // （见 rebuildWebView），这里挂着的旧守卫指令一并作废。
+                self.pendingPinFragment = nil
                 self.rebuildWebView(resumeAudio: false, cleanStore: false)
                 return
             }
@@ -6213,7 +6216,9 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
             try {
               if (Date.now() > deadline) { return; }
               if (location.hash === want) { return; }
-              history.replaceState(history.state, '', location.pathname + location.search + (want || location.hash));
+              // 直接用 want（含空串）：`want || location.hash` 在 want 为空串时
+              // 会取回旧哈希，replaceState 变成无操作，「钉空哈希」就废了。
+              history.replaceState(history.state, '', location.pathname + location.search + want);
             } catch (e) {}
           }
           pin();
@@ -7171,6 +7176,12 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
         request.setValue("https://www.qishui.com/", forHTTPHeaderField: "Origin")
         request.setValue("https://www.qishui.com/", forHTTPHeaderField: "Referer")
 
+        // **GET 路也要短超时（login_status / login_qr_key / login_qr_create 都走这里）。**
+        //
+        // folia(14).log 14:16:26：页面启动第一发 `login_status` 挂满 30 秒，
+        // 登录 UI 卡死在「查询登录态」，出码两步一次都没发出。上一轮只改了
+        // signedPost，漏了这条 —— 而 login_status 恰恰是 GET。
+        request.timeoutInterval = 10
         let box = ResponseBox()
         let done = DispatchSemaphore(value: 0)
         session.dataTask(with: request) { data, response, error in
@@ -7179,7 +7190,7 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
             box.error = error
             done.signal()
         }.resume()
-        if done.wait(timeout: .now() + 30) == .timedOut {
+        if done.wait(timeout: .now() + 12) == .timedOut {
             throw Failure(code: "network", message: "Qishui service could not be reached")
         }
         if box.error != nil {
