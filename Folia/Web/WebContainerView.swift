@@ -1318,7 +1318,8 @@ final class WebContainerView: UIView {
                     return
                 }
                 CrashLog.note("==== foreground wake: reload did not paint, rebuilding ====")
-                self.rebuildWebView(resumeAudio: resume, cleanStore: true)
+                // 持久存储：换新实例已足够清掉坏状态，不能把登录态也清了。
+                self.rebuildWebView(resumeAudio: resume, cleanStore: false)
             }
             return
         }
@@ -5640,21 +5641,20 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         let deathLoop = contentProcessRestarts.count >= 2
         contentProcessRestarts.append(now)
         if deathLoop {
-            CrashLog.note("==== death loop (2+ terminations in 60s), rebuilding with clean store ====")
+            CrashLog.note("==== death loop (2+ terminations in 60s), rebuilding (persistent store kept) ====")
         }
-        // **死亡熔断不再「落地首页」：换干净存储重建 WebView。**
+        // **死亡熔断重建用默认持久存储，绝不再用 `.nonPersistent()`。**
         //
-        // folia(10).log（10:13:32~10:13:56）证明落地首页救不了：24 秒里死了 5 次，
-        // 落地首页后 2 秒内又死 —— 坏状态不在地址栏里，而在 **sessionStorage**
-        // （SPA 路由恢复用的 store 存 UI 进程侧，WebContent 死了不清除，重载后
-        // 页面读它把路由又恢复回歌单）。原地 load 只是让同一份坏状态再活一次。
-        // `rebuildWebView(cleanStore: true)` 换 `.nonPersistent()` 存储 + 新进程池，
-        // sessionStorage / 缓存全部清零，页面从零启动；`recoveringFromCrash`
-        // 保证这只影响本轮、成功加载后即恢复默认存储，不会带进下次启动。
+        // folia(11).log 的现场：`rebuilding with clean store` 之后用户登录态、
+        // 音源、设置全部消失 —— nonPersistent 存储把 localStorage 一起清了，
+        // 用户看到「闪退一次就恢复出厂」。而它要解决的坏状态（SPA 路由恢复用的
+        // sessionStorage）本来就挂在 WebView 实例上：换新实例 = 换新
+        // WebContent 进程 = sessionStorage 天然清零，根本不需要动持久存储。
+        // cookie / localStorage 全保留，新页面照常读到登录态。
         let reopen = { [weak self, weak webView] in
             guard let self = self, let webView = webView else { return }
             if deathLoop {
-                self.rebuildWebView(resumeAudio: false, cleanStore: true)
+                self.rebuildWebView(resumeAudio: false, cleanStore: false)
                 return
             }
             if let url = Self.trustedSiteURL(webView.url)
@@ -6600,7 +6600,16 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
         case "login_qr_create": return try qrImage(key: string(params["key"]))
         case "login_qr_check": return try checkQR(key: string(params["key"]))
         case "login_qr_cancel":
-            pendingQR.removeValue(forKey: string(params["key"]))
+            // **「取消」不再真的删除二维码会话。**
+            //
+            // folia(11).log 11:57:26~11:57:27：原生轮询刚查到 `scanned`
+            //（用户已扫码、正等另一台设备点确认），下一拍页面就发了
+            // `login_qr_cancel` —— 页面侧扫码 UI 的取消计时和轮询节奏对不上，
+            // 会话一删，壳的轮询立刻停（`pendingQR[token] == nil`），
+            // `confirmed` 永远等不到，用户在手机上点了确认也白点。
+            // 扫码会话反正 5 分钟自动过期，这里只记日志、不删，
+            // 让壳的轮询一直跑到 confirmed / expired 为止。
+            CrashLog.note("==== qishui login_qr_cancel ignored (keep polling) ====")
             return NSNull()
         case "search": return ["items": [], "hasMore": false, "nextOffset": 0]
         case "login_status":
@@ -6743,6 +6752,18 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
                     DispatchQueue.main.async { [weak self] in
                         self?.nativeQRTimer?.invalidate()
                         self?.nativeQRTimer = nil
+                        // **确认登录后立刻把页面从「等待扫码」界面里拉出来。**
+                        //
+                        // 页面自己的轮询已经被取消指令断了流；如果不通知它，
+                        // 它要等下一次 login_status（往往是重启 / 闪退之后）才能
+                        // 发现登录成功。这里主动触发一次存储事件，页面侧的
+                        // qishui shim 监听到后立刻重查登录态、收尾进主界面。
+                        if state == "confirmed", let view = self?.webView {
+                            let js = """
+                            try { localStorage.setItem('folia_qishui_signed_in', String(Date.now())); } catch (e) {}
+                            """
+                            view.evaluateJavaScript(js, completionHandler: nil)
+                        }
                     }
                 }
             }
