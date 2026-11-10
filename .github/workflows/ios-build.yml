@@ -1,4 +1,4 @@
-﻿﻿name: Build unsigned IPA
+name: Build unsigned IPA
 
 on:
   push:
