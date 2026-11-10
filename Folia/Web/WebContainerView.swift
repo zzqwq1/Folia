@@ -340,6 +340,9 @@ final class WebContainerView: UIView {
         guard !reliefTickInFlight, UIApplication.shared.applicationState == .active else { return }
         guard Date().timeIntervalSince(lastReliefTickAt) >= 20 else { return }
         guard let container = webView else { return }
+        // 回落会把屏幕外的封面换成 1px 占位，下一帧就换回原图，滚动时用户会看见闪一下。
+        // 正在滚动就不做，等手指抬起后的下一拍（节拍 5 秒，最多晚 5 秒）。
+        guard !(container.scrollView.isDragging || container.scrollView.isDecelerating) else { return }
 
         reliefTickInFlight = true
         lastReliefTickAt = Date()
@@ -1500,8 +1503,8 @@ final class WebContainerView: UIView {
             //
             // 进程被回收后，`webView.url` 仍残留着死前那个地址，但那个文档已经不在
             // 任何进程里了。`reload()` 只对「当前进程里已有文档」有效，这一拍调它
-            // 等于什么都没做 —— 日志里的 `reload in place skipped (page alive)
-            // (repeat-death)` 之后页面一直停在加载界面，就是它。
+            // 等于什么都没做 —— 日志里的 `reload in place skipped (page alive)`
+            // `(repeat-death)` 之后页面一直停在加载界面，就是它。
             // 显式 `load` 同一地址是唯一能真正把文档重新拉起来的做法。
             webView.load(URLRequest(url: current,
                                     cachePolicy: .useProtocolCachePolicy,
@@ -5658,6 +5661,16 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         let code = (error as NSError).code
         // -999 是「被新导航取消」，属正常流程。
         guard code != NSURLErrorCancelled else { return }
+        // 用户点了外站链接（抖音 / 短链 / App Store）导致的主框架导航失败，
+        // 和「我们的线上站不可用」是两件事：不能计入连续失败数，
+        // 更不能因此把正在出声的播放器重载成离线副本。
+        // `failedURL` 可能为空（DNS 都没走到），那就按老规矩算本站失败 ——
+        // 冷启动首帧失败时 `webView.url` 也还是空的，不能因此漏判。
+        let failedURL = (error as NSError).userInfo[NSURLErrorFailingURLErrorKey] as? URL
+        if let failing = failedURL, Self.trustedSiteURL(failing) == nil {
+            CrashLog.note("==== external provisional navigation failed \(code) (not counted) ====")
+            return
+        }
         // 从离线副本切线上失败：留在本地页上继续用，别让后面的重试/回退
         // 把正在出声的播放器重载掉。
         if pendingOnlineHandoff {
@@ -5736,8 +5749,20 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
     /// 用户看到的是纯黑或半截页面，点哪儿都没反应，也没有任何重试入口。
     /// 这里补一条导航级失败通道，界面至少能给出可点的「重试」。
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        guard webView === self.webView else { return }
         let code = (error as NSError).code
         guard code != NSURLErrorCancelled else { return }
+        // **用户自己点链接离开本站的失败不算「线上不可用」。**
+        //
+        // 抖音之类的应用把用户带回来时，WKWebView 会在这里接着加载对方的地址；
+        // 那个地址打不开（App 没装、被拦、短链过期）时同样走到这里，
+        // 于是界面上会盖一条「页面加载失败」，而用户看的明明是自己的首页。
+        // 只对本站主框架计失败数。
+        let failedURL = (error as NSError).userInfo[NSURLErrorFailingURLErrorKey] as? URL
+        if let failing = failedURL, Self.trustedSiteURL(failing) == nil {
+            CrashLog.note("==== external navigation failed \(code) (not counted) ====")
+            return
+        }
         CrashLog.note("==== navigation failed \(code) \(error.localizedDescription) ====")
         state.noteLoadFailure(code)
     }
@@ -6254,13 +6279,19 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
                 }
             } catch (e) {}
             // 兜底：走 `setAttribute('style', ...)` / innerHTML 铺进来的背景图。
-            // 每 15 秒一轮，只处理还带着 param= 的元素（被改写过的不再命中）。
+            // 只处理还带着 param= 的元素（被改写过的不再命中）。
+            // **每 5 秒一轮。**
+            //
+            // 这一轮干的是「补回被原生回落收掉的封面」，而回落本身每 20 秒一次。
+            // 早先这里是 15 秒一跳（`% 3` 限定在 15 秒），于是原生刚把封面换成 1px，
+            // 用户往回翻要等最多 15 秒才换回来 —— 看到的就是一片空白。
+            // 5 秒一跳：回落最多把它收掉 5 秒，正常滚动时原生根本不动手（见
+            // `runForegroundReliefTick` 里的滚动守卫）。
             var styleScanTick = 0;
             setInterval(function () {
                 styleScanTick += 1;
-                if (styleScanTick % 3 !== 0) { return; }
                 try {
-                    // **心跳**：每 15 秒报一次页面规模，进程死之前的最后一条就是现场。
+                    // **心跳**：每 5 秒报一次页面规模，进程死之前的最后一条就是现场。
                     report('hb dom=' + document.getElementsByTagName('*').length
                         + ' img=' + document.images.length
                         + ' cv=' + document.getElementsByTagName('canvas').length
@@ -6274,6 +6305,14 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
                     var parked = document.querySelectorAll('img[data-folia-park="1"]');
                     for (var p = 0; p < parked.length; p += 1) {
                         var pimg = parked[p];
+                        // **先判是否脱离文档。**
+                        // 原生回落会把「所有不在视口内」的图都换成 1px 占位，
+                        // 其中包含大量已经不在文档里的节点（SPA 换路由时被 React 摘掉、
+                        // 但组件闭包还引用着的列表项）。对它们调 getBoundingClientRect
+                        // 一律返回 0/0，原来的判断因此恒成立，于是把原地址又写回去 ——
+                        // 图片重新拉起请求与解码，回落等于白做。脱离文档的直接跳过，
+                        // 留着占位等它被彻底释放。
+                        if (!pimg.isConnected) { continue; }
                         var pr = pimg.getBoundingClientRect();
                         if (pr.bottom < -400 || pr.top > (window.innerHeight + 400)) { continue; }
                         var orig = pimg.getAttribute('data-folia-park-src');
