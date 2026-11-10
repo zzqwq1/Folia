@@ -377,8 +377,10 @@ final class WebContainerView: UIView {
                 if pass <= 2 || pass % 10 == 0 {
                     CrashLog.note("==== fg relief pass \(pass) \(info) memcache purged ====")
                 }
-                let pid = container.value(forKey: "processIdentifier") as? Int ?? -1
-                CrashLog.note("==== fg mem web=\(pid) \(Self.memoryLogLine()) ====")
+                // 注意：不能用 `container.value(forKey: "processIdentifier")` ——
+                // `WKWebView` 对该键不是 KVC-compliant，会抛 NSUnknownKeyException
+                // （folia(17) 的闪退现场）。只记应用自身 footprint。
+                CrashLog.note("==== fg mem \(Self.memoryLogLine()) ====")
             }
         }
         container.evaluateJavaScript(js) { result, _ in
