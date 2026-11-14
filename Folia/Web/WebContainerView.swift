@@ -321,6 +321,8 @@ final class WebContainerView: UIView {
     private var reliefTickInFlight = false
     private var lastReliefTickAt: Date = .distantPast
     private var reliefPasses = 0
+    /// `folia_relief_until` 的截止时刻（每拍从 cookie 刷新，进歌单降档用）。
+    private var reliefDeadline: Date = .distantPast
     /// 内存水位遥测的节拍（每 30 秒一条）。
     private var memLogTicks = 0
 
@@ -338,7 +340,16 @@ final class WebContainerView: UIView {
     private func runForegroundReliefTick() {
         guard ShellProfile.current == .aggressive else { return }
         guard !reliefTickInFlight, UIApplication.shared.applicationState == .active else { return }
-        guard Date().timeIntervalSince(lastReliefTickAt) >= 20 else { return }
+        // **relief 窗口内节拍加密到 ~5 秒。**
+        //
+        // folia(18) 的现场：进程终止前最后一次心跳是 `dom=1021`（进歌单那一拍，
+        // 上一拍还是 534），而终止恰在 `PLAY AUDIO AbortError` 之后 —— WebContent
+        // 是被 jetsam 的，恶化窗口就落在两次回落之间那 20 秒里。
+        // 熔断后的两小时本来就是「保命优先」，回落一次只有几百毫秒的 JS，
+        // 加密之后把「涨上去的那几秒」从 20 秒缩到 5 秒。
+        let inRelief = Date() < reliefDeadline
+        let interval: TimeInterval = inRelief ? 5 : 20
+        guard Date().timeIntervalSince(lastReliefTickAt) >= interval else { return }
         guard let container = webView else { return }
         // 回落会把屏幕外的封面换成 1px 占位，下一帧就换回原图，滚动时用户会看见闪一下。
         // 正在滚动就不做，等手指抬起后的下一拍（节拍 5 秒，最多晚 5 秒）。
@@ -366,28 +377,108 @@ final class WebContainerView: UIView {
               try { img.src = 'data:image/gif;base64,R0lGODlhAQABAAAAACw='; } catch (e) {}
               dropped += 1;
             }
-            return n + '/' + dropped + '/' + document.getElementsByTagName('*').length;
+            // **重路由（歌单 / 拼贴墙）额外清一层。**
+            //
+            // 这两屏一次铺几百张列表封面。`document.images` 只覆盖还挂在文档里的
+            // `<img>`，站点大量用 CSS 背景图（`background-image: url(...param=...)`）
+            // 铺封面，它们解码后同样占位图缓存 —— 而那个缓存就是 WebContent 被
+            // jetsam 的主因。屏幕外的背景图改成 `none`，等它回到视口由页面的
+            // 5 秒补回逻辑重新写回（与 `<img>` 的回落同一套）。
+            var h = String(location.hash || '');
+            var heavy = h.indexOf('collection') >= 0 || h.indexOf('lattice') >= 0;
+            if (heavy) {
+              var all = document.getElementsByTagName('*');
+              for (var e = 0; e < all.length; e += 1) {
+                var el = all[e];
+                if (!el.isConnected) { continue; }
+                var bg = el.getAttribute('data-folia-bg');
+                if (!bg) {
+                  var st = el.style;
+                  if (!st || !st.backgroundImage || st.backgroundImage.indexOf('param=') < 0) { continue; }
+                  var rect = el.getBoundingClientRect();
+                  if (rect.bottom > -300 && rect.top < (window.innerHeight + 300)) { continue; }
+                  el.setAttribute('data-folia-bg', st.backgroundImage);
+                  st.backgroundImage = 'none';
+                  dropped += 1;
+                } else {
+                  // **回到视口要还回去。**
+                  //
+                  // 只清不还原就是「往回翻一片空白」，和 `<img>` 回落必须成对。
+                  // 这里只在「重新进入视口附近」时还原，并且立刻删标记，
+                  // 下一拍若又滚出去了会重新收一次。
+                  var back = el.getBoundingClientRect();
+                  if (back.bottom > -300 && back.top < (window.innerHeight + 300)) {
+                    el.style.backgroundImage = bg;
+                    el.removeAttribute('data-folia-bg');
+                  }
+                }
+              }
+            }
+            return n + '/' + dropped + '/' + document.getElementsByTagName('*').length + (heavy ? '/h' : '');
           } catch (e) { return '-'; }
         })();
         """
         let finish = { [weak self] (info: String) in
             guard let self else { return }
-            WKWebsiteDataStore.default().removeData(
-                ofTypes: [WKWebsiteDataTypeMemoryCache],
-                modifiedSince: Date(timeIntervalSince1970: 0)
-            ) {
-                self.reliefTickInFlight = false
-                if pass <= 2 || pass % 10 == 0 {
-                    CrashLog.note("==== fg relief pass \(pass) \(info) memcache purged ====")
+            WKWebsiteDataStore.default().httpCookieStore.getAllCookies { cookies in
+                if let relief = cookies.first(where: { $0.name == Self.glReliefCookieName }),
+                   let ms = Double(relief.value) {
+                    self.reliefDeadline = Date(timeIntervalSince1970: ms / 1000)
+                } else {
+                    self.reliefDeadline = .distantPast
                 }
-                // 注意：不能用 `container.value(forKey: "processIdentifier")` ——
-                // `WKWebView` 对该键不是 KVC-compliant，会抛 NSUnknownKeyException
-                // （folia(17) 的闪退现场）。只记应用自身 footprint。
-                CrashLog.note("==== fg mem \(Self.memoryLogLine()) ====")
+                WKWebsiteDataStore.default().removeData(
+                    ofTypes: [WKWebsiteDataTypeMemoryCache],
+                    modifiedSince: Date(timeIntervalSince1970: 0)
+                ) {
+                    self.reliefTickInFlight = false
+                    if pass <= 2 || pass % 10 == 0 {
+                        CrashLog.note("==== fg relief pass \(pass) \(info) memcache purged ====")
+                    }
+                    // 注意：不能用 `container.value(forKey: "processIdentifier")` ——
+                    // `WKWebView` 对该键不是 KVC-compliant，会抛 NSUnknownKeyException
+                    // （folia(17) 的闪退现场）。只记应用自身 footprint。
+                    CrashLog.note("==== fg mem \(Self.memoryLogLine()) ====")
+                }
             }
         }
         container.evaluateJavaScript(js) { result, _ in
             finish((result as? String) ?? "-")
+        }
+    }
+
+    /// 后台时把还挂在文档里的解码位图收掉。
+    ///
+    /// folia(18)：进歌单（DOM 534 → 1021）后进程被回收，而应用自身只有 18MB ——
+    /// 吃内存的是 WebContent 的解码位图缓存。进后台是唯一**确定没有滚动、也没有**
+    /// 动画正在跑的时间窗，在这里整页回落一次，代价最低、收益最大：
+    /// 回到前台时首屏要重新解码几张，但不会在「刚听完一首、点下一首」时被 jetsam。
+    ///
+    /// 只用**同步改 DOM**，不调 WebKit 的清缓存接口：那条 `removeData` 在后台
+    /// 一旦被系统挂起就是一次没完成的跨进程调用，回来时容易带着一个空回调。
+    /// 位图的释放靠 JS 换 `src`（WebKit 随之丢解码结果）已经足够。
+    private func runBackgroundReliefPurge() {
+        guard ShellProfile.current == .aggressive, let container = webView else { return }
+        let js = """
+        (function(){
+          try {
+            var imgs = document.images, n = 0;
+            for (var i = 0; i < imgs.length; i += 1) {
+              var img = imgs[i];
+              if (!img.isConnected || !img.getAttribute('src')) { continue; }
+              if (img.getAttribute('data-folia-park') === '1') { continue; }
+              img.setAttribute('data-folia-park-src', img.getAttribute('src') || '');
+              img.setAttribute('data-folia-park', '1');
+              try { img.src = 'data:image/gif;base64,R0lGODlhAQABAAAAACw='; } catch (e) {}
+              n += 1;
+            }
+            var frames = document.querySelectorAll('iframe');
+            return n + '/' + frames.length;
+          } catch (e) { return '-'; }
+        })();
+        """
+        container.evaluateJavaScript(js) { result, _ in
+            CrashLog.note("==== bg relief \(result as? String ?? "-") ====")
         }
     }
 
@@ -1179,6 +1270,14 @@ final class WebContainerView: UIView {
         // `WKUserContentController`，但二维码回传那条要拿到新的 webView 引用）。
         qrRelay?.webView = view
         qishuiRelay.webView = view
+        // **扫码会话不随 WebContent 进程死掉。**
+        //
+        // folia(18)：`qishui native poll state=scanned` 之后一拍网络失败
+        //（`native poll error, retrying`），紧接着页面进程被回收 ——
+        // 轮询是「一拍一排」的，进程没了之后即便重建、即便 `pendingQR` 还在，
+        // 也没有任何人再把它拉起来，用户在手机上点了确认也永远等不到 `confirmed`。
+        // 这里只续上「手上那条还没结算的会话」，没有会话时是空操作。
+        qishuiRelay.resumePendingQRPoll()
         // 原生播放器也要更新webView引用
         NativePlayer.shared.webView = view
         // **重开 3 秒又死的连环：先把 IndexedDB 清一遍再打开。**
@@ -1837,6 +1936,39 @@ final class WebContainerView: UIView {
             // 把内存收紧落到图片上：重负载路由给封面挂 `loading="lazy"`，
             // 屏幕外的不请求、不解码（见 `audioKeeperScript` 里的 `__foliaTuneImages`）。
             if (typeof window.__foliaTuneImages === 'function') { window.__foliaTuneImages(isHeavy); }
+            // **重路由现场快照（每屏只打一次）。**
+            //
+            // folia(18)：进歌单前 `dom=534`，进歌单后 `dom=1021`，随后进程被 jetsam。
+            // 光有 DOM 数分不清「是节点多」还是「是解码后的位图多」—— 这里把
+            // 图片数、可见图数、CSS 背景图数、最大解码面积一起报回来，
+            // 下一份日志就能直接对比是哪一项在歌单里翻倍。
+            if (isHeavy && !window.__foliaHeavyLogged) {
+              window.__foliaHeavyLogged = true;
+              setTimeout(function () {
+                try {
+                  var imgs = document.images, vis = 0, area = 0;
+                  for (var k = 0; k < imgs.length; k += 1) {
+                    var im = imgs[k];
+                    if (!im.isConnected) { continue; }
+                    var rc = im.getBoundingClientRect();
+                    if (rc.bottom > 0 && rc.top < window.innerHeight) { vis += 1; }
+                    area += (im.naturalWidth || 0) * (im.naturalHeight || 0);
+                  }
+                  var bgs = 0, all = document.getElementsByTagName('*');
+                  for (var b = 0; b < all.length; b += 1) {
+                    var bst = all[b].style;
+                    if (bst && bst.backgroundImage && bst.backgroundImage !== 'none') { bgs += 1; }
+                  }
+                  try {
+                    window.webkit.messageHandlers.foliaJSLog.postMessage(
+                      'HEAVY dom=' + document.getElementsByTagName('*').length
+                      + ' img=' + imgs.length + ' visible=' + vis
+                      + ' bgimg=' + bgs
+                      + ' decodedAreaMB=' + Math.round(area * 4 / 1048576));
+                  } catch (e) {}
+                } catch (e) {}
+              }, 1200);
+            }
             return isHeavy;
           } catch (e) { return false; }
         })();
@@ -2127,6 +2259,10 @@ final class WebContainerView: UIView {
             // 那正是「切出去歌就停」的直接来源。播放中会话本来就是活的，
             // 该响就继续响；真被掐断（来电、控制中心）由前台探测式恢复处理。
             self.refreshAudioKeepAlive()
+            // 进后台那一拍把屏幕外的解码位图全收掉（iPhone 画像）。
+            // 排在音频保活之后：这一步只碰图片，不影响播放；它跑不完也无所谓，
+            // 进程被挂起时 JS 会随页面一起静默。
+            self.runBackgroundReliefPurge()
             self.captureProgressBeforeBackground { _ in
                 self.enforcePlaybackIfNeeded(reason: "background")
             }
@@ -4101,7 +4237,12 @@ final class WebContainerView: UIView {
     /// 保活脚本。因为要把「重负载路由表」插进脚本正文，只能按需拼装 ——
     /// 存成 `static let` 的话初始化器里引用 `Self` 会被 Swift 拒绝（covariant Self）。
     private static func audioKeeperScript() -> String {
-        audioKeeperBody.replacingOccurrences(of: "__FOLIA_HEAVY_ROUTES__", with: memoryHeavyLiteral())
+        audioKeeperBody
+            .replacingOccurrences(of: "__FOLIA_HEAVY_ROUTES__", with: memoryHeavyLiteral())
+            .replacingOccurrences(
+                of: "__FOLIA_AGGRESSIVE__",
+                with: ShellProfile.current == .aggressive ? "true" : "false"
+            )
     }
 
     private static let audioKeeperBody = """
@@ -4405,6 +4546,24 @@ final class WebContainerView: UIView {
             }
             var list = [];
             collectAudio(document, list);
+            // **iPhone：待命的 deck 不留缓冲。**
+            //
+            // 页面用两个 `<audio>` 轮流切歌（一个在放、另一个 standby 预载）。
+            // WebKit 会给 standby 那个也缓冲到自身上限，等于把「下一首」
+            // 整段音频先拉进内存 —— folia(18) 的终止点就在 `PLAY AUDIO AbortError`
+            // 之后，而失败的那个正是还没 ready 的 deck。
+            // 这里只把非当前 deck 的 `preload` 压成 `none`（不动 src，
+            // 切到它时照常按需拉流），当前 deck 保持原样。
+            if (__FOLIA_AGGRESSIVE__) {
+              try {
+                for (var pi = 0; pi < list.length; pi += 1) {
+                  var pel = list[pi];
+                  if (pel.paused || pel.ended) {
+                    if (pel.getAttribute('preload') !== 'none') { pel.setAttribute('preload', 'none'); }
+                  }
+                }
+              } catch (e) {}
+            }
             for (var i = 0; i < list.length; i += 1) {
               var itemSrc = list[i].currentSrc || list[i].src;
               if (!list[i].ended && itemSrc) { return list[i]; }
@@ -5248,6 +5407,8 @@ final class WebContainerView: UIView {
         if (typeof originalPlay !== 'function') { return; }
         HTMLMediaElement.prototype.play = function(){
           var self = this;
+          // 每次重新开始播放，允许再自愈一次（切歌 / 重设 src 之后不再被上次的标记卡住）。
+          try { self.__foliaPlayRetried = false; } catch (e) {}
           // **记录所有调用过play()的元素，即使它不在DOM树里。**
           // 纯WebAudio页面的audio元素只存在于JS闭包里，不在DOM里，
           // 所以querySelectorAll和document上的事件监听都收不到它。
@@ -5263,6 +5424,23 @@ final class WebContainerView: UIView {
               report('PLAY', (self.tagName || '') + ' ' + ((err && (err.name + ':' + err.message)) || 'rejected')
                 + ' muted=' + (self.muted ? '1' : '0')
                 + ' src=' + String(self.currentSrc || self.src || '').slice(0, 120));
+              // **AbortError 自愈。**
+              //
+              // 刚换 `src` 就开始播放时，WebKit 会先中止上一段加载，`play()`
+              // 随之以 `AbortError` 拒掉 —— 页面侧很多地方把这个 rejection
+              // 当成「播不了」，于是把播放器摘掉、退回歌单，用户看到的就是
+              // 「进音乐又闪回加载界面」。folia(18) 里这条紧挨着进程终止出现。
+              // 这里只补一种最确定的情况：同一个元素、源没变、仍然想播，
+              // 就到 `canplay` 那一刻再试一次（最多一次，不递归）。
+              if (!err || err.name !== 'AbortError' || self.__foliaPlayRetried) { return; }
+              self.__foliaPlayRetried = true;
+              var again = function () {
+                self.removeEventListener('canplay', again);
+                try { originalPlay.call(self).catch(function () {}); } catch (e) {}
+              };
+              self.addEventListener('canplay', again);
+              // 已经能播了就别等事件（`canplay` 已经错过的那一拍）。
+              if (self.readyState >= 3) { again(); }
             });
           }
           return p;
@@ -5779,6 +5957,13 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         didReachFirstPaint = false
         hasEvaluatedFirstPaint = false
         collectTerminationContext()
+        // **进程没了，扫码轮询的定时器序列也断了。**
+        //
+        // 不先停掉的话，旧实例上那条 `nativeQRTimer` 可能还挂在主 runloop 上，
+        // 而 `nativeQRToken` 仍指向同一个会话 —— 重建时 `resumePendingQRPoll()`
+        // 会以为「已经在轮询」而不重排，于是 `scanned → confirmed` 这一段
+        // 又没人问（folia(18) 的现场）。这里先按进程死亡停表，重建后再续上。
+        qishuiRelay.stopQueryPollAfterProcessDeath()
         // **60 秒内死两次以上，重载落回首页，不再落回死前那一页。**
         //
         // 自救机器退役之后，如果某个页面本身就会把进程顶死（folia(8).log：
@@ -6061,7 +6246,7 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         // iPad 包压到 2（iPad 屏大、内存也大，2 已经够省，再低就真的糊了）。
         let aggressive = ShellProfile.current == .aggressive
         let dpr = aggressive ? "1" : "2"
-        let heavyCap = aggressive ? "120" : "320"
+        let heavyCap = aggressive ? "96" : "320"
         let profileDict = aggressive
             ? "{'visualizer_frame_rate':'60','visualizer_background_mode':'common','disable_home_dynamic_background':'true','disable_visualizer_vignette':'true','disable_visualizer_geometric_background':'true','visualizer_glow_blur_quantize':'true'}"
             : "{}"
@@ -6193,13 +6378,16 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
             // 就是 4MB 常驻，几百张立刻几百 MB。网易云 CDN 用 `?param=宽y高` 出图，
             // 改 URL 就换尺寸，不需要站点配合。重路由（歌单 / 拼贴墙）压到 \(heavyCap)，
             // 其它页面压到 320。
+            // **iPhone 的重路由从 120 降到 96**：folia(18) 进歌单后 DOM 翻倍
+            //（534 → 1021），几百张 120 的封面解码后仍有 ~55MB 常驻位图，
+            // 恰好落在 jetsam 判定线附近。96 的缩略图在这一屏上与原尺寸没有可见差别。
             var capFor = function () {
                 // **relief 档：帽子整体再压一档。**
                 //
-                // folia(15).log：普通档（重路由 120 / 其它 320）+ gl=off 下，
+                // folia(15).log：普通档（重路由 96 / 其它 320）+ gl=off 下，
                 // 首页 DOM 仍持续增长到被 jetsam。熔断后的两小时里把帽子降到
-                // 96 / 160，观感略糊但保命；窗口过了自动回普通档。
-                if (RELIEF) { return 96; }
+                // 80 / 160，观感略糊但保命；窗口过了自动回普通档。
+                if (RELIEF) { return 80; }
                 var h = String(location.hash || '');
                 if (h.indexOf('collection') >= 0 || h.indexOf('lattice') >= 0) { return \(heavyCap); }
                 return 320;
@@ -6292,8 +6480,11 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
                 styleScanTick += 1;
                 try {
                     // **心跳**：每 5 秒报一次页面规模，进程死之前的最后一条就是现场。
+                    // `bg` 是带内联背景图的元素数：folia(18) 只有 `dom` 数，
+                    // 分不出「节点多」还是「解码后的位图多」，这一项补上。
                     report('hb dom=' + document.getElementsByTagName('*').length
                         + ' img=' + document.images.length
+                        + ' bg=' + document.querySelectorAll('[style*="background"]').length
                         + ' cv=' + document.getElementsByTagName('canvas').length
                         + ' gl=' + glLiveCount());
                 } catch (e) {}
@@ -7111,6 +7302,8 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
     /// 不依赖「发出去的那一发回调一定会回来」。
     private var nativeQRToken: String?
     private var nativeQRTicks = 0
+    /// 原生轮询连续失败的拍数（只在 `workQueue` 上读写），用于「失败也重试」的封顶。
+    private var nativeQRFailures = 0
 
     private func startNativeQRPoll(token: String) {
         // timer/token 这些位只在主线程上动（schedule/stop 都被钉回主线程），
@@ -7121,8 +7314,41 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
             self.nativeQRTimer = nil
             self.nativeQRToken = token
             self.nativeQRTicks = 0
+            self.nativeQRFailures = 0
             CrashLog.note("==== qishui native poll started ====")
             self.scheduleNativeQRPoll()
+        }
+    }
+
+    /// 页面进程被回收之后，只把定时器序列停掉，**保留会话**（`pendingQR` 不动）。
+    ///
+    /// 与 `stopNativeQRPoll` 的区别：那条会连 token 一起清掉，等于主动放弃
+    /// 这次扫码；这里只是让「一拍一排」的序列随进程一起静默，
+    /// 等 WebContent 重建时由 `resumePendingQRPoll()` 续上。
+    func stopQueryPollAfterProcessDeath() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.nativeQRTimer?.invalidate()
+            self.nativeQRTimer = nil
+            self.nativeQRToken = nil
+            self.nativeQRTicks = 0
+            self.nativeQRFailures = 0
+        }
+    }
+
+    /// 页面进程被回收 / 重建之后，把还没结算的扫码会话续上。
+    ///
+    /// `pendingQR` 是壳自己的字典，不随 WebContent 死而丢；丢的只是那条
+    /// 「一拍一排」的定时器序列。只要会话还在、又没登录成功，就从这里接回来。
+    func resumePendingQRPoll() {
+        workQueue.async { [weak self] in
+            guard let self else { return }
+            guard !UserDefaults.standard.bool(forKey: Self.signedInKey) else { return }
+            let alive = self.pendingQR.filter { $0.value.expires > Date() }
+            guard let token = alive.keys.first else { return }
+            // 已经过期的不再续（`checkQRInner` 也会回 expired，这里只是少一次请求）。
+            CrashLog.note("==== qishui resume qr poll after process death ====")
+            self.startNativeQRPoll(token: token)
         }
     }
 
@@ -7160,6 +7386,7 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
             self.nativeQRTimer = nil
             self.nativeQRToken = nil
             self.nativeQRTicks = 0
+            self.nativeQRFailures = 0
             CrashLog.note("==== qishui native poll stopped (\(reason)) ====")
         }
         if Thread.isMainThread { stop() } else { DispatchQueue.main.async(execute: stop) }
@@ -7175,6 +7402,13 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
                 return
             }
             self.nativeQRTicks += 1
+            // **连续失败不能无限续命。**
+            //
+            // folia(18)：`scanned` 之后一拍 `native poll error, retrying`，
+            // 之后就是进程死亡 —— 说明「失败也照常续下一拍」在弱网下会一直空转，
+            // 而每一拍都是一次带签名的网络请求，白白延长持有会话的时间。
+            // 连续 5 拍（约 15 秒）都失败就停，交给页面下次 `login_qr_check`
+            // 或下一次重建时的 `resumePendingQRPoll()` 重新接上。
             // 页面同拍轮询时 `checkQR`（含去重的 waiting 日志）照旧；
             // 原生自驱动这一路直接走 inner，避免双份日志。
             let result = try? self.checkQRInner(key: token)
@@ -7182,10 +7416,16 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
             // 失败也照常续下一拍：`scanned` 到 `confirmed` 之间任何一次
             // 网络抖动都不该把整条轮询带走（会话 5 分钟才过期）。
             guard let state else {
-                CrashLog.note("==== qishui native poll error, retrying ====")
+                self.nativeQRFailures += 1
+                CrashLog.note("==== qishui native poll error, retrying (\(self.nativeQRFailures)) ====")
+                if self.nativeQRFailures >= 5 {
+                    self.stopNativeQRPoll(reason: "poll-errors")
+                    return
+                }
                 self.scheduleNativeQRPoll()
                 return
             }
+            self.nativeQRFailures = 0
             if state == "confirmed" || state == "expired" || state == "scanned" {
                 CrashLog.note("==== qishui native poll state=\(state) ====")
             }

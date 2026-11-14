@@ -121,6 +121,19 @@ final class NativePlayer: NSObject, WKScriptMessageHandler {
         // 创建新的播放项
         let asset = AVURLAsset(url: url)
         let item = AVPlayerItem(asset: asset)
+        // **iPhone 上把前瞻缓冲压到 30 秒。**
+        //
+        // 默认 `preferredForwardBufferDuration == 0` 表示「交给系统决定」，
+        // 在 Wi-Fi 下它会一路缓冲到几千秒的音频 —— 单曲几百 MB 的 AVMutableComposition
+        // 缓存都堆在 WebContent + mediaserverd 两边。folia(18) 的终止点就在
+        // `PLAY AUDIO AbortError` 之后那一刻，而此时应用自身 footprint 只有 18MB，
+        // 说明吃内存的根本不是壳。30 秒足够跨过任何一次弱网抖动，
+        // 又不会为了「快进」提前解掉整首歌。
+        // iPad 画像不动。
+        if ShellProfile.current == .aggressive {
+            item.preferredForwardBufferDuration = 30
+            item.canUseNetworkResourcesForLiveStreamingWhilePaused = false
+        }
         playerItem = item
 
         if player == nil {
