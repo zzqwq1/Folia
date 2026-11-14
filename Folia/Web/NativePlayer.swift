@@ -129,11 +129,12 @@ final class NativePlayer: NSObject, WKScriptMessageHandler {
         // `PLAY AUDIO AbortError` 之后那一刻，而此时应用自身 footprint 只有 18MB，
         // 说明吃内存的根本不是壳。30 秒足够跨过任何一次弱网抖动，
         // 又不会为了「快进」提前解掉整首歌。
-        // iPad 画像不动。
-        if ShellProfile.current == .aggressive {
-            item.preferredForwardBufferDuration = 30
-            item.canUseNetworkResourcesForLiveStreamingWhilePaused = false
-        }
+        // iPad 画像不动。`ShellProfile` 是 `WebContainerView` 的内部枚举，
+        // 这里直接读同一个编译期开关（iPhone 包不带 `PROFILE_IPAD`）。
+        #if !PROFILE_IPAD
+        item.preferredForwardBufferDuration = 30
+        item.canUseNetworkResourcesForLiveStreamingWhilePaused = false
+        #endif
         playerItem = item
 
         if player == nil {
