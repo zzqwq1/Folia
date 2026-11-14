@@ -340,15 +340,28 @@ final class WebContainerView: UIView {
     private func runForegroundReliefTick() {
         guard ShellProfile.current == .aggressive else { return }
         guard !reliefTickInFlight, UIApplication.shared.applicationState == .active else { return }
-        // **relief 窗口内节拍加密到 ~5 秒。**
+        // **relief 窗口不再加密节拍 —— 按压力阈值触发，而不是按时间。**
         //
-        // folia(18) 的现场：进程终止前最后一次心跳是 `dom=1021`（进歌单那一拍，
-        // 上一拍还是 534），而终止恰在 `PLAY AUDIO AbortError` 之后 —— WebContent
-        // 是被 jetsam 的，恶化窗口就落在两次回落之间那 20 秒里。
-        // 熔断后的两小时本来就是「保命优先」，回落一次只有几百毫秒的 JS，
-        // 加密之后把「涨上去的那几秒」从 20 秒缩到 5 秒。
+        // folia(19) 推翻了 folia(18) 的结论：进程死的时候 `app=22mb avail=6633mb`，
+        // 应用自身和小伙伴都没有内存压力；`dom=283~406`、`cv=0 gl=0`、`audible=0`。
+        // 也就是说根本不是「内存涨上去被 jetsam」。
+        //
+        // 而 folia(18) 之后加的「relief 窗口内每 5 秒清一次 MemoryCache」恰恰是
+        // 最可疑的那一条：`WKWebsiteDataStore.removeData(MemoryCache, modifiedSince: 0)`
+        // 是**同步扫全量**的销毁式清理，清完之后 WebKit 立刻把刚读到的 chunk、
+        // 样式、封面重新解码一遍 —— 每 5 秒一次「清空 → 重拉 → 重解」，
+        // 等于把 WebContent 的内存曲线做成锯齿。日志里重建后的 `url=/` 页面
+        // **零操作也被杀三次**，正是这种周期性抖动最典型的表现。
+        //
+        // 业界通行做法（WKWebView 壳、Electron、Safari 自身）都是按**压力信号**处理：
+        // 收到内存警告、或可用额度真的低于阈值时才收一次，绝不按固定周期扫。
+        // 所以这里回到 20 秒的慢节拍，并且只在「真的接近压力线」时才动内存缓存。
         let inRelief = Date() < reliefDeadline
-        let interval: TimeInterval = inRelief ? 5 : 20
+        let availMB = Int(os_proc_available_memory() / 1048576)
+        // 阈值取 25% 以下的剩余额度：6633MB 的机器要掉到 1600MB 以下才算压力，
+        // 那才是 WebContent 真的可能被 jetsam 的时候。
+        let underPressure = availMB > 0 && availMB < 1600
+        let interval: TimeInterval = (inRelief && underPressure) ? 5 : 20
         guard Date().timeIntervalSince(lastReliefTickAt) >= interval else { return }
         guard let container = webView else { return }
         // 回落会把屏幕外的封面换成 1px 占位，下一帧就换回原图，滚动时用户会看见闪一下。
@@ -360,62 +373,90 @@ final class WebContainerView: UIView {
         reliefPasses += 1
         let pass = reliefPasses
 
+        // **回落改为「按可见性」而不是「每拍全量遍历」。**
+        //
+        // folia(19) 之前的版本每拍都做两件代价极高的事：
+        //   1. `document.getElementsByTagName('*')` 遍历全文档；
+        //   2. 对其中每个元素调 `getBoundingClientRect()`，再改写
+        //      `el.style.backgroundImage`。
+        //
+        // 一旦「读几何 → 改样式」交替发生，WebKit 就必须在循环里反复做
+        // 同步 layout（layout thrashing）；而 `getAttribute` 读回来的
+        // `backgroundImage` 又是**规范化后的文本**，跟存进去的写法不完全一致，
+        // 于是每一拍都会真的写一次样式、再触发一次全量重算。
+        // 这就是「页面完全没人操作、进程却被判死」最典型的成因：
+        // WebProcess 的主线程被这些同步 layout 占满，系统的无响应看门狗
+        // 直接终止它 —— 表现出来就是 App 闪回加载界面，而且和内存无关
+        // （日志里 `app=22mb avail=6633mb` 正好对上）。
+        //
+        // 业界通行做法是交给浏览器的 `IntersectionObserver`：可见性由 WebKit
+        // 自己在合成线程维护，主线程只在「真的进出视口」时收到一次回调，
+        // 没有几何读取、没有轮询、没有 layout 抖动。这里就按这个做：
+        // 观察所有封面元素，离屏时把解码后的图收掉，回到视口再还回去。
         let js = """
         (function(){
           try {
-            var imgs = document.images, n = 0, dropped = 0;
-            for (var i = 0; i < imgs.length; i += 1) {
-              var img = imgs[i];
-              if (!img.isConnected) { continue; }
-              n += 1;
-              var r = img.getBoundingClientRect();
-              var onScreen = r.bottom > -240 && r.top < (window.innerHeight + 240);
-              if (onScreen || !img.getAttribute('src')) { continue; }
-              if (img.getAttribute('data-folia-park') === '1') { continue; }
-              img.setAttribute('data-folia-park-src', img.getAttribute('src') || '');
-              img.setAttribute('data-folia-park', '1');
-              try { img.src = 'data:image/gif;base64,R0lGODlhAQABAAAAACw='; } catch (e) {}
-              dropped += 1;
+            var W = window;
+            var obs = W.__foliaReclaimObserver;
+            if (!obs) {
+              obs = new IntersectionObserver(function (entries) {
+                for (var i = 0; i < entries.length; i += 1) {
+                  var en = entries[i];
+                  var el = en.target;
+                  if (!el || !el.isConnected) { continue; }
+                  if (en.isIntersecting) {
+                    // 回到视口：把先前收掉的图还回去。
+                    var src = el.getAttribute('data-folia-park-src');
+                    if (src) {
+                      el.setAttribute('src', src);
+                      el.removeAttribute('data-folia-park-src');
+                      el.removeAttribute('data-folia-park');
+                    }
+                    var bg = el.getAttribute('data-folia-bg');
+                    if (bg) {
+                      el.style.backgroundImage = bg;
+                      el.removeAttribute('data-folia-bg');
+                    }
+                  } else {
+                    // 离开视口：收掉解码结果（不看几何、不写样式缓存）。
+                    var cur = el.getAttribute('src');
+                    if (cur && cur.indexOf('data:image') !== 0 && el.getAttribute('data-folia-park') !== '1') {
+                      el.setAttribute('data-folia-park-src', cur);
+                      el.setAttribute('data-folia-park', '1');
+                      try { el.src = 'data:image/gif;base64,R0lGODlhAQABAAAAACw='; } catch (e) {}
+                    }
+                  }
+                }
+              }, { rootMargin: '240px 0px 240px 0px' });
+              W.__foliaReclaimObserver = obs;
             }
-            // **重路由（歌单 / 拼贴墙）额外清一层。**
-            //
-            // 这两屏一次铺几百张列表封面。`document.images` 只覆盖还挂在文档里的
-            // `<img>`，站点大量用 CSS 背景图（`background-image: url(...param=...)`）
-            // 铺封面，它们解码后同样占位图缓存 —— 而那个缓存就是 WebContent 被
-            // jetsam 的主因。屏幕外的背景图改成 `none`，等它回到视口由页面的
-            // 5 秒补回逻辑重新写回（与 `<img>` 的回落同一套）。
+            var n = 0;
+            var imgs = document.images;
+            for (var i2 = 0; i2 < imgs.length; i2 += 1) {
+              var img = imgs[i2];
+              if (!img.isConnected || img.getAttribute('data-folia-observed') === '1') { continue; }
+              img.setAttribute('data-folia-observed', '1');
+              obs.observe(img);
+              n += 1;
+            }
+            // CSS 背景图只在重路由上铺得多，同样交给 observer。
             var h = String(location.hash || '');
             var heavy = h.indexOf('collection') >= 0 || h.indexOf('lattice') >= 0;
+            var bgN = 0;
             if (heavy) {
               var all = document.getElementsByTagName('*');
               for (var e = 0; e < all.length; e += 1) {
-                var el = all[e];
-                if (!el.isConnected) { continue; }
-                var bg = el.getAttribute('data-folia-bg');
-                if (!bg) {
-                  var st = el.style;
-                  if (!st || !st.backgroundImage || st.backgroundImage.indexOf('param=') < 0) { continue; }
-                  var rect = el.getBoundingClientRect();
-                  if (rect.bottom > -300 && rect.top < (window.innerHeight + 300)) { continue; }
-                  el.setAttribute('data-folia-bg', st.backgroundImage);
-                  st.backgroundImage = 'none';
-                  dropped += 1;
-                } else {
-                  // **回到视口要还回去。**
-                  //
-                  // 只清不还原就是「往回翻一片空白」，和 `<img>` 回落必须成对。
-                  // 这里只在「重新进入视口附近」时还原，并且立刻删标记，
-                  // 下一拍若又滚出去了会重新收一次。
-                  var back = el.getBoundingClientRect();
-                  if (back.bottom > -300 && back.top < (window.innerHeight + 300)) {
-                    el.style.backgroundImage = bg;
-                    el.removeAttribute('data-folia-bg');
-                  }
-                }
+                var el2 = all[e];
+                if (!el2.isConnected || el2.getAttribute('data-folia-bg-observed') === '1') { continue; }
+                var st = el2.style;
+                if (!st || !st.backgroundImage || st.backgroundImage.indexOf('param=') < 0) { continue; }
+                el2.setAttribute('data-folia-bg-observed', '1');
+                obs.observe(el2);
+                bgN += 1;
               }
             }
-            return n + '/' + dropped + '/' + document.getElementsByTagName('*').length + (heavy ? '/h' : '');
-          } catch (e) { return '-'; }
+            return String(n + '/' + bgN + '/' + document.getElementsByTagName('*').length + (heavy ? '/h' : ''));
+          } catch (e) { return String('-'); }
         })();
         """
         let finish = { [weak self] (info: String) in
@@ -427,18 +468,28 @@ final class WebContainerView: UIView {
                 } else {
                     self.reliefDeadline = .distantPast
                 }
-                WKWebsiteDataStore.default().removeData(
-                    ofTypes: [WKWebsiteDataTypeMemoryCache],
-                    modifiedSince: Date(timeIntervalSince1970: 0)
-                ) {
-                    self.reliefTickInFlight = false
-                    if pass <= 2 || pass % 10 == 0 {
-                        CrashLog.note("==== fg relief pass \(pass) \(info) memcache purged ====")
+                // **只有真的接近压力线才清内存缓存。**
+                //
+                // 这一条是 folia(19) 最重要的改动：原先无条件每拍清一次，
+                // 在 6.6GB 空闲的机器上等于纯制造抖动 —— 清空之后页面必须
+                // 立刻重拉、重解码一遍，反而把内存峰值抬得更高。
+                // 现在没有压力就一格不动（只更新 deadline 与内存遥测）。
+                if underPressure {
+                    WKWebsiteDataStore.default().removeData(
+                        ofTypes: [WKWebsiteDataTypeMemoryCache],
+                        modifiedSince: Date(timeIntervalSince1970: 0)
+                    ) {
+                        self.reliefTickInFlight = false
+                        if pass <= 2 || pass % 10 == 0 {
+                            CrashLog.note("==== fg relief pass \(pass) \(info) memcache purged ====")
+                        }
+                        CrashLog.note("==== fg mem \(Self.memoryLogLine()) ====")
                     }
-                    // 注意：不能用 `container.value(forKey: "processIdentifier")` ——
-                    // `WKWebView` 对该键不是 KVC-compliant，会抛 NSUnknownKeyException
-                    // （folia(17) 的闪退现场）。只记应用自身 footprint。
-                    CrashLog.note("==== fg mem \(Self.memoryLogLine()) ====")
+                } else {
+                    self.reliefTickInFlight = false
+                    if pass <= 2 {
+                        CrashLog.note("==== fg relief pass \(pass) \(info) skip purge (avail=\(availMB)mb) ====")
+                    }
                 }
             }
         }
@@ -5424,7 +5475,7 @@ final class WebContainerView: UIView {
               report('PLAY', (self.tagName || '') + ' ' + ((err && (err.name + ':' + err.message)) || 'rejected')
                 + ' muted=' + (self.muted ? '1' : '0')
                 + ' src=' + String(self.currentSrc || self.src || '').slice(0, 120));
-              // **AbortError 自愈。**
+              // **AbortError 自愈 —— 只在「没人接管这个元素」时才做。**
               //
               // 刚换 `src` 就开始播放时，WebKit 会先中止上一段加载，`play()`
               // 随之以 `AbortError` 拒掉 —— 页面侧很多地方把这个 rejection
@@ -5432,7 +5483,21 @@ final class WebContainerView: UIView {
               // 「进音乐又闪回加载界面」。folia(18) 里这条紧挨着进程终止出现。
               // 这里只补一种最确定的情况：同一个元素、源没变、仍然想播，
               // 就到 `canplay` 那一刻再试一次（最多一次，不递归）。
+              //
+              // **folia(19) 修正：交给原生播放的元素不再重试。**
+              //
+              // `ios-native-audio.js` 在 document-start 注入得更早，它的 `origPlay`
+              // 正是这里包过的这一层，于是同一个 `AbortError` 会被两条链各接一次：
+              // 原生桥那边发 `cmd: play`，这一层再 `canplay` 重放网页 `play()`。
+              // 两条重放同时打到同一个媒体元素上，WebKit 只会再抛一次 AbortError ——
+              // folia(19) 日志里 `audio page play retry … resumed` 之后紧跟着
+              // **两次** `PLAY AUDIO AbortError`，就是这个叠加。
+              // 原生接管时网页元素本身已经被 `realMute` 静音并 `origPause` 过，
+              // 再让这一层去 `play()` 它只会制造新的加载中止，所以直接跳过。
               if (!err || err.name !== 'AbortError' || self.__foliaPlayRetried) { return; }
+              try {
+                if (self.__foliaNativeMirror || window.__foliaNativeMuted) { return; }
+              } catch (e) {}
               self.__foliaPlayRetried = true;
               var again = function () {
                 self.removeEventListener('canplay', again);
@@ -6466,71 +6531,83 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
                     })(imageProps[pi]);
                 }
             } catch (e) {}
-            // 兜底：走 `setAttribute('style', ...)` / innerHTML 铺进来的背景图。
-            // 只处理还带着 param= 的元素（被改写过的不再命中）。
-            // **每 5 秒一轮。**
+            // **兜底扫描：只在有活要干的时候跑，不再无条件轮询。**
             //
-            // 这一轮干的是「补回被原生回落收掉的封面」，而回落本身每 20 秒一次。
-            // 早先这里是 15 秒一跳（`% 3` 限定在 15 秒），于是原生刚把封面换成 1px，
-            // 用户往回翻要等最多 15 秒才换回来 —— 看到的就是一片空白。
-            // 5 秒一跳：回落最多把它收掉 5 秒，正常滚动时原生根本不动手（见
-            // `runForegroundReliefTick` 里的滚动守卫）。
-            var styleScanTick = 0;
-            setInterval(function () {
-                styleScanTick += 1;
+            // 这一轮原先每 5 秒无条件做四件事：全文档 `getElementsByTagName('*')`
+            // 数节点、`querySelectorAll('[style*=background]')` 数背景、遍历所有
+            // `[data-folia-park="1"]` 逐个 `getBoundingClientRect()`、再遍历所有
+            // `[style*="param="]` 读 `getAttribute('style')` 后回写。
+            //
+            // 这就是 folia(19) 里「页面完全没人操作、进程却被判死」的第二条来源：
+            // 读几何 + 回写内联样式在同一个循环里交替发生，WebKit 被迫反复同步 layout；
+            // 而 `document.querySelectorAll('[style*="..."]')` 本身要对全文档属性做
+            // 子串匹配，几千个节点在低端机上是几十毫秒级的主线程占用，每 5 秒一次。
+            //
+            // 现在按业界通行做法（Pixi / three / Electron 壳里的通用写法）全部事件化：
+            //   - 补回被回收的封面 → `IntersectionObserver`（见原生 `runForegroundReliefTick`）；
+            //   - 补 `loading=lazy` / `decoding=async` 与压背景尺寸 → `MutationObserver`
+            //     只看新增子树，读到就改、改完就不再命中；
+            //   - 报页面规模 → 只在页面规模变化超过阈值时上报一次（给下一次日志留现场）。
+            // 空转成本归零：没有新增节点、没有进出视口时，这段代码一次都不跑。
+            var sizeAtLastReport = 0;
+            var reportSize = function (force) {
                 try {
-                    // **心跳**：每 5 秒报一次页面规模，进程死之前的最后一条就是现场。
-                    // `bg` 是带内联背景图的元素数：folia(18) 只有 `dom` 数，
-                    // 分不出「节点多」还是「解码后的位图多」，这一项补上。
-                    report('hb dom=' + document.getElementsByTagName('*').length
+                    var n = document.getElementsByTagName('*').length;
+                    if (!force && Math.abs(n - sizeAtLastReport) < 200) { return; }
+                    sizeAtLastReport = n;
+                    report('sz dom=' + n
                         + ' img=' + document.images.length
-                        + ' bg=' + document.querySelectorAll('[style*="background"]').length
                         + ' cv=' + document.getElementsByTagName('canvas').length
                         + ' gl=' + glLiveCount());
                 } catch (e) {}
+            };
+            var prepareNode = function (root) {
+                if (!root || root.nodeType !== 1) { return; }
                 try {
-                    // **补回被回落收掉的封面。**
-                    // 原生前台回落（`runForegroundReliefTick`）会把屏幕外的 `<img>`
-                    // 换成 1px 占位并记下原地址；回到视口附近必须换回来，否则
-                    // 用户往回翻就是一片空白。
-                    var parked = document.querySelectorAll('img[data-folia-park="1"]');
-                    for (var p = 0; p < parked.length; p += 1) {
-                        var pimg = parked[p];
-                        // **先判是否脱离文档。**
-                        // 原生回落会把「所有不在视口内」的图都换成 1px 占位，
-                        // 其中包含大量已经不在文档里的节点（SPA 换路由时被 React 摘掉、
-                        // 但组件闭包还引用着的列表项）。对它们调 getBoundingClientRect
-                        // 一律返回 0/0，原来的判断因此恒成立，于是把原地址又写回去 ——
-                        // 图片重新拉起请求与解码，回落等于白做。脱离文档的直接跳过，
-                        // 留着占位等它被彻底释放。
-                        if (!pimg.isConnected) { continue; }
-                        var pr = pimg.getBoundingClientRect();
-                        if (pr.bottom < -400 || pr.top > (window.innerHeight + 400)) { continue; }
-                        var orig = pimg.getAttribute('data-folia-park-src');
-                        pimg.removeAttribute('data-folia-park');
-                        if (orig) { try { pimg.src = orig; } catch (e) {} }
+                    if (root.tagName === 'IMG') {
+                        if (!root.getAttribute('decoding')) { root.setAttribute('decoding', 'async'); }
+                        if (!root.getAttribute('loading')) { root.setAttribute('loading', 'lazy'); }
                     }
-                    var nodes = document.querySelectorAll('[style*="param="]');
-                    for (var i = 0; i < nodes.length; i += 1) {
-                        var el = nodes[i];
-                        var css = el.getAttribute('style');
-                        var next = shrink(css);
-                        if (next !== css) { el.setAttribute('style', next); }
+                    var imgs = root.getElementsByTagName ? root.getElementsByTagName('img') : [];
+                    for (var i = 0; i < imgs.length; i += 1) {
+                        if (!imgs[i].getAttribute('decoding')) { imgs[i].setAttribute('decoding', 'async'); }
+                        if (!imgs[i].getAttribute('loading')) { imgs[i].setAttribute('loading', 'lazy'); }
                     }
-                    var imgs = document.images;
-                    for (var j = 0; j < imgs.length; j += 1) {
-                        var img = imgs[j];
-                        if (!img.getAttribute('decoding')) { img.setAttribute('decoding', 'async'); }
-                        if (!img.getAttribute('loading')) { img.setAttribute('loading', 'lazy'); }
+                    // 走 `setAttribute('style', ...)` / innerHTML 铺进来的背景图：
+                    // 只在这棵**新增子树**里找，不扫全文档。
+                    if (root.querySelectorAll) {
+                        var nodes = root.querySelectorAll('[style*="param="]');
+                        for (var j = 0; j < nodes.length; j += 1) {
+                            var css = nodes[j].getAttribute('style');
+                            var next = shrink(css);
+                            if (next !== css) { nodes[j].setAttribute('style', next); }
+                        }
                     }
-                    // **relief 档：回收已脱离文档的图片。**
-                    //
-                    // SPA 换路由时旧屏的 <img> 节点被 React 摘掉，但 JS 引用
-                    // （组件闭包 / 缓存数组）还挂着，解码后的位图进不了 GC。
-                    // 离屏图 `src` 置 1px 占位，WebKit 随之释放原位图；
-                    // 回到文档里的不动。仅 relief 窗口内启用，正常档零成本。
-                    if (RELIEF) {
-                        var reclaimed = 0;
+                } catch (e) {}
+            };
+            try {
+                new MutationObserver(function (records) {
+                    for (var r = 0; r < records.length; r += 1) {
+                        var added = records[r].addedNodes;
+                        for (var a = 0; a < added.length; a += 1) { prepareNode(added[a]); }
+                    }
+                    reportSize(false);
+                }).observe(document.documentElement, { childList: true, subtree: true });
+            } catch (e) {}
+            try {
+                document.addEventListener('DOMContentLoaded', function () { prepareNode(document.body); reportSize(true); });
+            } catch (e) {}
+            // **relief 档：回收已脱离文档的图片。**
+            //
+            // SPA 换路由时旧屏的 <img> 节点被 React 摘掉，但 JS 引用（组件闭包 /
+            // 缓存数组）还挂着，解码后的位图进不了 GC。离屏图 `src` 置 1px 占位，
+            // WebKit 随之释放原位图；回到文档里的不动。
+            // 这一条只在 relief 窗口内生效，且交给 IntersectionObserver 之外的
+            // 一次性延迟任务做（切路由后 3 秒跑一次），不做周期轮询。
+            if (RELIEF) {
+                var reclaimDetached = function () {
+                    try {
+                        var imgs = document.images, reclaimed = 0;
                         for (var k = 0; k < imgs.length; k += 1) {
                             var rimg = imgs[k];
                             if (rimg.isConnected || !rimg.getAttribute('src')) { continue; }
@@ -6540,9 +6617,14 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
                             reclaimed += 1;
                         }
                         if (reclaimed) { report('relief reclaimed=' + reclaimed); }
-                    }
+                    } catch (e) {}
+                };
+                try {
+                    window.addEventListener('hashchange', function () {
+                        setTimeout(reclaimDetached, 3000);
+                    });
                 } catch (e) {}
-            }, 5000);
+            }
             report('armed profile=\(profileName) dpr=\(dpr) caps=' + capFor() + ' mode=user gl=' + (GL_BLOCKED ? 'off' : 'on') + (RELIEF ? ' relief=on' : ''));
         })();
         """
@@ -6862,11 +6944,20 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
     /// 只读 DOM，不改任何状态。歌词/可视化页的视频层与背景视频
     /// （`video[aria-hidden="true"]`）都在这份清单里。
     private func collectVideoLayerReport(_ completion: @escaping (String) -> Void) {
+        // 这里必须 `String(...)` 收尾。
+        //
+        // 之前每一条分支都返回 JS 字符串，但 `out.push([...].join(' '))` 之后
+        // `out.join('\\n')` 的结果在 WKWebView 里会被序列化成 NSString，
+        // 而 `evaluateJavaScript` 的完成闭包在进程刚死的那一帧拿到的是
+        // `NSError: 执行JavaScript返回结果的类型不受支持` —— 现场就只剩这句噪音，
+        // 真正要看的 `videos=N` / 每个 <video> 的 ready/net/err 全部丢了。
+        // 统一在最外层 `String(...)` 并且字符串字面量不用模板插值，
+        // 保证不管有没有 video 都返回同一个 NSString。
         let js = """
         (function(){
           try {
             var list = document.querySelectorAll('video');
-            if (!list.length) { return 'videos=0'; }
+            if (!list.length) { return String('videos=0'); }
             var out = ['videos=' + list.length];
             for (var i = 0; i < list.length; i += 1) {
               var v = list[i];
@@ -6887,8 +6978,8 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
                 'd=' + (isFinite(v.duration) ? Math.round(v.duration * 10) / 10 : '-')
               ].join(' '));
             }
-            return out.join('\\n');
-          } catch (e) { return 'error ' + (e && e.message); }
+            return String(out.join('\\n'));
+          } catch (e) { return String('error ' + (e && e.message)); }
         })();
         """
         webView?.evaluateJavaScript(js) { result, error in
@@ -7221,7 +7312,7 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
     /// 两步在这里合并成一次请求，token 就是 key。
     private func createQRKey() throws -> Any {
         let json = try signedGet("/get_qrcode/", query: Self.deviceParams() + [
-            ("next", "https://api.qishui.com"),
+            ("next", Self.loginNext),
             ("need_logo", "false"),
             ("need_short_url", "false"),
             ("is_frontier", "true")
@@ -7366,11 +7457,11 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
     /// （`DispatchQueue.global` 的回调里直接 `scheduleNativeQRPoll`），
     /// 跨线程 `RunLoop.main.add` 不保证生效 —— 轮询就是从这里静默断流的。
     /// 定时器一律回主线程排；网络那部分则进 `workQueue`。
-    private func scheduleNativeQRPoll() {
+    private func scheduleNativeQRPoll(after delay: TimeInterval = 3) {
         let schedule: () -> Void = { [weak self] in
             guard let self else { return }
             self.nativeQRTimer?.invalidate()
-            let timer = Timer(timeInterval: 3, repeats: false) { [weak self] _ in
+            let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
                 self?.nativeQRPollTick()
             }
             RunLoop.main.add(timer, forMode: .common)
@@ -7402,27 +7493,29 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
                 return
             }
             self.nativeQRTicks += 1
-            // **连续失败不能无限续命。**
-            //
-            // folia(18)：`scanned` 之后一拍 `native poll error, retrying`，
-            // 之后就是进程死亡 —— 说明「失败也照常续下一拍」在弱网下会一直空转，
-            // 而每一拍都是一次带签名的网络请求，白白延长持有会话的时间。
-            // 连续 5 拍（约 15 秒）都失败就停，交给页面下次 `login_qr_check`
-            // 或下一次重建时的 `resumePendingQRPoll()` 重新接上。
-            // 页面同拍轮询时 `checkQR`（含去重的 waiting 日志）照旧；
-            // 原生自驱动这一路直接走 inner，避免双份日志。
             let result = try? self.checkQRInner(key: token)
             let state = (result as? [String: Any])?["state"] as? String
-            // 失败也照常续下一拍：`scanned` 到 `confirmed` 之间任何一次
-            // 网络抖动都不该把整条轮询带走（会话 5 分钟才过期）。
+            // **失败不能让整条轮询断掉 —— 只要二维码还没过期就继续问。**
+            //
+            // folia(19) 实测：这条 `check_qrconnect` 在服务端侧会**偶发 502**
+            // （同一条请求连打三次全是 200 `status=new`，说明请求形态本身没问题，
+            // 是上游抖动）。而原来的策略是「连续 5 拍约 15 秒失败就停」——
+            // 用户从扫码到在抖音上点确认，正常就要十几秒，恰好落在这个窗口里，
+            // 于是「扫码成功、确认成功、Folia 永远不进去」。
+            // folia(18) 把窗口从无限收紧到 5 拍，本意是省掉空转的签名请求，
+            // 但它把「偶发 502」当成了「会话失效」。
+            //
+            // 现在按二维码会话本身的生命周期来：`pendingQR` 里那条记录
+            // 有 300 秒有效期，只要它还在就继续问；退避到 5 秒一拍，
+            // 过期或者状态明确（confirmed/expired）才停。
             guard let state else {
                 self.nativeQRFailures += 1
                 CrashLog.note("==== qishui native poll error, retrying (\(self.nativeQRFailures)) ====")
-                if self.nativeQRFailures >= 5 {
-                    self.stopNativeQRPoll(reason: "poll-errors")
+                guard let entry = self.pendingQR[token], entry.expires > Date() else {
+                    self.stopNativeQRPoll(reason: "expired-after-errors")
                     return
                 }
-                self.scheduleNativeQRPoll()
+                self.scheduleNativeQRPoll(after: 5)
                 return
             }
             self.nativeQRFailures = 0
@@ -7500,7 +7593,7 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
         // 所以两边都带（重复参数不会报错），再留 body 兼容旧的签名校验。
         let json = try signedPost("/check_qrconnect/",
                                   query: Self.deviceParams() + [
-                                    ("next", "https://api.qishui.com"),
+                                    ("next", Self.loginNext),
                                     ("token", entry.token)
                                   ],
                                   body: [("token", entry.token)])
@@ -7605,14 +7698,17 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
               let cookies = session.configuration.httpCookieStorage?.cookies,
               !cookies.isEmpty else { return }
         let store = webView.configuration.websiteDataStore.httpCookieStore
-        let targets = cookies.filter {
-            $0.domain.contains("qishui.com") || $0.domain.contains("douyin.com")
-        }
-        guard !targets.isEmpty else { return }
+        // **不再按域过滤。**
+        //
+        // 原来只搬 `*qishui.com` / `*douyin.com` 的 cookie。但通行证登录的票据
+        // 经常落在 `*.bytedance.com` / `*.zjcdn.com` 这类跳转域上，
+        // 被这里过滤掉之后，「壳说登录成功、页面照旧未登录」就出现了。
+        // cookie 本来就是同一次登录产生的，全量搬过去成本一样，
+        // 页面用不到的也不会自己带出去（域不匹配）。
         let done = DispatchSemaphore(value: 0)
         DispatchQueue.main.async {
             let group = DispatchGroup()
-            for cookie in targets {
+            for cookie in cookies {
                 group.enter()
                 store.setCookie(cookie) { group.leave() }
             }
@@ -7750,6 +7846,16 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
     private static func stub(for body: String) -> String {
         SHA256.hash(data: Data(body.utf8)).map { String(format: "%02X", $0) }.joined()
     }
+
+    /// 扫码登录全程使用的 `next`。
+    ///
+    /// 服务端按它决定 `redirect_url` 落在哪个域上，cookie 也就跟着落在那个域。
+    /// 原来填的是 API 域 `https://api.qishui.com`，于是会话票据落在 API 域，
+    /// 而页面是 `www.qishui.com` 上的——`importCookies` 搬过去也带不上。
+    /// 改填页面自己的域。实测（`_probe_qs7.js`）：空值会被判「缺少参数」，
+    /// `api.qishui.com` / `www.qishui.com` / 站点域三种都返回 `status=new`，
+    /// 说明服务端只校验非空，选页面域是为了让 cookie 落到页面能读到的地方。
+    static let loginNext = "https://www.qishui.com/"
 
     /// 请求用的 UA。
     ///

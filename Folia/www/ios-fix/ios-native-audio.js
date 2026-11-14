@@ -175,6 +175,8 @@
     var el = mirror, pos = position(), state = st;
     clearTimeout(state.fallbackTimer);
     mirror = null; st = null;
+    // 交还网页播放：撤掉「已交给原生」标记，壳那层的 AbortError 自愈重新生效。
+    try { el.__foliaNativeMirror = false; } catch (e) {}
     realMute(el, !!state.mutedIntent);
     if (restore) {
       try { D.currentTime.set.call(el, pos); } catch (e) {}
@@ -212,6 +214,14 @@
     if (mirror === el && st) clearTimeout(st.fallbackTimer);
     generation += 1;
     mirror = el;
+    // **给元素打上「已交给原生」的标记。**
+    //
+    // 壳在 document-start 注入的音频保活层也包了 `HTMLMediaElement.prototype.play`，
+    // 它在 `AbortError` 时会注册一次 `canplay` 重放。原生已经接管这个元素之后，
+    // 网页那一层再 `play()` 只会把刚起来的原生加载又中止一次 —— folia(19) 日志里
+    // `page play retry … resumed` 紧跟两次 `PLAY AUDIO AbortError` 就是这个叠加。
+    // 打标记之后壳那一层会跳过重试（见 `audioKeeperScript` 里的 `__foliaNativeMirror`）。
+    try { el.__foliaNativeMirror = true; } catch (e) {}
     // 和浏览器一样：play() 之后 paused 立刻是 false；原生确认开始出声时再派发 playing
     st = { url: url, intent: true, playing: true, announced: false, position: startAt, at: Date.now(), duration: NaN, ended: false, alive: false, mutedIntent: mutedIntent, volumeIntent: volumeIntent };
     realMute(el, true);
