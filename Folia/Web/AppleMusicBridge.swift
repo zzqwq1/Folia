@@ -191,7 +191,7 @@ final class AppleMusicBridge: NSObject, WKScriptMessageHandler {
 
     private func fetchPage(_ requestId: String, path: String, query: [String: String]) {
         let requestedOffset = Int(query["offset"] ?? "") ?? 0
-        request(path: path, query: query) { result in
+        request(path, query: query) { result in
             switch result {
             case .failure(let failure):
                 self.reply(requestId, ["ok": false, "error": failure.code])
@@ -207,7 +207,7 @@ final class AppleMusicBridge: NSObject, WKScriptMessageHandler {
                 var hasMore = false
                 var nextOffset = requestedOffset + data.count
                 if !next.isEmpty,
-                   let parsed = self.nextOffset(from: next),
+                   let parsed = Self.nextOffset(from: next),
                    parsed > requestedOffset {
                     hasMore = true
                     nextOffset = parsed
@@ -231,7 +231,7 @@ final class AppleMusicBridge: NSObject, WKScriptMessageHandler {
     }
 
     private func fetchLyrics(_ requestId: String, path: String) {
-        request(path: path, query: [:]) { result in
+        request(path) { result in
             switch result {
             case .failure(let failure):
                 // 页面 `Dh()` 对歌词的失败是「静默降级成无歌词」，只把
@@ -253,7 +253,7 @@ final class AppleMusicBridge: NSObject, WKScriptMessageHandler {
     /// 超时取 20 秒：页面给 `appleMusicRequest` 的预算是 30 秒，留 10 秒给
     /// JSON 整形 + 回包跨进程。超过预算页面会直接判 `native-provider-request-timeout`，
     /// 那时连错误码都保不住，只能整页报错。
-    private func request(_ path: String, query: [String: String],
+    private func request(_ path: String, query: [String: String] = [:],
                          completion: @escaping (Result<[String: Any], RequestFailure>) -> Void) {
         var components = URLComponents(string: Self.apiBase + path)
         if !query.isEmpty {
