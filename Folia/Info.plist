@@ -82,6 +82,8 @@
 	<string>用于选择本地音乐与图片。</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>用于连接同一局域网内的 Folia 服务端。</string>
+	<key>NSAppleMusicUsageDescription</key>
+	<string>用于在 Folia 内播放你的 Apple Music 音乐库。</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 </dict>

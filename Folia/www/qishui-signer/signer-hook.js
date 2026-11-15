@@ -1,102 +1,61 @@
-// 汽水音乐签名器。
-//
-// 背景：`api.qishui.com/passport/*` 要求请求带 44 位 `a_bogus`，它由抖音风控 SDK
-// （`bdms`）结合浏览器环境算出。原生侧没有这套环境，所以在 WKWebView 里开一个
-// 隐藏页面专门算签名，原生只负责真正发包。
-//
-// 原理：`sdk-glue.js` 自己是外层钩子，会在 `open()` 阶段把 `a_bogus` 补进发给
-// `/passport` 的 URL。我们在它**之前**装钩子，于是对同一个 xhr 实例，`open()`
-// 返回时 URL 已被改写；再在 `send()` 里截住，只把改写后的 URL 交回原生，
-// 请求本身一步都不发出去（避免 CORS，也不产生真实流量）。
-//
-// 本文件为本项目自写，只是沿用了这套公开的 SDK 调用协议。
+// Folia 汽水「签名器」钩子（必须排在 sdk-glue.js 之前加载）
+// 原理：glue 会 hook XMLHttpRequest 给发往 /passport 的请求补 a_bogus；
+// 我们在它之前装钩子，于是能拿到「已被重写过的 URL」，但**故意不把请求发出去**（避免 CORS），
+// 只把签名后的 URL 交回给宿主（App 内由原生/Node 真正发请求）。
 (function () {
-    'use strict';
+  // 1) 种 msToken：glue 会读同源 localStorage 的 xmst / xmsty
+  try {
+    var qs = new URLSearchParams(location.search);
+    var given = qs.get('ms');
+    if (given && given.length >= 100) { localStorage.setItem('xmst', given); localStorage.setItem('xmsty', given); }
+    if (!localStorage.getItem('xmst')) {
+      var buf = new Uint8Array(88);
+      (window.crypto || {}).getRandomValues ? crypto.getRandomValues(buf) : buf.forEach(function (_, i) { buf[i] = Math.floor(Math.random() * 256); });
+      var s = btoa(String.fromCharCode.apply(null, Array.prototype.slice.call(buf)))
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '') + '==';
+      localStorage.setItem('xmst', s); localStorage.setItem('xmsty', s);
+    }
+  } catch (e) { /* ignore */ }
+  window.__foliaMsToken = function () { try { return localStorage.getItem('xmst') || ''; } catch (e) { return ''; } };
 
-    // 1) SDK 会从同源 localStorage 读 `xmst` / `xmsty` 作为 msToken。
-    //    这里必须是「本页自己的」localStorage，因为隐藏页与主站不同源。
-    try {
-        if (!localStorage.getItem('xmst')) {
-            var buf = new Uint8Array(88);
-            if (window.crypto && crypto.getRandomValues) {
-                crypto.getRandomValues(buf);
-            } else {
-                for (var i = 0; i < buf.length; i++) { buf[i] = Math.floor(Math.random() * 256); }
-            }
-            var chars = '';
-            for (var j = 0; j < buf.length; j++) { chars += String.fromCharCode(buf[j]); }
-            var ms = btoa(chars).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '') + '==';
-            localStorage.setItem('xmst', ms);
-            localStorage.setItem('xmsty', ms);
-        }
-    } catch (e) { /* 隐私模式下写不进去，签名仍可能成功，不阻断 */ }
+  // 2) 记录 open 传入的 URL（此时 glue 的重写已经发生过，因为它是外层）
+  var open0 = XMLHttpRequest.prototype.open;
+  var send0 = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function (method, url) {
+    this.__foliaUrl = url; this.__foliaMethod = method;
+    return open0.apply(this, arguments);
+  };
+  // 3) 我们自己的签名请求：只取签名结果，不发送
+  XMLHttpRequest.prototype.send = function (body) {
+    if (this.__foliaSignRequest) {
+      var done = this.__foliaSignResolve;
+      this.__foliaSignRequest = false;
+      if (done) done({ url: this.__foliaUrl, method: this.__foliaMethod, body: body == null ? null : String(body) });
+      return;
+    }
+    return send0.apply(this, arguments);
+  };
 
-    var openBase = XMLHttpRequest.prototype.open;
-    var sendBase = XMLHttpRequest.prototype.send;
-
-    // 2) 记录 open 传入的 URL。我们装在内层，SDK 改完 URL 后才会调到这里，
-    //    所以这里拿到的已经是补好签名的地址。
-    XMLHttpRequest.prototype.open = function (method, url) {
-        this.__foliaUrl = url;
-        this.__foliaMethod = method;
-        return openBase.apply(this, arguments);
-    };
-
-    // 3) 签名请求走到 send 时直接结束，不真正发起网络请求。
-    XMLHttpRequest.prototype.send = function (body) {
-        if (this.__foliaSignRequest) {
-            var settle = this.__foliaSignResolve;
-            this.__foliaSignRequest = false;
-            if (settle) {
-                settle({ url: this.__foliaUrl, method: this.__foliaMethod });
-            }
-            return;
-        }
-        return sendBase.apply(this, arguments);
-    };
-
-    // 4) 对外的签名接口：给定完整 URL，返回补齐 `a_bogus` 的 URL。
-    window.__foliaSign = function (method, url) {
-        return new Promise(function (resolve, reject) {
-            var settled = false;
-            var timer = setTimeout(function () {
-                if (settled) { return; }
-                settled = true;
-                reject(new Error('signer timeout'));
-            }, 8000);
-
-            var xhr;
-            try { xhr = new XMLHttpRequest(); } catch (e) { clearTimeout(timer); reject(e); return; }
-
-            xhr.__foliaSignRequest = true;
-            xhr.__foliaSignResolve = function (result) {
-                if (settled) { return; }
-                settled = true;
-                clearTimeout(timer);
-                // 校验签名确实补上了：没有 44 位的 a_bogus，说明 SDK 没接管这条路径。
-                var signed = '';
-                try {
-                    signed = new URL(result.url, location.href).searchParams.get('a_bogus') || '';
-                } catch (e) { /* 留给下面统一判失败 */ }
-                if (signed.length === 44) {
-                    resolve({ url: result.url, aBogus: signed });
-                } else {
-                    reject(new Error('a_bogus missing'));
-                }
-            };
-
-            try {
-                xhr.open(method || 'GET', url, true);
-                xhr.send(null);
-            } catch (e) {
-                if (!settled) {
-                    settled = true;
-                    clearTimeout(timer);
-                    reject(e);
-                }
-            }
-        });
-    };
-
-    window.__foliaSignerLoaded = true;
+  window.__foliaSign = function (method, url, headers, body) {
+    return new Promise(function (resolve, reject) {
+      var settled = false;
+      var timer = setTimeout(function () { if (!settled) { settled = true; reject(new Error('sign timeout')); } }, 8000);
+      var x;
+      try { x = new XMLHttpRequest(); } catch (e) { return reject(e); }
+      x.__foliaSignRequest = true;
+      x.__foliaSignResolve = function (r) {
+        if (settled) return; settled = true; clearTimeout(timer);
+        // 校验 glue 是否真的补上了签名
+        var ok = false;
+        try { var q = new URL(r.url, location.href).searchParams; ok = (q.get('a_bogus') || '').length === 44; } catch (e) {}
+        if (ok) resolve(r); else reject(new Error('a_bogus missing'));
+      };
+      try {
+        x.open(method || 'GET', url, true);
+        Object.keys(headers || {}).forEach(function (k) { try { x.setRequestHeader(k, headers[k]); } catch (e) {} });
+        x.send(body == null ? null : body);
+      } catch (e) { if (!settled) { settled = true; clearTimeout(timer); reject(e); } }
+    });
+  };
+  window.__foliaHookReady = true;
 })();

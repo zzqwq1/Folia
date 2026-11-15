@@ -201,6 +201,10 @@ final class WebContainerView: UIView {
     /// 每次主框架提交后由 `installQishuiBridge()` 重新挂上。
     private let qishuiRelay = QishuiBridge()
 
+    /// Apple Music 原生 provider 桥。`WKUserContentController` 只弱持有消息处理器，
+    /// 这里强引用住，重建 WebView 时随新实例一起换代。
+    private var appleMusicRelay: AppleMusicBridge?
+
     /// 把「用户正在看的那一页」落盘。
     ///
     /// 这里记**完整地址（含哈希路由）**，不再提前去哈希。
@@ -622,6 +626,15 @@ final class WebContainerView: UIView {
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
+        // iPhone 的视口锁定 + 旋转静默窗口（学自参考包 `ios-fix/scale.js`）。
+        // iPad 画像不装这一段：它的尺寸本来就适合桌面布局，固定缩放只会更丑。
+        if Self.ShellProfile.current == .aggressive {
+            userContent.addUserScript(WKUserScript(
+                source: Self.iphoneViewportScript,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: true
+            ))
+        }
         // 基础实例（普通冷启动）不钉路由：页面自己切到哪一屏是页面的自由。
         // 只有 `rebuildWebView` 重建时才把落脚点钉死（见 rebuildWebView 里的注入）。
         userContent.addUserScript(WKUserScript(
@@ -652,6 +665,15 @@ final class WebContainerView: UIView {
         // 注意 `electron` 这个对象同时是 0.7.24 判定桌面窗口的依据，
         // 桌面分支在 iPhone 上的影响已逐条核对（见 `bridgeInstallScript`）。
         userContent.add(qishuiRelay, name: "foliaQishui")
+        // 汽水签名器：线上站的 `/qishui-auth-v6/*` 实测不存在（服务器回落到 index.html），
+        // 由这里在请求层用包内文件顶替。见 `QishuiSignerAssets` 的注释。
+        configuration.setURLSchemeHandler(QishuiSignerAssetHandler(),
+                                          forURLScheme: QishuiSignerAssets.scheme)
+        // Apple Music：线上页的 provider 把全部能力委托给这条原生通道
+        // （逆向 `Xm()` 得到，见 `AppleMusicBridge`）。
+        let appleMusic = AppleMusicBridge(webView: webView)
+        appleMusicRelay = appleMusic
+        userContent.add(appleMusic, name: "foliaProviderAuth")
         // 注册原生播放器桥
         NativePlayer.shared.webView = nil
         // 原生播放器自己只动 AVPlayer，完全不碰壳的意图系统：用户走 cmd=pause 时
@@ -862,6 +884,30 @@ final class WebContainerView: UIView {
       }
       window.electron = bridge;
       window.__foliaBridge = bridge;
+      // **汽水扫码确认后的收尾钩子。**
+      //
+      // 页面停在「等待扫码」时，它自己的轮询已被 `login_qr_cancel` 断流，
+      // 没有任何事件会把它拉出来。旧壳靠 `view.reload()` 收尾，而重载 +
+      // 重负载路由正是进程被顶死的现场（日志里的 `death at #playlist/…`）。
+      //
+      // 这里改成事件化：壳确认后调 `__foliaQishuiSignedIn()`，
+      // 页面侧重新走一遍登录态检查，不重建文档。
+      // 页面没有暴露刷新入口时，退回「派发一个 DOM 事件」这条通用路 ——
+      // 页面里任何监听 `visibilitychange` / `focus` 的登录检查都会被拉起。
+      window.__foliaQishuiSignedIn = function(){
+        try {
+          if (typeof window.__foliaQishuiRefreshLogin === 'function') {
+            window.__foliaQishuiRefreshLogin();
+            return 'refresh';
+          }
+        } catch (e) {}
+        try {
+          window.dispatchEvent(new Event('focus'));
+          window.dispatchEvent(new CustomEvent('folia:qishui-signed-in'));
+          return 'event';
+        } catch (e) {}
+        return 'none';
+      };
     })();
     """
 
@@ -920,6 +966,7 @@ final class WebContainerView: UIView {
         // 两个回传通道都要拿到 webView：一个往页面塞本地画的二维码，一个做播放意图。
         qrRelay?.webView = webView
         qishuiRelay.webView = webView
+        appleMusicRelay?.webView = webView
         // 原生播放器也要拿到webView，用于回调JS
         NativePlayer.shared.webView = webView
 
@@ -1300,6 +1347,18 @@ final class WebContainerView: UIView {
         // 结果就是既没装载、也没人再来装载，用户对着空白壳等。
         guard webView == nil else { return }
         pendingRebuild = nil
+        // **自愈保护位在这里复位，不能只等首屏探测。**
+        //
+        // 首屏探测（`firstPaintProbeScript`）在「`#root` 还空、`#app-splash` 在」
+        // 时恒返回 `loading`，而线上站进歌单那一屏恰好就是这样 ——
+        // 于是 `rebuiltSinceLaunch` / `rebuildQuotaUsed` / `consecutiveAutoReloads`
+        // 一旦被消耗就永不复位，后面的进程终止再也得不到重建机会，
+        // 用户看到的就是「进歌单闪退回加载界面」。
+        // 重建本身已经是一次完整的自愈（新进程、新实例），配额理应从零开始。
+        rebuiltSinceLaunch = false
+        rebuildQuotaUsed = false
+        consecutiveAutoReloads = 0
+        wakeRecoveryInFlight = false
         // **落脚点必须带哈希路由。** 日志 07-23-35Z 第 13 行、07-23-56Z 第 14/24/34 行
         // 全是 `rebuild: reopen /` —— 地址位里明明是
         // `#collection/online/netease/playlist/14400331811`，落到的却是首页：
@@ -1321,6 +1380,7 @@ final class WebContainerView: UIView {
         // `WKUserContentController`，但二维码回传那条要拿到新的 webView 引用）。
         qrRelay?.webView = view
         qishuiRelay.webView = view
+        appleMusicRelay?.webView = view
         // **扫码会话不随 WebContent 进程死掉。**
         //
         // folia(18)：`qishui native poll state=scanned` 之后一拍网络失败
@@ -1546,6 +1606,13 @@ final class WebContainerView: UIView {
             wakeRecoveryInFlight = true
             if alive {
                 CrashLog.note("==== foreground wake: page alive, reload in place ====")
+                // `reloadInPlace` 会触发一次真实导航。`didFailProvisionalNavigation`
+                // 会拿 `wakeRecoveryInFlight` 这张牌子当「唤醒那一轮」的豁免凭据；
+                // 但是页面活着、原地重载成功时根本没有失败回调来摘牌，
+                // 牌子就永久挂着 —— 此后每一次冷启动的加载失败都被当成
+                // 「唤醒豁免」直接吞掉，用户对着加载界面等到超时。
+                // 所以这一拍立刻手动摘牌。
+                wakeRecoveryInFlight = false
                 reloadInPlace(after: "foreground-wake")
                 return
             }
@@ -1979,6 +2046,20 @@ final class WebContainerView: UIView {
             for (var i = 0; i < heavy.length; i += 1) {
               if (heavy[i] && here.indexOf(heavy[i]) === 0) { isHeavy = true; break; }
             }
+            // **同一路由只做一次。**
+            //
+            // 这个函数由 `refreshPageLocation` 每秒调一次，而下面的现场快照
+            // 要遍历全部元素读 `style.backgroundImage`、逐张图读
+            // `getBoundingClientRect()`。每秒一次全量 DOM 遍历本身就会让
+            // 页面主线程在歌单那种千级节点的屏上持续掉帧、并把内存观测值
+            // 推到顶 —— 为了「省内存」反而加大了被 jetsam 的概率。
+            // 开关位与 `__foliaTuneImages` 只需要在路由变化时重算一次。
+            var key = here + (isHeavy ? '|H' : '|L');
+            var applied = String(window.__foliaLowMemoryKey || '');
+            if (applied === key && typeof window.__foliaLowMemory === 'boolean') {
+              return window.__foliaLowMemory;
+            }
+            window.__foliaLowMemoryKey = key;
             window.__foliaLowMemory = isHeavy;
             var root = document.documentElement;
             if (!root) { return isHeavy; }
@@ -2088,6 +2169,16 @@ final class WebContainerView: UIView {
     /// 往往走的是回前台探测（`markVisiblePageIfNeeded`），首屏检查那一轮早就过期了。
     /// 配额不复位，用户在歌单里正常翻两次就会把 `consecutiveAutoReloads` 用光 ——
     /// 之后真正需要自愈的那一次直接被拦下，用户看到的就是「回到加载界面」。
+    /// 首屏画出来了：把「自愈配额」复位，允许下一轮再自愈。
+    ///
+    /// **这里的复位不能只依赖首屏探测。** 旧实现只有这一个复位点，
+    /// 而首屏探测（`firstPaintProbeScript`）在「`#root` 还空、`#app-splash` 在」
+    /// 时会一直返回 `loading`。线上站进歌单那一屏恰好就是这样 ——
+    /// 于是 `rebuiltSinceLaunch` / `rebuildQuotaUsed` / `consecutiveAutoReloads`
+    /// 一旦被消耗就**永不复位**，后面的进程终止再也得不到重建机会，
+    /// 用户看到的就是「进歌单闪退回加载界面」。
+    /// 现在进程终止重建本身也会复位它们（见 `installRebuiltWebView`），
+    /// 这里保留首屏这一路作为更早的放行点。
     private func markFirstPaintSettled() {
         rebuiltSinceLaunch = false
         rebuildQuotaUsed = false
@@ -5718,6 +5809,14 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
             decisionHandler(.allow)
             return
         }
+        // 隐藏签名 WebView 不走主容器的 delegate：它自己按
+        // `QishuiSignerAssets.rewrite` 加载，这里不该看到它的
+        // `folia-signer://` 请求。防御性地放行，避免被下面对「未知 scheme」
+        // 的分支误判成外跳。
+        if url.scheme?.lowercased() == QishuiSignerAssets.scheme {
+            decisionHandler(.allow)
+            return
+        }
 
         let scheme = url.scheme?.lowercased() ?? ""
         if scheme == "about" || scheme == "blob" || scheme == "data" || scheme.isEmpty {
@@ -5728,6 +5827,25 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         let host = url.host?.lowercased() ?? ""
         let isMainFrame = navigationAction.targetFrame?.isMainFrame == true
         let isSameSite = host == Self.siteHost || host.hasSuffix(".\(Self.siteHost)")
+
+        // **汽水签名器资源顶替。**
+        // 页面的签名 iframe 指向 `https://app.folia-api.top/qishui-auth-v6/signer.html`，
+        // 线上站这个路径其实回落到 index.html（文件根本没部署）。签名器因此永远起不来，
+        // 扫码确认后一直卡在登录中。这里改写到 `folia-signer://`，由
+        // `QishuiSignerAssetHandler` 从包内 `www/qishui-signer/` 取同构文件。
+        // 只拦这几条，别的请求一律不动。
+        if QishuiSignerAssets.isSignerAsset(url), let local = QishuiSignerAssets.rewrite(url) {
+            CrashLog.note("==== qishui signer asset served locally: \(url.lastPathComponent) ====")
+            if let target = navigationAction.targetFrame {
+                // 子帧（页面里的签名 iframe）和顶层（隐藏签名 WebView）都改写到
+                // `folia-signer://`；scheme handler 会带
+                // `Access-Control-Allow-Origin: https://app.folia-api.top`，
+                // 父页面依然能通过 `contentWindow` 与它通信。
+                target.load(URLRequest(url: local))
+            }
+            decisionHandler(.cancel)
+            return
+        }
 
         // 用户从抖音 / 微信这类 App 点链接回到本 App 时，系统会把那条链接交给我们
         // 已经在跑的 WKWebView，让主框架接着加载它 —— 播放器界面被换成一个外站页面。
@@ -6308,6 +6426,164 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
             #endif
         }
     }
+
+    /// iPhone 专用视口锁定 + 旋转静默窗口（学自参考包 IOS-Folia-3.0.5 的 `ios-fix/scale.js`）。
+    ///
+    /// 为什么这不是「美化」而是**保命**：
+    /// - iOS 在每次旋转时都会自己重算 viewport 缩放，重算过程中的每一帧都会让
+    ///   WebKit 重新合成整页图层。我们这页是 `position:fixed` 的全屏桌面布局 +
+    ///   WebGL 可视化，旋转那一下的合成层峰值正是 WebContent 被 jetsam 的高发点。
+    ///   参考包的解法是把 `width` / `initial-scale` / `minimum-scale` / `maximum-scale`
+    ///   四值**同时锁死**，系统不再自行重算；
+    /// - 静止时按 `屏幕短边 / 0.9` 给桌面宽度（竖屏视觉上就是 90%），横屏改用长边 / 0.47，
+    ///   这样页面始终按「桌面宽度」排版，站点自己的窄屏断点不会被触发，浮层不会重叠；
+    /// - 旋转过程中先打 `data-ios-rotating`，让页面侧把过渡/毛玻璃/重动画冻住，
+    ///   等原生的旋转动画结束（170ms + 一帧）再真正改 viewport。
+    ///
+    /// 安全区仍按 pt 给，除以 `--ios-scale` 才是视觉正确的偏移量，页面侧可以直接用。
+    static let iphoneViewportScript = """
+    (function () {
+      'use strict';
+      var KEY = 'folia_ios_scale';
+      var VER_KEY = 'folia_ios_scale_v';
+      var VER = '3';
+      var DEFAULT = 0.9;
+      function isLandscape() {
+        try {
+          if (window.matchMedia) { return window.matchMedia('(orientation: landscape)').matches; }
+        } catch (e) {}
+        return window.innerWidth > window.innerHeight;
+      }
+      function targetScale() {
+        // 与参考包一致：竖屏 90% / 横屏 47%。
+        return isLandscape() ? 0.47 : 0.9;
+      }
+      function read() {
+        try {
+          if (localStorage.getItem(VER_KEY) !== VER) {
+            localStorage.setItem(VER_KEY, VER);
+            localStorage.setItem(KEY, String(DEFAULT));
+            return DEFAULT;
+          }
+        } catch (e) {}
+        var v = parseFloat(localStorage.getItem(KEY));
+        return isFinite(v) && v >= 0.2 && v <= 1.2 ? v : DEFAULT;
+      }
+      var hasAppliedOnce = false;
+      function apply(scale) {
+        var shorter = Math.min(window.screen.width, window.screen.height);
+        var longer = Math.max(window.screen.width, window.screen.height);
+        var base = isLandscape() ? longer : shorter;
+        var w = Math.max(320, Math.round(base / scale));
+        var m = document.querySelector('meta[name=viewport]');
+        if (!m) {
+          m = document.createElement('meta');
+          m.setAttribute('name', 'viewport');
+          document.head.appendChild(m);
+        }
+        // 四值同锁：只给 width 时 iOS 每次旋转都会自己重算缩放，
+        // 重算过程会反复整页合成，这正是旋转时进程被回收的高发点。
+        var locked = Math.max(0.2, Math.min(1.2, scale));
+        m.setAttribute('content', 'width=' + w + ', initial-scale=' + locked
+          + ', minimum-scale=' + locked + ', maximum-scale=' + locked
+          + ', viewport-fit=cover, user-scalable=no');
+        try { localStorage.setItem(KEY, String(scale)); } catch (e) {}
+        // 安全区是按 pt 给的，而布局是按 width=屏宽/scale 排的，
+        // 页面侧必须拿这个比例去换算，否则刘海/手势区会偏。
+        try { document.documentElement.style.setProperty('--ios-scale', String(scale)); } catch (e) {}
+        var kick = function () { try { window.dispatchEvent(new Event('resize')); } catch (e) {} };
+        if (!hasAppliedOnce) {
+          hasAppliedOnce = true;
+          setTimeout(kick, 60);
+          setTimeout(kick, 600);
+        } else {
+          try {
+            window.requestAnimationFrame(function () { window.requestAnimationFrame(kick); });
+          } catch (e) { setTimeout(kick, 60); }
+        }
+      }
+      var lastAppliedScale = null;
+      var lastOrientation = isLandscape();
+      var rotationCommitTimer = null;
+      var rotationFrame = null;
+      var rotationTimer = null;
+      var settleTimer = null;
+      function setRotating(active) {
+        try {
+          if (active) { document.documentElement.setAttribute('data-ios-rotating', '1'); }
+          else { document.documentElement.removeAttribute('data-ios-rotating'); }
+          document.dispatchEvent(new CustomEvent(active ? 'folia:ios-rotation-start' : 'folia:ios-rotation-end'));
+        } catch (e) {}
+      }
+      // 旋转期间冻住过渡 / 动画 / 毛玻璃。这三个都是「整层重新合成」的成本，
+      // 在旋转的快照动画上叠加会让合成层峰值翻倍 —— 参考包实测这是旋转时被
+      // WebContent 结束的直接原因。320ms 之后由 `setRotating(false)` 放开。
+      try {
+        var st = document.createElement('style');
+        st.id = 'folia-ios-rotate-freeze';
+        st.textContent = 'html[data-ios-rotating], html[data-ios-rotating] * {'
+          + 'transition: none !important; animation-play-state: paused !important;'
+          + '}'
+          + 'html[data-ios-rotating] * { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }';
+        (document.head || document.documentElement).appendChild(st);
+      } catch (e) {}
+      function syncOrientationScale() {
+        var next = targetScale();
+        var nextOrientation = isLandscape();
+        if (next === lastAppliedScale && nextOrientation === lastOrientation) { return; }
+        lastAppliedScale = next;
+        lastOrientation = nextOrientation;
+        apply(next);
+      }
+      function scheduleSync() {
+        if (isLandscape() === lastOrientation) { return; }
+        if (rotationCommitTimer) { clearTimeout(rotationCommitTimer); }
+        if (rotationTimer) { clearTimeout(rotationTimer); }
+        if (settleTimer) { clearTimeout(settleTimer); }
+        if (rotationFrame !== null) {
+          try { cancelAnimationFrame(rotationFrame); } catch (e) {}
+          rotationFrame = null;
+        }
+        // **旋转静默窗口。**
+        // iOS 还在播放旧快照的旋转动画，这时候改 viewport 等于在旧快照上重排，
+        // 系统会把这一帧的合成层留到最后一起丢给 GPU —— 内存翻倍的那一刻就在这里。
+        setRotating(true);
+        rotationCommitTimer = setTimeout(function () {
+          rotationCommitTimer = null;
+          var commit = function () {
+            rotationFrame = null;
+            syncOrientationScale();
+            rotationTimer = setTimeout(function () {
+              rotationTimer = null;
+              try { document.documentElement.removeAttribute('data-ios-rotating'); } catch (e) {}
+              try { document.dispatchEvent(new CustomEvent('folia:ios-rotation-end')); } catch (e) {}
+            }, 320);
+            // 系统偶尔会吞掉 viewport 更新，稳定后核对一次。
+            settleTimer = setTimeout(function () {
+              settleTimer = null;
+              var base = isLandscape()
+                ? Math.max(window.screen.width, window.screen.height)
+                : Math.min(window.screen.width, window.screen.height);
+              var expected = Math.round(base / targetScale());
+              if (Math.abs(window.innerWidth - expected) > 12) {
+                lastAppliedScale = null;
+                syncOrientationScale();
+              }
+            }, 560);
+          };
+          if (window.requestAnimationFrame) { rotationFrame = requestAnimationFrame(commit); }
+          else { commit(); }
+        }, 170);
+      }
+      try {
+        var start = targetScale();
+        lastAppliedScale = start;
+        apply(start);
+      } catch (e) {}
+      window.addEventListener('orientationchange', scheduleSync);
+      window.addEventListener('resize', scheduleSync);
+    })();
+    """
 
     /// 低内存画像：在页面任何脚本读 localStorage 之前（document-start），把站点
     /// **看不见的性能项**调低，并把封面 URL 尺寸压下来。
@@ -7137,10 +7413,25 @@ private final class AudioIntentRelay: NSObject, WKScriptMessageHandler {
 
 /// 网页里的未捕获错误 / 资源加载失败，落到本地日志，供「闪退」定位。
 private final class JSLogRelay: NSObject, WKScriptMessageHandler {
+    /// 同一条内容在窗口期内只落一次盘。
+    ///
+    /// 页面的 `console.error` / 资源 404 会成串刷（歌单里封面 404 一次就是几十条），
+    /// 而 `CrashLog.note` 是同步写文件 —— 每条都落盘会在主线程上累积成肉眼可见的卡顿，
+    /// 卡顿本身又会让看门狗误判「页面没响应」。
+    private static let window: TimeInterval = 5
+    private var lastNote: [String: Date] = [:]
+
     func userContentController(_ userContentController: WKUserContentController,
                                didReceive message: WKScriptMessage) {
         guard let body = message.body as? String else { return }
-        CrashLog.note("JS \(body)")
+        // 正文限长：偶发的大对象字符串化会把日志文件撑爆。
+        let text = body.count > 400 ? String(body.prefix(400)) + "…" : body
+        let now = Date()
+        if let seen = lastNote[text], now.timeIntervalSince(seen) < Self.window { return }
+        lastNote[text] = now
+        // 字典本身也要限长，否则整场会话下来键会一直涨。
+        if lastNote.count > 200 { lastNote.removeAll(keepingCapacity: true) }
+        CrashLog.note("JS \(text)")
     }
 }
 
@@ -7225,7 +7516,13 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
     /// 全部收敛到这一条串行队列：天然互斥，不用给每次字典访问加锁。
     private let workQueue = DispatchQueue(label: "folia.qishui", qos: .userInitiated)
 
-    weak var webView: WKWebView?
+    weak var webView: WKWebView? {
+        didSet {
+            // 签名器与主页面必须共用一套 localStorage（见 `QishuiSigner.prepare()`）。
+            // 主 WebView 换代（进程终止重建）时这里跟着换，签名器下次重建就会生效。
+            signer.hostStoreSource = webView
+        }
+    }
 
     /// 上一代进程遗留的请求是否还堵在 `workQueue` 里。
     ///
@@ -7250,6 +7547,8 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
     /// 页面上一次成功的登录态。cookie 由页面自己的 `WKHTTPCookieStore` 保存，
     /// 这里只记「有没有登录过」，用于诊断和 `login_status`。
     private static let signedInKey = "folia.qishui.signedIn"
+    /// `login_status` 回给页面的用户 id 的种子。生成一次就落盘，退出登录才换。
+    private static let userSeedKey = "folia.qishui.userSeed"
 
     func userContentController(_ userContentController: WKUserContentController,
                                didReceive message: WKScriptMessage) {
@@ -7367,17 +7666,33 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
             // 登录后页面立刻会读账号的歌单 / 喜欢列表。壳没有汽水的车机接口，
             // 这里回**合法的空页**而不是抛错：`playlistsOf` 一失败，
             // 整个登录收尾就落回 `account-not-read`，界面停在失败态。
-            return ["items": [], "hasMore": false, "total": 0, "nextOffset": 0]
+            return ["items": [[String: Any]](), "hasMore": false, "total": 0, "nextOffset": 0]
         case "liked_songs":
-            return ["ids": [], "whole": true]
+            // 页面侧校验很硬：`ids` 必须是「纯数字字符串」数组、`whole` 必须是布尔，
+            // 否则直接抛 `invalid-response` 并把整条登录链记成失败。
+            return ["ids": [String](), "whole": true]
         case "recent_played", "playlist_tracks", "artist_songs":
-            return ["items": [], "hasMore": false, "nextOffset": 0]
+            return ["items": [[String: Any]](), "hasMore": false, "nextOffset": 0]
         case "playlist_detail", "artist_detail":
-            return NSNull()
+            // **不能回 null。**
+            //
+            // 页面 `getPlaylistDetail()` 拿到 null 会认为「这个歌单不存在」，
+            // 用户点进歌单就直接被弹回列表，看起来像闪退。
+            // 回一个「合法但空」的集合对象：`rS()` 只要求 `base_info.id` 存在，
+            // 其余字段缺失都会走默认值。
+            let id = (params["id"] as? String) ?? "0"
+            return [
+                "base_info": ["id": id, "title": "歌单", "owner_id": currentUser()["id"] as? String ?? "0"],
+                "display_info": [String: Any](),
+                "resource_cnt": ["track_cnt": 0]
+            ]
         case "logout":
             pendingQR.removeAll()
             stopNativeQRPoll(reason: "logout")
             UserDefaults.standard.removeObject(forKey: Self.signedInKey)
+            // 退出登录时换一个用户种子：下次登录按新账号算 id，
+            // 不能让页面把新账号当成旧账号（缓存全命中）。
+            UserDefaults.standard.removeObject(forKey: Self.userSeedKey)
             return NSNull()
         default:
             // 登录成功之后，页面还会继续读首页推荐 / 排行榜 / 最近播放等接口。
@@ -7385,7 +7700,7 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
             // 但**抛错会让整个汽水入口显示为失败** —— 真机上的表现就是
             // 「显示登录成功，却进不去」。回一个合法空页，至少能进去看到「暂无内容」。
             CrashLog.note("==== qishui unsupported action=\(action), empty page ====")
-            return ["items": [], "hasMore": false, "nextOffset": 0]
+            return ["items": [[String: Any]](), "hasMore": false, "nextOffset": 0]
         }
     }
 
@@ -7640,23 +7955,35 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
                 // 它要等下一次 login_status（往往是重启 / 闪退之后）才能
                 // 发现登录成功。这里主动触发一次存储事件，页面侧的
                 // qishui shim 监听到后立刻重查登录态、收尾进主界面。
-                if state == "confirmed", let view = self.webView {
-                    // **确认后用 reload 收尾，而不是写 localStorage。**
+                if state == "confirmed", self.webView != nil {
+                    // **确认后不再 reload。**
                     //
-                    // 之前的方案是 `localStorage.setItem('folia_qishui_signed_in', …)`，
-                    // 指望页面侧监听 storage 事件 —— 但 WebKit 里同页面的
-                    // storage 写入根本不触发本页的 storage 事件（那只跨文档），
-                    // 页面侧也从未装过任何读这个 key 的逻辑，等于纯空转。
-                    // 页面此刻停在「等待扫码」界面，它自己的轮询早被
-                    // login_qr_cancel 断了，没有任何事件会把它拉出来。
+                    // 旧实现在这里 `view.reload()`，本意是让页面重启时重问一次
+                    // `login_status`。但代价太大：重载等于把整个 SPA 重新拉一遍，
+                    // 用户扫码时通常停在「我的」或歌单页，重载 + 重负载路由 =
+                    // 进程被内存顶死的经典现场 —— 日志里那两次
+                    // `death at #playlist/…` 就发生在 reload 之后。
                     //
-                    // reload 是最朴素也最可靠的收尾：页面重启时第一件事
-                    // 就是 `login_status`，壳这边 signedInKey 已置位、
-                    // `login_status` 会回 `currentUser()`（合法形状），
-                    // 登录收尾由页面自己的启动流程完成。cookie 若已拿到
-                    // 也随 importCookies 进了 WebView 存储，一并生效。
-                    CrashLog.note("==== qishui confirmed: reloading page to finish login ====")
-                    DispatchQueue.main.async { view.reload() }
+                    // 现在改成直接回调页面：页面侧装了
+                    // `window.__foliaQishuiSignedIn` 钩子，收到后自行重查登录态
+                    // 并收尾，不重建文档、不重跑 bundle。
+                    // 钩子不存在（旧页面缓存）时这一步是空操作，页面下次
+                    // 主动问 `login_status` 时同样能拿到正确结果。
+                    CrashLog.note("==== qishui confirmed: notifying page (no reload) ====")
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self else { return }
+                        // 先把 cookie 灌进 WebView 存储，再通知页面，顺序不能反：
+                        // 页面收到通知后会立刻发 `login_status`，而它读的是壳的
+                        // signedIn 位与 currentUser()，不依赖 cookie；但后续
+                        // 页面内直接的 fetch（如头像）依赖 cookie 已就位。
+                        self.webView.evaluateJavaScript(
+                            "window.__foliaQishuiSignedIn && window.__foliaQishuiSignedIn();",
+                            completionHandler: { _, error in
+                                if let error {
+                                    CrashLog.note("==== qishui signed-in hook failed: \(error.localizedDescription) ====")
+                                }
+                            })
+                    }
                 }
                 return
             }
@@ -7760,11 +8087,42 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
     /// 拿不到车机接口的 `me/info`，所以用会话 cookie 的哈希做稳定 id：
     /// 同一次登录跨启动不变，退出登录换一份，不会每次启动都变成「另一个用户」。
     private func currentUser() -> [String: Any] {
-        let seed = (session.configuration.httpCookieStorage?.cookies ?? [])
-            .first { $0.name == "sessionid" || $0.name == "sessionid_ss" }?
-            .value ?? UUID().uuidString
+        // **id 必须稳定。**
+        //
+        // 旧实现走 `?? UUID().uuidString`：cookie 仓里没有 `sessionid` 时，
+        // 每调一次 `login_status` 就换一个 id。页面侧 `iS()` 拿这个 id 当账号身份，
+        // 「同一个账号 id 一直变」在收尾那一拍被当成换人 —— 表现就是
+        // 「扫码确认了、壳也说成功了，页面还是没登录」。
+        // 现在生成一次就落盘（`qishuiUserSeedKey`），退出登录才换。
+        let seed: String
+        if let cookieSeed = (session.configuration.httpCookieStorage?.cookies ?? [])
+            .first(where: { $0.name == "sessionid" || $0.name == "sessionid_ss" })?
+            .value, !cookieSeed.isEmpty {
+            seed = cookieSeed
+        } else {
+            if let saved = UserDefaults.standard.string(forKey: Self.userSeedKey), !saved.isEmpty {
+                seed = saved
+            } else {
+                let fresh = UUID().uuidString
+                UserDefaults.standard.set(fresh, forKey: Self.userSeedKey)
+                seed = fresh
+            }
+        }
         let digest = SHA256.hash(data: Data(seed.utf8))
-        let id = digest.prefix(8).map { String(format: "%02x", $0) }.joined()
+        // **id 必须是纯数字。**
+        //
+        // 页面侧 `nS()` 对汽水歌曲 id 硬校验 `/^\d+$/`，`rS()` 对歌单 id
+        // 虽然不校验数字，但 `iS()` 拿到的账号 id 会被直接拼进后续请求参数。
+        // 旧实现取 SHA256 的十六进制（含 a-f），一旦哪条路径落到这个 id 上，
+        // 页面立刻抛 `invalid-response`，整个登录收尾失败。
+        // 这里把摘要按十进制取模，得到稳定的 15 位数字串。
+        var accumulator: UInt64 = 0
+        for byte in digest.prefix(8) {
+            accumulator = accumulator &* 31 &+ UInt64(byte)
+        }
+        let id = String(accumulator % 1_000_000_000_000_000)
+        // 页面侧 `iS()` 读的是 `avatar`，且 `tS()` 只认 `https://` 开头的字符串；
+        // 给空串是安全的（页面会渲染占位图），给别的会被丢弃。
         return ["id": id, "nickname": "汽水音乐", "avatar": "", "isVip": false]
     }
 
@@ -7801,8 +8159,20 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
     ///
     /// 登录请求是 URLSession 发的，`Set-Cookie` 落在它自己的 cookie 仓里；
     /// 页面后续请求（`luna/me` 等）走的是 WKWebView，两个仓不互通，必须搬一次。
-    /// `WKHTTPCookieStore` 只能在主线程碰，这里同步等它写完，保证随后的轮询结果
-    /// 返回给页面时，页面紧接着发的请求已经能带上登录态。
+    ///
+    /// **这里原来会死锁。** 旧实现是：
+    /// ```swift
+    /// DispatchQueue.main.async { ... store.setCookie(...) { done.signal() } }
+    /// _ = done.wait(timeout: .now() + 5)
+    /// ```
+    /// 而本函数跑在串行的 `workQueue` 上，同一时刻主线程很可能正被
+    /// `QishuiSigner.sign` 的 `wait(20s)` 或 `foliaDownscaleRuleList` 的
+    /// `wait(2s)` 占着 —— 主线程进不去，`setCookie` 的回调永远不来，
+    /// 5 秒后超时、`try?` 把错误吞掉，cookie 一条都没导入。
+    /// 页面的表现就是「扫码成功了，但还是未登录」。
+    ///
+    /// 现在不等待：把 cookie 一次性丢给主线程就返回。`setCookie` 本身是
+    /// 异步落盘的，页面在这之后发的请求会带上它们。
     private func importCookies() throws {
         guard let webView,
               let cookies = session.configuration.httpCookieStorage?.cookies,
@@ -7815,16 +8185,11 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
         // 被这里过滤掉之后，「壳说登录成功、页面照旧未登录」就出现了。
         // cookie 本来就是同一次登录产生的，全量搬过去成本一样，
         // 页面用不到的也不会自己带出去（域不匹配）。
-        let done = DispatchSemaphore(value: 0)
         DispatchQueue.main.async {
-            let group = DispatchGroup()
             for cookie in cookies {
-                group.enter()
-                store.setCookie(cookie) { group.leave() }
+                store.setCookie(cookie, completionHandler: nil)
             }
-            group.notify(queue: .main) { done.signal() }
         }
-        _ = done.wait(timeout: .now() + 5)
     }
 
     // MARK: - 网络
@@ -8120,12 +8485,19 @@ private final class QishuiSigner {
     }
 
     private var webView: WKWebView?
+    /// 主页面用的数据存储。签名器必须与它对齐（见 `prepare()` 的注释），
+    /// 否则在「换干净存储重建」那一路两边 localStorage 不通用，`xmst` 读不到。
+    fileprivate weak var hostStoreSource: WKWebView?
     private var loaded = false
     private var booted = false
     private var waiting: [String: (Result<String, SignError>) -> Void] = [:]
     private var queue: [(id: String, url: String)] = []
     private var seq = 0
     private let lock = NSLock()
+    /// 同一时刻只允许一条签名请求在飞（见 `sign(url:)` 的注释）。
+    /// 不设初值 1 的理由：`sign` 内部会派发到主线程，主线程上不可能重入自己，
+    /// 所以值 1 就够用，超时由 `wait(timeout:)` 兜底，不会死锁。
+    private let signGate = DispatchSemaphore(value: 1)
     /// 空闲自毁定时器：签名器是一个独立的 WebContent 进程，不用时白占内存。
     private var idleTimer: Timer?
 
@@ -8134,6 +8506,21 @@ private final class QishuiSigner {
     /// 调用方在后台线程（`QishuiBridge` 的消息处理线程），这里同步等结果：
     /// 一次扫码只有两三个请求，阻塞可控，也让上层逻辑保持直白。
     func sign(url: String) throws -> String {
+        // **总预算闸门。**
+        //
+        // `workQueue` 是串行的，而一次 `login_qr_check` 里最多会串
+        // `sign` 20s + `signedPost` 12s + `followLoginRedirect` 8s。
+        // 签名器一旦卡住（SDK 页面白屏、`signer.html` 加载失败），
+        // 每条排队请求都各自等满 20 秒 —— 五条请求就是 100 秒，
+        // 后面所有登录动作全被堵死，界面上就是「扫码后一直转圈」。
+        //
+        // 所以只让**一条**签名请求真正在飞：其余请求直接在 25 秒门槛内
+        // 排队，超时立刻回错误给页面（页面会重试），而不是把队列越堵越长。
+        let gate = signGate.wait(timeout: .now() + 25)
+        guard gate == .success else {
+            throw SignError(message: "signer busy")
+        }
+        defer { signGate.signal() }
         let box = SignBox()
         let done = DispatchSemaphore(value: 0)
         DispatchQueue.main.async { [weak self] in
@@ -8202,29 +8589,47 @@ private final class QishuiSigner {
     private func prepare() {
         if webView == nil {
             let config = WKWebViewConfiguration()
-            // 签名页独立存储，不和主页面 cookie 混在一起。
-            config.websiteDataStore = .nonPersistent()
+            // 与主页面**同一个源**：签名器要读主站的 `localStorage.xmst`，
+            // 还要让父页面能通过 `contentWindow` 与它通信。过去这里用
+            // `.nonPersistent()` + `loadFileURL`（`file://` 源），跨源直接不通。
             config.userContentController.add(WeakSignerHandler(owner: self),
                                              name: "foliaQishuiSigner")
-            let view = WKWebView(frame: CGRect(x: 0, y: 0, width: 1, height: 1),
-                                 configuration: config)
+            config.setURLSchemeHandler(QishuiSignerAssetHandler(),
+                                       forURLScheme: QishuiSignerAssets.scheme)
+            // **必须和主页面用同一个数据存储。**
+            //
+            // `sdk-glue.js` 算 `a_bogus` 时要读同源 `localStorage.xmst`；
+            // 主页面在「进程终止后换干净存储重建」那一路用的是
+            // `.nonPersistent()`（见 `makeConfiguration` 的 `forceCleanStore`），
+            // 而这里若留在默认的 `.default()`，两边就是两套 localStorage ——
+            // 签名器读到空 token，glue 生成的签名服务端一律判无效，
+            // 用户看到的就是「扫码提示成功，但页面还是未登录」。
+            config.websiteDataStore = hostStoreSource?.configuration.websiteDataStore
+                ?? WKWebsiteDataStore.default()
             // 签名器必须和真实请求用同一个 UA：SDK 会把 UA 等因素算进 `a_bogus`，
             // 两边不一致时服务端会判签名无效。
+            let view = WKWebView(frame: CGRect(x: 0, y: 0, width: 1, height: 1),
+                                 configuration: config)
             view.customUserAgent = QishuiBridge.webUA
             view.isOpaque = false
             view.backgroundColor = .clear
             webView = view
         }
-        guard !loaded, let webView,
-              let index = Bundle.main.url(forResource: "signer",
-                                          withExtension: "html",
-                                          subdirectory: "www/qishui-signer") else {
-            if !loaded { loaded = true }
+        guard let webView, let remote = URL(string: QishuiSignerAssets.pageOrigin
+                                            + QishuiSignerAssets.remotePrefix + "signer.html") else {
             return
         }
+        guard !loaded else { return }
         loaded = true
-        // `allowingReadAccessTo` 指到目录，页面才能加载同目录下的 `sdk-glue.js`。
-        webView.loadFileURL(index, allowingReadAccessTo: index.deletingLastPathComponent())
+        // 线上 `/qishui-auth-v6/signer.html` 不存在（服务器回落到 index.html），
+        // 只能从包内取。但**不能** `loadFileURL`（源变成 `file://`，读不到主站
+        // `localStorage`，父页面也 `contentWindow.postMessage` 不进来）。
+        //
+        // 正解：请求那个 https 地址，由 `decidePolicyFor` 改写到
+        // `folia-signer://`，再由 `QishuiSignerAssetHandler` 从包里回包 ——
+        // 文档虽然换了 scheme，但回包带 `Access-Control-Allow-Origin`，
+        // 父页面照样能拿到 `contentWindow` 并 `postMessage`。
+        webView.load(URLRequest(url: remote))
     }
 
     /// 调页面里的 `__foliaSign`。SDK 还没初始化完（`booted` 未到）时先排队，
@@ -8238,13 +8643,13 @@ private final class QishuiSigner {
             queue.append((id, url))
             return
         }
-        // 两个参数都编成 JSON 字符串字面量再嵌进脚本，避免网址里的引号、`&` 破坏语法。
+        // 按 `[id, url]` 编成 JSON 数组字面量，整段嵌进脚本。
+        // 网址里的引号、`&`、`#` 都由 `JSONSerialization` 转义，不会破坏语法。
         guard let data = try? JSONSerialization.data(withJSONObject: [id, url]),
-              var pair = String(data: data, encoding: .utf8) else {
+              let literals = String(data: data, encoding: .utf8) else {
             take(id: id)?(.failure(SignError(message: "signer argument error")))
             return
         }
-        pair.removeFirst(); pair.removeLast()
         let js = """
         (function(){
           var handler = window.webkit.messageHandlers.foliaQishuiSigner;
@@ -8252,7 +8657,7 @@ private final class QishuiSigner {
             handler.postMessage({ type: 'not-ready' });
             return;
           }
-          var args = [\(pair)];
+          var args = \(literals);
           var id = args[0], url = args[1];
           window.__foliaSign('GET', url).then(function(r){
             handler.postMessage({ id: id, ok: true, url: r.url });

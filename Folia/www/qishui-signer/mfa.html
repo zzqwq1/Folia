@@ -1,0 +1,84 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>汽水安全验证</title>
+  <style>
+    html, body, iframe { width: 100%; height: 100%; margin: 0; border: 0; background: #fff; }
+  </style>
+</head>
+<body>
+  <iframe id="signer" src="signer.html"></iframe>
+  <script>
+    (function () {
+      var session = new URLSearchParams(location.search).get('session') || '';
+      var frame = document.getElementById('signer');
+      var started = false;
+      var sleep = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+      var complete = async function (result) {
+        try {
+          await fetch('/__qishui-mfa-complete?session=' + encodeURIComponent(session), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(result || {})
+          });
+        } catch (_) {}
+        try {
+          parent.postMessage({ source: 'folia-mfa', type: 'complete', session: session, result: result || {} }, '*');
+        } catch (_) {}
+      };
+      var start = async function () {
+        if (started) return;
+        started = true;
+        var win = frame.contentWindow;
+        try {
+          for (var i = 0; i < 400; i += 1) {
+            if (win.__qishuiSecondVerify && win.__foliaHookReady) break;
+            await sleep(100);
+          }
+          if (!win.__qishuiSecondVerify || !win.__foliaHookReady) {
+            await complete({ status: false, message: '汽水验证组件未就绪' });
+            return;
+          }
+          var configResponse = await fetch('/__qishui-mfa-config?session=' + encodeURIComponent(session));
+          var config = await configResponse.json();
+          win.__qishuiRequest = async function (request) {
+            var signed = await win.__foliaSign(
+              request.method || 'GET', request.url, request.headers || {},
+              request.body == null ? null : request.body
+            );
+            var response = await fetch('/__qishui-proxy', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'x-folia-mfa-session': session
+              },
+              body: JSON.stringify({
+                url: signed.url,
+                method: signed.method || request.method || 'GET',
+                headers: request.headers || {},
+                body: request.body == null ? null : request.body
+              })
+            });
+            var payload = await response.json();
+            return {
+              status: Number(payload.status) || 0,
+              body: String(payload.body || ''),
+              responseURL: signed.url || '',
+              headers: ''
+            };
+          };
+          var result = await win.__qishuiSecondVerify(config.decision || {}, {
+            generalParams: config.generalParams || {}
+          });
+          await complete(result || {});
+        } catch (error) {
+          await complete({ status: false, message: String(error && error.message ? error.message : error) });
+        }
+      };
+      frame.addEventListener('load', start, { once: true });
+    })();
+  </script>
+</body>
+</html>

@@ -44,3 +44,9 @@ targets:
         ONLY_ACTIVE_ARCH: NO
         SWIFT_COMPILATION_MODE: wholemodule
         ENABLE_BITCODE: NO
+        # Apple Music 走系统 MusicKit。`import MusicKit` 会触发自动链接，
+        # 这里显式加一条只为在链接期拿到 `-framework MusicKit`，
+        # 免得 XcodeGen 生成的工程把 SDK 依赖当成隐式。
+        OTHER_LDFLAGS: "-framework MusicKit"
+    dependencies:
+      - sdk: MusicKit.framework
