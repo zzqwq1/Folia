@@ -6029,6 +6029,27 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         // 会以为「已经在轮询」而不重排，于是 `scanned → confirmed` 这一段
         // 又没人问（folia(18) 的现场）。这里先按进程死亡停表，重建后再续上。
         qishuiRelay.stopQueryPollAfterProcessDeath()
+        // **进程死在歌单页（DOM 稳定在近千节点）时，重开不再落回那一页。**
+        //
+        // folia(20).log：15:14:34 与 15:14:37 连着两次 `web content process terminated`，
+        // 两次都死在 `#playlist/…`，两次都原地重开同一个路由 —— 用户看到的就是
+        // 「进歌单 → 闪回加载界面 → 再进 → 再闪回」。
+        //
+        // 那两页的现场里没有任何异常信号：没有 `LOWMEM`、没有 gl 队列积压、
+        // 内存也够（日志里 avail 一直在 2GB 以上），进程是在 DOM 稳定之后
+        // 直接被系统拿掉的。这类页面属于「重开就等于再撞一次」，
+        // 和上面那条「60 秒内死两次」不同 —— 它是**单次**死亡，
+        // 走不到 `deathLoop`，于是原地重载的死循环没人拦。
+        // 所以单独判一次：死在重负载路由上，这次直接回首页（登录 / 搜索都在首页），
+        // 用户真想再看那个歌单，自己再点一次即可，代价只是多点一下。
+        let heavyDeath = lastCommittedURL.map { Self.isMemoryHeavy($0) } ?? false
+        // 死前那一页顺手记进重负载表：下一次（包括下一次启动）就不再往那一页落。
+        // 只记站内地址，且只有走到这里才记 —— 那是「真的被系统拿掉过」的证据。
+        if let dead = lastCommittedURL, Self.trustedSiteURL(dead) != nil {
+            Self.markMemoryHeavy(dead)
+            Self.forgetVisibleRoute(dead)
+        }
+        CrashLog.note("==== death at \(lastCommittedURL?.absoluteString ?? "-") heavy=\(heavyDeath) ====")
         // **60 秒内死两次以上，重载落回首页，不再落回死前那一页。**
         //
         // 自救机器退役之后，如果某个页面本身就会把进程顶死（folia(8).log：
@@ -6068,7 +6089,7 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         // cookie / localStorage 全保留，新页面照常读到登录态。
         let reopen = { [weak self, weak webView] in
             guard let self = self, let webView = webView else { return }
-            if deathLoop {
+            if deathLoop || heavyDeath {
                 // 熔断走重建：新实例的钉路由走 document-start 注入
                 // （见 rebuildWebView），这里挂着的旧守卫指令一并作废。
                 self.pendingPinFragment = nil
@@ -6549,11 +6570,14 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
             //     只看新增子树，读到就改、改完就不再命中；
             //   - 报页面规模 → 只在页面规模变化超过阈值时上报一次（给下一次日志留现场）。
             // 空转成本归零：没有新增节点、没有进出视口时，这段代码一次都不跑。
-            var sizeAtLastReport = 0;
+            // 初值取 -1 而不是 0：页面上真正要命的信号是「DOM 稳定在某个体量」
+            // （folia(20)：进程在 `sz dom=891` 稳定两拍后被回收，而 160→891 的增长
+            // 只有 mutation 那一侧看得到）。首次上报必须打一条，后面才按差值过滤。
+            var sizeAtLastReport = -1;
             var reportSize = function (force) {
                 try {
                     var n = document.getElementsByTagName('*').length;
-                    if (!force && Math.abs(n - sizeAtLastReport) < 200) { return; }
+                    if (!force && sizeAtLastReport >= 0 && Math.abs(n - sizeAtLastReport) < 200) { return; }
                     sizeAtLastReport = n;
                     report('sz dom=' + n
                         + ' img=' + document.images.length
@@ -6891,7 +6915,12 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
     /// 已经是目标路由，所以这里只需要把地址表编进脚本，不必按导航逐次重装。
     private static func memoryHeavyLiteral() -> String {
         let list = UserDefaults.standard.stringArray(forKey: memoryHeavyKey) ?? []
-        let quoted = list.map { "\"\($0.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\""))\"" }
+        let quoted = list.map { item -> String in
+            let esc = item
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+            return "\"" + esc + "\""
+        }
         return "[" + quoted.joined(separator: ",") + "]"
     }
 
@@ -6982,6 +7011,33 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
           } catch (e) { return String('error ' + (e && e.message)); }
         })();
         """
+        // **必须用 `callAsyncJavaScript`，不能用 `evaluateJavaScript(_:completionHandler:)`。**
+        //
+        // folia(19)/(20) 两次真机现场里，这行永远只回一句
+        // 「执行JavaScript返回结果的类型不受支持」—— 那是 WKWebView 的 completionHandler
+        // 在「结果不是 NSNumber/NSString/NSArray/NSDictionary」时给的通用错误，
+        // 而进程刚死时脚本根本没跑完，回来的就是这个。
+        // `callAsyncJavaScript` 是 iOS 14+ 的现代接口，返回值固定按值桥接，
+        // 拿不到时给的是真实错误描述（进程没了 / 实例已释放），不会再吞成一句空话。
+        if #available(iOS 14.0, *) {
+            webView?.callAsyncJavaScript(
+                "const r = (function(){" + js + "})(); return r;",
+                arguments: [:],
+                in: nil,
+                in: .page,
+                completionHandler: { result in
+                    DispatchQueue.main.async {
+                        switch result {
+                        case .success(let value):
+                            completion(value as? String ?? String(describing: value))
+                        case .failure(let error):
+                            completion(error.localizedDescription)
+                        }
+                    }
+                }
+            )
+            return
+        }
         webView?.evaluateJavaScript(js) { result, error in
             DispatchQueue.main.async {
                 completion((result as? String) ?? (error?.localizedDescription ?? "-"))
@@ -7171,6 +7227,15 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
 
     weak var webView: WKWebView?
 
+    /// 上一代进程遗留的请求是否还堵在 `workQueue` 里。
+    ///
+    /// 进程被回收时，那条正在跑的签名请求不会因为进程没了而立刻返回（它在 UI 进程
+    /// 这一侧等 `Semaphore`），于是新进程的第一发只能排在它后面。这个位在
+    /// `webViewWebContentProcessDidTerminate` 里置真，等 `workQueue` 真正空出来
+    /// （一条哨兵块被执行到）再复位。
+    private var isDrainingStaleWork = false
+    private var staleWorkEpoch = 0
+
     private let session: URLSession = {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 20
@@ -7200,6 +7265,26 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
         }
         guard let action = body["action"] as? String else { return }
         let params = body["params"] as? [String: Any] ?? [:]
+        // **进程刚重建时，页面发的第一条 `login_status` 直接回、不进串行队列。**
+        //
+        // folia(20).log 的现场：进程在 15:14:34 / 15:14:37 连死两次，
+        // 两次重建后的第一发都是 `qishui action=login_status`，之后**再也没有任何一条
+        // qishui 日志**（连 `login_qr_key` 都没来过），登录弹窗永远转圈。
+        // `workQueue` 是串行队列，上一代进程死掉时那条在途请求还卡在里面
+        // （`semaphore.wait` 最长 12 秒，加上签名 SDK 更久），
+        // 新进程的第一发只能排在它后面 —— 后面的登录请求全被堵死。
+        if action == "login_status", isDrainingStaleWork {
+            let payload: [String: Any]
+            if UserDefaults.standard.bool(forKey: Self.signedInKey) {
+                payload = ["ok": true, "data": currentUser()]
+            } else {
+                payload = ["ok": true, "data": NSNull()]
+            }
+            DispatchQueue.main.async { [weak self] in
+                self?.reply(id: id, payload: payload)
+            }
+            return
+        }
         // 每次调用都必须回一条结果。页面侧抛异常时整个 Promise 永久挂起，
         // 界面上就是「点了没反应」，所以这里不能有静默 return。
         // **串行队列替代并发队列**：perform 里要读写 pendingQR，与原生轮询、
@@ -7417,6 +7502,31 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
     /// 这次扫码；这里只是让「一拍一排」的序列随进程一起静默，
     /// 等 WebContent 重建时由 `resumePendingQRPoll()` 续上。
     func stopQueryPollAfterProcessDeath() {
+        // **先立「旧活还在排队」的牌子，再排哨兵。**
+        //
+        // 牌子立在主线程，排进 `workQueue` 的哨兵块一定排在上一代那条在途请求之后：
+        // 它被执行到的那一刻，说明串行队列真的空了，牌子才可以摘。
+        // 牌子立着期间，页面发来的 `login_status` 走直答通道绕过队列，
+        // 不会被上一条卡死的请求拖住（folia(20)：重建后登录弹窗永远转圈）。
+        let epoch: Int = {
+            if Thread.isMainThread {
+                isDrainingStaleWork = true
+                staleWorkEpoch += 1
+                return staleWorkEpoch
+            }
+            return DispatchQueue.main.sync { () -> Int in
+                self.isDrainingStaleWork = true
+                self.staleWorkEpoch += 1
+                return self.staleWorkEpoch
+            }
+        }()
+        workQueue.async { [weak self] in
+            DispatchQueue.main.async {
+                guard let self, self.staleWorkEpoch == epoch else { return }
+                self.isDrainingStaleWork = false
+                CrashLog.note("==== qishui stale work drained ====")
+            }
+        }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.nativeQRTimer?.invalidate()
