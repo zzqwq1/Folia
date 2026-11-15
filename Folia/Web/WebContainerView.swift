@@ -635,6 +635,22 @@ final class WebContainerView: UIView {
                 forMainFrameOnly: true
             ))
         }
+        // 汽水签名器 iframe 的地址改写。
+        //
+        // 页面的 `main-*.js` 里有一个常量 `Se = `${y(3213)}/qishui-auth-v6/signer.html``，
+        // 线上站这个前缀根本没部署（GET 回来的是 SPA 的 index.html），
+        // 于是签名器永远起不来、扫码确认后一直卡在「登录中」。
+        //
+        // 原生不能替某个 iframe 换页面（`WKFrameInfo` 没有 `load`），
+        // 所以必须在 iframe 发起导航**之前**把 `src` 改写掉。
+        // 这一段在 document-start 就装好 `HTMLIFrameElement.prototype.src`
+        // 的 setter 钩子，任何指向该前缀的 iframe 都会被换成 `folia-signer://`，
+        // 由 `QishuiSignerAssetHandler` 从包内 `www/qishui-signer/` 供货。
+        userContent.addUserScript(WKUserScript(
+            source: Self.signerAssetRedirectScript,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
         // 基础实例（普通冷启动）不钉路由：页面自己切到哪一屏是页面的自由。
         // 只有 `rebuildWebView` 重建时才把落脚点钉死（见 rebuildWebView 里的注入）。
         userContent.addUserScript(WKUserScript(
@@ -667,8 +683,8 @@ final class WebContainerView: UIView {
         userContent.add(qishuiRelay, name: "foliaQishui")
         // 汽水签名器：线上站的 `/qishui-auth-v6/*` 实测不存在（服务器回落到 index.html），
         // 由这里在请求层用包内文件顶替。见 `QishuiSignerAssets` 的注释。
-        configuration.setURLSchemeHandler(QishuiSignerAssetHandler(),
-                                          forURLScheme: QishuiSignerAssets.scheme)
+        config.setURLSchemeHandler(QishuiSignerAssetHandler(),
+                                   forURLScheme: QishuiSignerAssets.scheme)
         // Apple Music：线上页的 provider 把全部能力委托给这条原生通道
         // （逆向 `Xm()` 得到，见 `AppleMusicBridge`）。
         let appleMusic = AppleMusicBridge(webView: webView)
@@ -5836,12 +5852,13 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         // 只拦这几条，别的请求一律不动。
         if QishuiSignerAssets.isSignerAsset(url), let local = QishuiSignerAssets.rewrite(url) {
             CrashLog.note("==== qishui signer asset served locally: \(url.lastPathComponent) ====")
-            if let target = navigationAction.targetFrame {
-                // 子帧（页面里的签名 iframe）和顶层（隐藏签名 WebView）都改写到
-                // `folia-signer://`；scheme handler 会带
-                // `Access-Control-Allow-Origin: https://app.folia-api.top`，
-                // 父页面依然能通过 `contentWindow` 与它通信。
-                target.load(URLRequest(url: local))
+            // `WKFrameInfo` 没有 `load` —— 原生不能替某个框架换页面。
+            // 顶层（隐藏签名 WebView 自己打开 `signer.html`）可以直接让本 WebView 走
+            // `folia-signer://`；子帧（页面里那个签名 iframe）的原请求一律取消，
+            // 页面侧的 `signerAssetRedirectScript` 会在 iframe 建立前就把 `src`
+            // 改写成同一个 `folia-signer://` 地址，所以这里取消不会留下空帧。
+            if navigationAction.targetFrame?.isMainFrame ?? true {
+                webView.load(URLRequest(url: local))
             }
             decisionHandler(.cancel)
             return
@@ -6949,6 +6966,79 @@ extension WebContainerView: WKNavigationDelegate, WKUIDelegate {
         return ""
     }
 
+    /// 把页面里指向 `/qishui-auth-v6/*` 的 iframe 改写到包内签名器。
+    ///
+    /// 线上站这个前缀没有部署（GET 回来是 SPA 的 index.html），而原生的
+    /// `decidePolicyFor` 只能取消请求、不能替子框架换地址。所以在 document-start
+    /// 就钩住 `HTMLIFrameElement.prototype.src` 与 `setAttribute('src')`，
+    /// 让签名 iframe 从一开始就指向 `folia-signer://qishui-auth-v6/signer.html`。
+    ///
+    /// 为什么同源仍然成立：`QishuiSignerAssetHandler` 会给响应带上
+    /// `Access-Control-Allow-Origin: https://app.folia-api.top`，
+    /// 而 `sdk-glue.js` 算签名时只读**自己那一帧**的 `localStorage`（宿主是同一个
+    /// `WKWebsiteDataStore`，见 `QishuiSigner.prepare()`），父页面只通过
+    /// `contentWindow.postMessage` 与它通信，不读它的存储，所以跨 scheme 不影响。
+    static let signerAssetRedirectScript = """
+    (function(){
+      try {
+        var PREFIX = '/qishui-auth-v6/';
+        var SCHEME = 'folia-signer://qishui-auth-v6/';
+        function rewrite(raw) {
+          if (typeof raw !== 'string') { return null; }
+          var i = raw.indexOf(PREFIX);
+          if (i < 0) { return null; }
+          var name = raw.slice(i + PREFIX.length);
+          var q = name.indexOf('?');
+          if (q >= 0) { name = name.slice(0, q); }
+          var h = name.indexOf('#');
+          if (h >= 0) { name = name.slice(0, h); }
+          if (!/^[A-Za-z0-9_.-]+$/.test(name)) { return null; }
+          return SCHEME + name;
+        }
+        window.__foliaRewriteSignerURL = rewrite;
+        var proto = window.HTMLIFrameElement && window.HTMLIFrameElement.prototype;
+        if (!proto) { return; }
+        var desc = Object.getOwnPropertyDescriptor(proto, 'src');
+        if (desc && desc.set) {
+          Object.defineProperty(proto, 'src', {
+            configurable: true,
+            enumerable: desc.enumerable,
+            get: desc.get,
+            set: function (value) {
+              var next = rewrite(String(value));
+              desc.set.call(this, next === null ? value : next);
+            }
+          });
+        }
+        var setAttr = proto.setAttribute;
+        if (setAttr) {
+          proto.setAttribute = function (name, value) {
+            if (String(name).toLowerCase() === 'src') {
+              var next = rewrite(String(value));
+              if (next !== null) { value = next; }
+            }
+            return setAttr.call(this, name, value);
+          };
+        }
+        // 已经挂在 DOM 上的 iframe（脚本比这段早执行的极端情况）补一次。
+        var scan = function () {
+          var list = document.getElementsByTagName('iframe');
+          for (var k = 0; k < list.length; k += 1) {
+            var raw = list[k].getAttribute('src');
+            var next = rewrite(String(raw || ''));
+            if (next !== null) { list[k].setAttribute('src', next); }
+          }
+        };
+        if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', scan, { once: true });
+        } else {
+          scan();
+        }
+      } catch (e) { /* 页面未就绪就放弃，原生侧仍会取消原请求 */ }
+    })();
+    """
+
+
     /// 把「这一次启动壳要落在哪一屏」钉进 `location.hash`。
     ///
     /// 只钉**启动那一刻**：`fragment` 为 nil 时脚本什么都不做，页面自己切路由
@@ -7976,7 +8066,7 @@ private final class QishuiBridge: NSObject, WKScriptMessageHandler {
                         // 页面收到通知后会立刻发 `login_status`，而它读的是壳的
                         // signedIn 位与 currentUser()，不依赖 cookie；但后续
                         // 页面内直接的 fetch（如头像）依赖 cookie 已就位。
-                        self.webView.evaluateJavaScript(
+                        self.webView?.evaluateJavaScript(
                             "window.__foliaQishuiSignedIn && window.__foliaQishuiSignedIn();",
                             completionHandler: { _, error in
                                 if let error {

@@ -193,8 +193,8 @@ final class AppleMusicBridge: NSObject, WKScriptMessageHandler {
         let requestedOffset = Int(query["offset"] ?? "") ?? 0
         request(path: path, query: query) { result in
             switch result {
-            case .failure(let error):
-                self.reply(requestId, ["ok": false, "error": error])
+            case .failure(let failure):
+                self.reply(requestId, ["ok": false, "error": failure.code])
             case .success(let json):
                 // Apple 的资源对象本身就是 `{id, type, attributes, ...}`，
                 // 与页面 `Sh()` / `Ch()` 的读取路径完全一致，原样透传即可。
@@ -233,10 +233,10 @@ final class AppleMusicBridge: NSObject, WKScriptMessageHandler {
     private func fetchLyrics(_ requestId: String, path: String) {
         request(path: path, query: [:]) { result in
             switch result {
-            case .failure(let error):
+            case .failure(let failure):
                 // 页面 `Dh()` 对歌词的失败是「静默降级成无歌词」，只把
                 // `auth-required` 往上抛。这里照原样回错误码即可。
-                self.reply(requestId, ["ok": false, "error": error])
+                self.reply(requestId, ["ok": false, "error": failure.code])
             case .success(let json):
                 let data = (json["data"] as? [[String: Any]]) ?? []
                 let attributes = data.first?["attributes"] as? [String: Any]
@@ -254,32 +254,38 @@ final class AppleMusicBridge: NSObject, WKScriptMessageHandler {
     /// JSON 整形 + 回包跨进程。超过预算页面会直接判 `native-provider-request-timeout`，
     /// 那时连错误码都保不住，只能整页报错。
     private func request(_ path: String, query: [String: String],
-                         completion: @escaping (Result<[String: Any], String>) -> Void) {
+                         completion: @escaping (Result<[String: Any], RequestFailure>) -> Void) {
         var components = URLComponents(string: Self.apiBase + path)
         if !query.isEmpty {
             components?.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) }
         }
         guard let url = components?.url else {
-            completion(.failure("invalid-request"))
+            completion(.failure(RequestFailure(code: "invalid-request")))
             return
         }
         Task {
             do {
+                // `MusicDataRequest` 只有 `urlRequest` 这一个构造入参，
+                // GET 与超时都必须写在 request 本身上（它没有 `method` 属性）。
                 var urlRequest = URLRequest(url: url, timeoutInterval: 20)
                 urlRequest.httpMethod = "GET"
-                var dataRequest = MusicDataRequest(urlRequest: urlRequest)
-                dataRequest.method = .get
-                let response = try await dataRequest.response()
+                let response = try await MusicDataRequest(urlRequest: urlRequest).response()
                 guard let json = try JSONSerialization.jsonObject(with: response.data)
                         as? [String: Any] else {
-                    completion(.failure("invalid-response"))
+                    completion(.failure(RequestFailure(code: "invalid-response")))
                     return
                 }
                 completion(.success(json))
             } catch {
-                completion(.failure(Self.classify(error)))
+                completion(.failure(RequestFailure(code: Self.classify(error))))
             }
         }
+    }
+
+    /// 回包需要的是 `String` 错误码，但 `Result` 的失败类型必须是 `Error`。
+    /// 用一个只有 `code` 的小结构包一层，避免把 `String` 直接塞进 `Result`。
+    private struct RequestFailure: Error {
+        let code: String
     }
 
     /// 页面 `wh()` 会把错误码映射成三类展示：`auth-required` / `network` / `unavailable`。
